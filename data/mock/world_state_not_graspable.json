@@ -1,19 +1,26 @@
 {
   "schema_version": "1.0.0",
   "trace_id": "tr-mock-notgraspable",
-  "stamp": { "sec": 1772000300, "nanosec": 0 },
+  "stamp": {
+    "sec": 1772000000,
+    "nanosec": 0
+  },
   "frame_id": "base",
   "objects": [
     {
       "object_id": "obj_001",
-      "class_name": "steel_can",
-      "name_ko": "캔",
-      "confidence": 0.95,
-      "position_base_mm": { "x": 441.0, "y": -15.0, "z": 55.0 },
-      "depth_valid_ratio": 0.94,
+      "class_name": "suncream",
+      "name_ko": "선크림",
+      "confidence": 0.94,
+      "position_base_mm": {
+        "x": 412.5,
+        "y": -38.0,
+        "z": 62.0
+      },
+      "depth_valid_ratio": 0.93,
       "graspable": true,
       "not_graspable_reason": "",
-      "mass_g": 210.0,
+      "mass_g": 50.0,
       "fragile": false,
       "deformable": false,
       "transparent": false,
@@ -23,32 +30,65 @@
       "grasp_candidates": [
         {
           "pose": {
-            "position": { "x": 441.0, "y": -15.0, "z": 85.0 },
-            "orientation": { "x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0 }
+            "position": {
+              "x": 412.5,
+              "y": -38.0,
+              "z": 92.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 1.0,
+              "z": 0.0,
+              "w": 0.0
+            }
           },
-          "score": 0.94,
+          "score": 0.91,
           "strategy": "heuristic_pca"
         }
       ]
     },
     {
       "object_id": "obj_005",
-      "class_name": "glass_bottle",
-      "name_ko": "유리병",
+      "class_name": "tape",
+      "name_ko": "테이프",
       "confidence": 0.86,
-      "position_base_mm": { "x": 508.0, "y": 132.0, "z": 66.0 },
-      "depth_valid_ratio": 0.21,
+      "position_base_mm": {
+        "x": 500.0,
+        "y": 205.0,
+        "z": 44.0
+      },
+      "depth_valid_ratio": 0.38,
       "graspable": false,
       "not_graspable_reason": "depth_invalid",
-      "mass_g": 380.0,
-      "fragile": true,
+      "mass_g": 80.0,
+      "fragile": false,
       "deformable": false,
       "transparent": true,
-      "profile": "fragile",
+      "profile": "normal",
       "attr_source": "yaml_seed",
       "needs_confirmation": false,
-      "grasp_candidates": []
+      "grasp_candidates": [
+        {
+          "pose": {
+            "position": {
+              "x": 500.0,
+              "y": 205.0,
+              "z": 74.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 1.0,
+              "z": 0.0,
+              "w": 0.0
+            }
+          },
+          "score": 0.41,
+          "strategy": "heuristic_pca"
+        }
+      ]
     }
   ],
-  "needs_reobserve": ["obj_005"]
+  "needs_reobserve": [
+    "obj_005"
+  ]
 }

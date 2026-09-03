@@ -39,7 +39,7 @@ async def main() -> int:
         # 1) 명령 전송
         status, body = http("POST", f"{args.url}/api/commands",
                             {"schema_version": "1.0.0",
-                             "command_text": "깨지기 쉬운 것만 왼쪽 박스로 옮겨줘"})
+                             "command_text": "투명한 것만 왼쪽 박스로 옮겨줘"})
         print(f"POST /api/commands → HTTP {status} {body}")
         if status != 202:
             return 1

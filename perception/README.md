@@ -39,5 +39,8 @@ ros2 run rqt_image_view rqt_image_view /perception/debug_image   # 다른 터미
   `/perception/world_state_raw` / `/perception/instance_masks`는 발행하지 않는다.
 - 3D 좌표는 **카메라 좌표계 mm**까지만 나온다. `DetectedObject.position_base_mm`으로 가려면
   `data/calibration/T_gripper2camera.npy` + 현재 TCP 자세로 base 변환을 붙여야 한다.
-- `config/objects.yaml`의 클래스(glass_bottle/steel_can/paper_cup)가 학습된 3종과 다르다.
-  실제 질량·profile 값을 넣어 교체해야 planner/grasp가 속성을 찾는다.
+- ~~`config/objects.yaml`의 클래스가 학습된 3종과 다르다~~ → **해소(2026-09-03, D-7)**.
+  `objects.yaml`이 `suncream`/`nail`/`tape` 3종을 담고 있다. 단 **모델 라벨은 `nail_product`이고
+  정식 `class_name`은 `nail`**이라, `node.py`가 모델 출력을 `DetectedObject.class_name`으로
+  옮길 때 `objects.yaml`의 `model_labels` 표를 반드시 지나야 한다. 안 지나면 네일이 매번
+  미확인 신규품목으로 떨어지고 fragile 프로파일이 강제된다 — 오류로 보이지 않고 느려지기만 한다.

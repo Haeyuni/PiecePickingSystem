@@ -1,19 +1,26 @@
 {
   "schema_version": "1.0.0",
   "trace_id": "tr-mock-outofworkspace",
-  "stamp": { "sec": 1772000000, "nanosec": 0 },
+  "stamp": {
+    "sec": 1772000000,
+    "nanosec": 0
+  },
   "frame_id": "base",
   "objects": [
     {
       "object_id": "obj_001",
-      "class_name": "steel_can",
-      "name_ko": "캔",
+      "class_name": "nail",
+      "name_ko": "네일",
       "confidence": 0.96,
-      "position_base_mm": { "x": 455.0, "y": 62.0, "z": 55.0 },
+      "position_base_mm": {
+        "x": 455.0,
+        "y": 62.0,
+        "z": 55.0
+      },
       "depth_valid_ratio": 0.95,
       "graspable": true,
       "not_graspable_reason": "",
-      "mass_g": 210.0,
+      "mass_g": 150.0,
       "fragile": false,
       "deformable": false,
       "transparent": false,
@@ -23,8 +30,17 @@
       "grasp_candidates": [
         {
           "pose": {
-            "position": { "x": 455.0, "y": 62.0, "z": 85.0 },
-            "orientation": { "x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0 }
+            "position": {
+              "x": 455.0,
+              "y": 62.0,
+              "z": 85.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 1.0,
+              "z": 0.0,
+              "w": 0.0
+            }
           },
           "score": 0.94,
           "strategy": "heuristic_pca"
@@ -36,7 +52,11 @@
       "class_name": "tool_case",
       "name_ko": "공구함",
       "confidence": 0.87,
-      "position_base_mm": { "x": 820.0, "y": 480.0, "z": 95.0 },
+      "position_base_mm": {
+        "x": 820.0,
+        "y": 480.0,
+        "z": 95.0
+      },
       "depth_valid_ratio": 0.81,
       "graspable": true,
       "not_graspable_reason": "",
@@ -50,8 +70,17 @@
       "grasp_candidates": [
         {
           "pose": {
-            "position": { "x": 820.0, "y": 480.0, "z": 125.0 },
-            "orientation": { "x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0 }
+            "position": {
+              "x": 820.0,
+              "y": 480.0,
+              "z": 125.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 1.0,
+              "z": 0.0,
+              "w": 0.0
+            }
           },
           "score": 0.79,
           "strategy": "heuristic_pca"

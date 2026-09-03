@@ -18,12 +18,12 @@ MOCK_DIR = ROOT / "data" / "mock"
 
 # (픽스처, 명령, 기대 상태, 추가 검사)
 CASES = [
-    ("world_state_normal", "깨지기 쉬운 것만 왼쪽 박스로 옮겨줘", "approved", "fragile_only"),
+    ("world_state_normal", "투명한 것만 왼쪽 박스로 옮겨줘", "approved", "transparent_only"),
     ("world_state_normal", "전부 왼쪽 박스로 옮겨줘", "approved", "all_three"),
     ("world_state_unknown_class", "전부 오른쪽 박스에 넣어줘", "approved", "fallback_forced"),
-    ("world_state_missing_target", "유리병을 왼쪽 박스에 넣어줘", "rejected", None),
+    ("world_state_missing_target", "선크림을 왼쪽 박스에 넣어줘", "rejected", None),
     ("world_state_not_graspable", "전부 왼쪽 박스로 옮겨줘", "approved", "excludes_obj_005"),
-    ("world_state_empty", "캔을 왼쪽 박스로 옮겨줘", "rejected", None),
+    ("world_state_empty", "네일을 왼쪽 박스로 옮겨줘", "rejected", None),
 ]
 
 
@@ -41,11 +41,11 @@ def post(url: str, payload: dict) -> tuple[int, dict]:
 
 def extra_check(name: str, world: dict, steps: list) -> str | None:
     """시나리오별 추가 검사. 문제가 있으면 사유를 반환한다."""
-    if name == "fragile_only":
-        # 유리병(fragile)만 옮겨야 한다
+    if name == "transparent_only":
+        # 테이프(transparent)만 옮겨야 한다. 현재 클래스 3종 중 투명한 것은 하나뿐이다.
         picked = {s["object_id"] for s in steps if s["skill"] == "pick"}
-        if picked != {"obj_001"}:
-            return f"fragile 물체만 집어야 하는데 {sorted(picked)}를 집었다"
+        if picked != {"obj_003"}:
+            return f"투명한 물체만 집어야 하는데 {sorted(picked)}를 집었다"
     elif name == "fallback_forced":
         # 미확인 신규 클래스도 "전부" 지시에 포함되어야 한다 (FR-05b: 확인 전이라고 빼는 게 아니라,
         # 보수적 프로파일로 다루는 것이다). 빠지면 아래 프로파일 검사가 헛통과한다.

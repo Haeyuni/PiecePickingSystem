@@ -8,12 +8,16 @@
 
 | 파일 | 시나리오 | 이 픽스처로 확인하는 것 |
 |---|---|---|
-| `world_state_normal.json` | 정상 다물체 (3종) | 일반 분류 명령이 유효한 시퀀스로 계획되는가 |
+| `world_state_normal.json` | 정상 다물체 — 실제 검출 클래스 3종 (`suncream`/`nail`/`tape`) | 일반 분류 명령이 유효한 시퀀스로 계획되는가. 셋 다 `profile: normal`이고 `transparent`는 테이프만 true다 |
 | `world_state_unknown_class.json` | 신규 클래스 포함 | `needs_confirmation=true` 물체가 `fallback`(fragile) 프로파일로 강제되는가 (FR-05b, NFR-03a). 이 물체는 일부러 `profile: normal`·`fragile: false`로 두었다 — VLM 제안값을 그대로 쓰면 테스트가 통과해버려 강제 여부를 증명하지 못한다 |
 | `world_state_missing_target.json` | 지시 대상이 없음 | 미검출 물체 지시가 시퀀스 대신 거부로 나오는가 (FR-11) |
 | `world_state_not_graspable.json` | `graspable=false` 포함 | 파지 불가 물체가 계획에서 제외되고 `needs_reobserve`에 담기는가 (FR-03) |
 | `world_state_empty.json` | 빈 목록 | 물체가 없을 때 거부 응답과 빈 상태 UI가 동작하는가 |
 | `world_state_overweight.json` | 가반하중 초과 물체 포함 (7200g) | 검증기가 가반하중(5000g)을 넘는 물체를 계획에서 막는가 (B5 평가셋). 파지 가능한 캔을 함께 둔 이유는 "무거운 것 하나 때문에 전체가 막히는지"를 같이 보기 위해서다 |
 | `world_state_out_of_workspace.json` | 작업반경 밖 물체 포함 (958mm) | 검증기가 작업반경(900mm) 밖 파지 위치를 막는가 (B5 평가셋). **LLM은 좌표를 보지 못하므로**(`grounding.describe_for_prompt`가 좌표를 넣지 않는다) 이 케이스는 프롬프트가 아니라 검증기를 시험한다 |
+
+**합성 물체 2종**: `world_state_overweight.json`의 `water_jug`(7200g)와 `world_state_out_of_workspace.json`의 `tool_case`(958mm)는 **검출 어휘에 없다**. 확정된 3종은 전부 가볍고 작업반경 안에 있어 검증기의 수치 경계를 시험할 물체가 없기 때문이다. `unknown_003`도 같은 성격이지만 그쪽은 "미확인 신규 클래스"라는 실제로 일어나는 상황을 재현한 것이다.
+
+물체 클래스는 트랙 A에서 확정된 `suncream`/`nail`/`tape`를 쓴다(개발계획.md D-7). **모델 라벨은 `nail_product`이고 `class_name`은 `nail`**이다 — 변환은 `perception/config/objects.yaml`의 `model_labels`가 담당한다.
 
 단위는 mm (인터페이스_정의서.md 1.1절). 좌표는 M0609 작업반경(900mm) 안의 임의값이다 — `world_state_out_of_workspace.json`의 `obj_007`만 예외이고, 그 픽스처는 반경을 넘기는 것이 목적이다.

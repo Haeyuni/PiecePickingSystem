@@ -7,31 +7,46 @@ profiles:
   normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
   fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
   deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
+# 현재 클래스 3종은 전부 normal이라 fragile/deformable은 직접 매핑되는 물체가 없다.
+# 지우지 않는 이유: fragile은 미확인 신규 클래스의 강제 프로파일이라 계속 쓰이고(FR-05b),
+# deformable은 클래스가 늘어날 때 되살아난다. control의 skill_params와도 짝이 맞아야 한다.
 
-# 최종 클래스 목록은 트랙 A(검출 모델 실험)에서 확정된다 (개발계획.md D-7).
-# 아래 3종은 mock 픽스처(data/mock/)와 짝을 이루는 잠정 항목이다.
+# 검출 모델의 클래스명 → 이 파일의 class_name 매핑 (개발계획.md D-7).
+#
+# 학습된 모델(model/best.pt, yolo26n-seg)의 라벨은 suncream/tape/nail_product인데,
+# 세 번째의 정식 이름은 nail이다. perception이 모델 출력을 DetectedObject.class_name으로
+# 옮길 때 **반드시 이 표를 지난다** — 안 그러면 속성 조회가 어긋나 네일이 매번 미확인
+# 신규품목으로 떨어지고, FR-05b에 따라 fragile 프로파일이 강제된다(조용히 느려질 뿐
+# 오류로는 보이지 않는다). 이름이 같은 둘도 적어 둔 이유는 모델 어휘 전체가 한눈에
+# 보여야 다음 재학습 때 빠진 것을 알아채기 때문이다.
+model_labels:
+  suncream: suncream
+  tape: tape
+  nail_product: nail
+
+# 클래스 목록은 트랙 A에서 확정됨 (2026-09-03). 속성은 사용자 확인값이다.
 objects:
-  glass_bottle:
-    name_ko: 유리병
-    mass_g: 380
-    fragile: true
-    deformable: false
-    transparent: true
-    profile: fragile
-  steel_can:
-    name_ko: 캔
-    mass_g: 210
+  suncream:
+    name_ko: 선크림
+    mass_g: 50
     fragile: false
     deformable: false
     transparent: false
     profile: normal
-  paper_cup:
-    name_ko: 종이컵
-    mass_g: 12
+  nail:
+    name_ko: 네일
+    mass_g: 150
     fragile: false
-    deformable: true
+    deformable: false
     transparent: false
-    profile: deformable
+    profile: normal
+  tape:
+    name_ko: 테이프
+    mass_g: 80
+    fragile: false
+    deformable: false
+    transparent: true      # 롤 몸체가 비쳐 보인다 — depth가 표면을 놓칠 수 있다
+    profile: normal
 
 fallback:            # DB에 없는 신규 클래스에 적용하는 보수적 기본값 (FR-05)
   mass_g: null

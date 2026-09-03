@@ -1,32 +1,48 @@
 {
   "schema_version": "1.0.0",
   "trace_id": "tr-mock-missing",
-  "stamp": { "sec": 1772000200, "nanosec": 0 },
+  "stamp": {
+    "sec": 1772000000,
+    "nanosec": 0
+  },
   "frame_id": "base",
   "objects": [
     {
       "object_id": "obj_001",
-      "class_name": "paper_cup",
-      "name_ko": "종이컵",
-      "confidence": 0.9,
-      "position_base_mm": { "x": 397.0, "y": 22.0, "z": 48.0 },
-      "depth_valid_ratio": 0.93,
+      "class_name": "tape",
+      "name_ko": "테이프",
+      "confidence": 0.89,
+      "position_base_mm": {
+        "x": 385.0,
+        "y": 118.0,
+        "z": 48.0
+      },
+      "depth_valid_ratio": 0.71,
       "graspable": true,
       "not_graspable_reason": "",
-      "mass_g": 12.0,
+      "mass_g": 80.0,
       "fragile": false,
-      "deformable": true,
-      "transparent": false,
-      "profile": "deformable",
+      "deformable": false,
+      "transparent": true,
+      "profile": "normal",
       "attr_source": "yaml_seed",
       "needs_confirmation": false,
       "grasp_candidates": [
         {
           "pose": {
-            "position": { "x": 397.0, "y": 22.0, "z": 78.0 },
-            "orientation": { "x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0 }
+            "position": {
+              "x": 385.0,
+              "y": 118.0,
+              "z": 78.0
+            },
+            "orientation": {
+              "x": 0.0,
+              "y": 1.0,
+              "z": 0.0,
+              "w": 0.0
+            }
           },
-          "score": 0.85,
+          "score": 0.83,
           "strategy": "heuristic_pca"
         }
       ]

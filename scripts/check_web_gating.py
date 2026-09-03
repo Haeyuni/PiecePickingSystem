@@ -55,7 +55,7 @@ def main() -> int:
     expect("홈 이동 중 mode", mode, "busy")
 
     status, body = http("POST", f"{base}/api/commands",
-                        {"schema_version": "1.0.0", "command_text": "캔을 왼쪽 박스로"})
+                        {"schema_version": "1.0.0", "command_text": "네일을 왼쪽 박스로"})
     expect("busy에서 명령 거부", status, 409)
     expect("거부 코드", body.get("error", {}).get("code"), "ROBOT_BUSY")
 

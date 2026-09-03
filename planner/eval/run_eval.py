@@ -35,7 +35,7 @@ TEST_SET = pathlib.Path(__file__).resolve().parent / "test_set.jsonl"
 MOCK_DIR = pathlib.Path(os.environ.get("MOCK_DIR", ROOT / "data" / "mock"))
 
 # 평가셋 자체의 버전. 케이스를 고치면 올린다 — 점수는 평가셋이 같을 때만 비교 가능하다.
-DATASET_VERSION = "eval-v2"
+DATASET_VERSION = "eval-v3"
 
 # 기대 결과에서 쓸 수 있는 키. 오타가 조용히 "검사 안 함"이 되지 않도록 화이트리스트로 막는다.
 EXPECT_KEYS = {"status", "pick_objects", "pick_objects_exclude", "pick_objects_include",

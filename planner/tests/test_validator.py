@@ -21,11 +21,11 @@ BINS = {
 def make_object(object_id="obj_001", **overrides):
     obj = {
         "object_id": object_id,
-        "class_name": "steel_can",
-        "name_ko": "캔",
+        "class_name": "nail",
+        "name_ko": "네일",
         "graspable": True,
         "not_graspable_reason": "",
-        "mass_g": 210.0,
+        "mass_g": 150.0,
         "profile": "normal",
         "needs_confirmation": False,
         "grasp_candidates": [{
