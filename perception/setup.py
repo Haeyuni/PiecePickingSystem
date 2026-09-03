@@ -26,6 +26,8 @@ setup(
     entry_points={
         'console_scripts': [
             'perception_node = perception.node:main',
+            # 검출 모델 준비 전까지 /world_state 발행자 역할 (개발계획 B4)
+            'fake_world_publisher = perception.fake_world_publisher:main',
         ],
     },
 )
