@@ -48,11 +48,14 @@ services:
     environment:
       # LLM/VLM은 OpenAI API (개발계획.md D-3). 키는 .env에 두고 이미지에 굽지 않는다
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set in .env}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
       DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-piece_picking}
     volumes:
       # 스키마·시드는 이미지 밖에 둔다 (planner/Dockerfile 주석 참조)
       - ./db/migrations:/migrations:ro
       - ./perception/config/objects.yaml:/config/objects.yaml:ro
+      # 그라운딩 대상 목적지 목록 (control이 소유하는 파일을 읽기 전용으로 공유)
+      - ./control/config/bins.yaml:/config/bins.yaml:ro
       # 캘리브레이션 결과 등 공용 데이터 (개발계획.md D-2)
       - ./data:/data:ro
     ports:

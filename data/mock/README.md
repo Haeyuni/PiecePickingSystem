@@ -9,7 +9,7 @@
 | 파일 | 시나리오 | 이 픽스처로 확인하는 것 |
 |---|---|---|
 | `world_state_normal.json` | 정상 다물체 (3종) | 일반 분류 명령이 유효한 시퀀스로 계획되는가 |
-| `world_state_unknown_class.json` | 신규 클래스 포함 | `needs_confirmation=true` 물체가 `fallback`(fragile) 프로파일로 강제되는가 (FR-05b, NFR-03a) |
+| `world_state_unknown_class.json` | 신규 클래스 포함 | `needs_confirmation=true` 물체가 `fallback`(fragile) 프로파일로 강제되는가 (FR-05b, NFR-03a). 이 물체는 일부러 `profile: normal`·`fragile: false`로 두었다 — VLM 제안값을 그대로 쓰면 테스트가 통과해버려 강제 여부를 증명하지 못한다 |
 | `world_state_missing_target.json` | 지시 대상이 없음 | 미검출 물체 지시가 시퀀스 대신 거부로 나오는가 (FR-11) |
 | `world_state_not_graspable.json` | `graspable=false` 포함 | 파지 불가 물체가 계획에서 제외되고 `needs_reobserve`에 담기는가 (FR-03) |
 | `world_state_empty.json` | 빈 목록 | 물체가 없을 때 거부 응답과 빈 상태 UI가 동작하는가 |
