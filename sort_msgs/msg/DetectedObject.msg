@@ -6,7 +6,7 @@ string class_name               # 예: glass_bottle
 string name_ko                  # 예: 유리병
 float32 confidence
 
-geometry_msgs/Point position_base_m    # base 좌표계 3D 위치
+geometry_msgs/Point position_base_mm   # base 좌표계 3D 위치. 단위 mm (인터페이스_정의서 1.1절)
 
 float32 depth_valid_ratio      # 낮으면 투명/반사 의심 (8단계 확장에서 활용)
 bool graspable

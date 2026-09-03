@@ -34,6 +34,10 @@ services:
   planner:
     build: ./planner
     depends_on: [db]
+    environment:
+      # LLM/VLM은 OpenAI API (개발계획.md D-3). 키는 .env에 두고 이미지에 굽지 않는다
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?set in .env}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-piece_picking}
 
   control:
     build: ./control

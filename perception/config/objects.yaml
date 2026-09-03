@@ -1,5 +1,7 @@
 # 물체 속성 마스터의 초기값(seed). 런타임에는 DB object_attributes 테이블로 옮겨져 갱신된다.
-# 참조: 인터페이스_정의서.md 5.1절
+# 참조: 인터페이스_정의서.md 5.1절 / 단위 규칙은 1.1절 (길이 mm, 힘 N)
+# TODO: approach_speed의 단위가 미확정이다 — mm/s인지 최대속도 대비 비율(0~1)인지 정해야 한다.
+#       mm 통일 결정(1.1절) 이후에도 이 값만 해석이 열려 있으므로 control 착수 전 확정할 것.
 
 profiles:
   normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }

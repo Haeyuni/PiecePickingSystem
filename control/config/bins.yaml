@@ -1,10 +1,12 @@
 # 분류 목적지 정의. 캘리브레이션 단계에서 실측해 고정한다.
+# 좌표 단위는 mm (인터페이스_정의서.md 1.1절). 회전은 쿼터니언.
 # 참조: 인터페이스_정의서.md 5.2절
+# TODO: 아래 값은 placeholder — calibration/measure_bins.py로 실측해 교체 (개발계획.md 5.2절)
 
 bins:
   left_box:
     name_ko: 왼쪽 박스
-    pose: { x: 0.35, y: 0.25, z: 0.05, qx: 0, qy: 0, qz: 0, qw: 1 }
+    pose: { x: 350, y: 250, z: 50, qx: 0, qy: 0, qz: 0, qw: 1 }
   right_box:
     name_ko: 오른쪽 박스
-    pose: { x: 0.35, y: -0.25, z: 0.05, qx: 0, qy: 0, qz: 0, qw: 1 }
+    pose: { x: 350, y: -250, z: 50, qx: 0, qy: 0, qz: 0, qw: 1 }

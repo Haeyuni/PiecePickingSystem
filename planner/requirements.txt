@@ -1,3 +1,12 @@
-# TODO: 버전 고정 (LLM/VLM SDK, FastAPI, DB 클라이언트 등)
+# TODO: 버전 고정 (착수 시점에 pip freeze로 확정)
 fastapi
 uvicorn
+
+# LLM/VLM — OpenAI API (개발계획.md D-3). 키는 .env의 OPENAI_API_KEY
+openai
+
+# 구조화 출력 스키마 정의 (planner/src/schema.py)
+pydantic
+
+# DB (시스템명세서 2절, PostgreSQL 16)
+psycopg[binary]
