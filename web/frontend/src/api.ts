@@ -27,6 +27,18 @@ export function sendCommand(commandText: string) {
   })
 }
 
+export interface TraceSummary {
+  trace_id: string
+  command_text: string
+  validation_status: 'approved' | 'rejected' | null
+  running: boolean
+}
+
+/** 최근 trace 목록. 새로고침으로 trace_id를 잃었을 때 화면이 스스로 복구하는 데 쓴다. */
+export function getRecentTraces(limit = 5) {
+  return request<{ items: TraceSummary[] }>(`/api/traces?limit=${limit}`)
+}
+
 export function getTrace(traceId: string) {
   return request<Trace>(`/api/traces/${traceId}`)
 }
