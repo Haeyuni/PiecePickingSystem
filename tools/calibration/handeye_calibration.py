@@ -8,7 +8,7 @@ from scipy.spatial.transform import Rotation
 # 읽어야 하므로 calibration/ 안이 아니라 data/ 아래에 둔다 (개발계획.md D-2).
 HANDEYE_PATH = os.environ.get(
     "HANDEYE_PATH",
-    os.path.join(os.path.dirname(__file__), "..", "data", "calibration", "T_gripper2camera.npy"),
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "calibration", "T_gripper2camera.npy"),
 )
 
 def get_robot_pose_matrix(x, y, z, rx, ry, rz):

@@ -251,6 +251,9 @@ web/frontend/node_modules/
 web/frontend/dist/
 web/frontend/.next/
 
+# 웹 백엔드의 ament Python 메타데이터
+web/backend/*.egg-info/
+
 # Docker Compose 로컬 오버라이드/환경변수
 docker-compose.override.yml
 .env.*
@@ -265,4 +268,3 @@ label_studio_data/
 *.npy
 # 예외: hand-eye 결과는 256B이고 모든 서비스의 좌표 변환 기준값이라 버전관리한다 (개발계획.md D-2)
 !data/calibration/T_gripper2camera.npy
-

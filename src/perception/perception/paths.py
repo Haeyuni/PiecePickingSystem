@@ -42,9 +42,9 @@ def find_repo_path(*parts: str, env_var: str | None = None) -> pathlib.Path:
 
     for parent in here.parents:                       # colcon 설치본
         if parent.name == "install":
-            for found in sorted((parent.parent / "src").glob(f"*/{relative}")):
-                if found.exists():
-                    return found
+            workspace_path = parent.parent / relative
+            if workspace_path.exists():
+                return workspace_path
             break
 
     hint = f"{env_var} 환경변수" if env_var else "절대경로 파라미터"

@@ -79,7 +79,7 @@ class PerceptionNode(Node):
         self._require_pose = bool(self.get_parameter("require_robot_pose").value)
 
         model_path = self.get_parameter("model_path").value or str(
-            find_repo_path("model", "best.pt", env_var="PERCEPTION_MODEL"))
+            find_repo_path("models", "best.pt", env_var="PERCEPTION_MODEL"))
         from ultralytics import YOLO      # import 비용이 커서 노드 생성 시점에만 낸다
 
         self._model = YOLO(model_path)
@@ -95,6 +95,7 @@ class PerceptionNode(Node):
         self._saved_unknown_crops: set[str] = set()
 
         self._color = None
+        self._color_stamp = None
         self._depth = None
         self._intrinsics = None
         self._observation_count = 0
@@ -120,6 +121,10 @@ class PerceptionNode(Node):
     # --- 입력 ---------------------------------------------------------------
     def _on_color(self, msg: Image) -> None:
         self._color = image_to_numpy(msg)
+        # 관측 시각을 함께 들고 있는다. 발행 시각이 아니라 **이 프레임이 찍힌 시각**이
+        # WorldState.stamp가 되어야 grasp가 같은 depth 프레임을 다시 찾을 수 있다
+        # (ROS 관례이기도 하다 — stamp는 데이터 취득 시각이다).
+        self._color_stamp = msg.header.stamp
 
     def _on_depth(self, msg: Image) -> None:
         self._depth = image_to_numpy(msg)
@@ -145,7 +150,8 @@ class PerceptionNode(Node):
                                      device=self._device, verbose=False)[0]
         detections = self._build_detections(result, color, depth, base2gripper)
 
-        stamp = self.get_clock().now().to_msg()
+        # 관측 시각(컬러 프레임의 stamp). 아직 못 받았으면 현재 시각으로 대신한다.
+        stamp = self._color_stamp or self.get_clock().now().to_msg()
         self._observation_count += 1
         # trace_id는 web이 명령 접수 시 발급한다(인터페이스_정의서 1절). perception은 명령과
         # 무관하게 주기 발행하므로 발급받을 trace가 없어 관측 일련번호를 넣는다. web은 명령을

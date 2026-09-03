@@ -1,0 +1,24 @@
+# 파지 후보 생성 파라미터. 단위 mm (인터페이스_정의서.md 1.1절).
+#
+# 그리퍼 물성이지 물체 속성이 아니므로 objects.yaml/skill_params.yaml과 분리한다 —
+# 저쪽은 "무엇을 어떻게 다룰지"이고 여기는 "손이 어디까지 벌어지는지"다.
+
+gripper:
+  # OnRobot RG2. calibration/onrobot.py의 max_width=1100(0.1mm 단위)과 같은 값이다.
+  max_opening_mm: 110.0
+  # 이보다 얇으면 손가락이 물체를 스치고 지나가기 쉽다 — 후보에서 빼지 않고 점수만 낮춘다.
+  min_width_mm: 5.0
+
+strategy:
+  # sort_msgs/GraspCandidate.msg의 STRATEGY_* 중 하나.
+  # 학습 기반 전략은 가중치·CUDA 환경이 붙어야 등록된다 (strategies/__init__.py).
+  name: heuristic_pca
+
+heuristic_pca:
+  min_points: 80              # 이보다 적으면 축이 잡음에 흔들린다 — 후보를 내지 않는다
+  top_surface_band_mm: 15.0   # 윗면으로 볼 두께. depth 잡음 한 점이 파지 높이가 되지 않게 한다
+  grasp_depth_mm: 8.0         # 윗면보다 이만큼 내려가서 잡는다 (스치지 않도록)
+
+pointcloud:
+  z_percentile: 2.0           # 마스크가 배경으로 새어 나온 깊이 양끝을 자른다
+  max_radius_mm: 250.0        # 중앙값에서 이보다 먼 점은 같은 물체로 보지 않는다

@@ -16,11 +16,11 @@
 
 ## 미구현
 
-- `measure_bins.py`: `control/config/bins.yaml` 좌표 실측
+- `measure_bins.py`: `src/control/config/bins.yaml` 좌표 실측
 
 ## 산출물
 
-- `../data/calibration/T_gripper2camera.npy`: hand-eye 결과. 모든 서비스의 좌표 변환 기준값이라 저장소 루트의 `data/calibration/`에 두고 **버전관리한다**(`.gitignore`의 `*.npy` 규칙에 예외 등록). 경로는 `HANDEYE_PATH` 환경변수로 덮어쓸 수 있다
+- `data/calibration/T_gripper2camera.npy`: hand-eye 결과. 모든 서비스의 좌표 변환 기준값이라 저장소 루트의 `data/calibration/`에 두고 **버전관리한다**(`.gitignore`의 `*.npy` 규칙에 예외 등록). 경로는 `HANDEYE_PATH` 환경변수로 덮어쓸 수 있다
 - `data/`: 캘리브레이션 촬영본과 포즈 기록 (로컬 전용)
 
 단위는 mm 기준이다 — 로봇 `posx`, hand-eye 결과, 시스템 전 계층이 동일 (`docs/인터페이스_정의서.md` 1.1절).

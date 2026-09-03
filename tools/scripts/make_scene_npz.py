@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RealSense 라이브 프레임 + model/best.pt(YOLO11-seg)로 비교용 scene_XXX.npz를 만든다.
+"""RealSense 라이브 프레임 + models/best.pt(YOLO11-seg)로 비교용 scene_XXX.npz를 만든다.
 
   source /opt/ros/jazzy/setup.bash
   .venv/bin/python scripts/make_scene_npz.py --list                  # 지금 뭐가 보이는지만 확인
@@ -23,8 +23,8 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_MODEL = ROOT / 'model' / 'best.pt'
+ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_MODEL = ROOT / 'models' / 'best.pt'
 DEFAULT_OUT = ROOT / 'data' / 'scenes'
 
 

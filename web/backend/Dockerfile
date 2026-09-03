@@ -10,7 +10,7 @@
 # 때문이다. ROS2를 아는 코드는 web/ros_bridge.py 하나뿐이고 MOCK_MODE=0일 때만 로드된다.
 #
 # **빌드 컨텍스트는 저장소 루트다** (docker-compose.yml의 context: .). sort_msgs를
-# 이미지 안에서 빌드해야 하는데 그 패키지가 web/ 밖에 있기 때문이다.
+# 이미지 안에서 빌드해야 하는데 그 패키지가 web/backend 밖에 있기 때문이다.
 
 # --- 1단계: 프론트엔드 빌드 -------------------------------------------------
 FROM node:20-alpine AS frontend
@@ -26,7 +26,7 @@ RUN npm run build
 # web이 필요한 것은 메시지·액션 타입뿐이다.
 FROM ros:jazzy-ros-base AS msgs
 WORKDIR /ros2_ws
-COPY sort_msgs/ src/sort_msgs/
+COPY src/sort_msgs/ src/sort_msgs/
 RUN . /opt/ros/jazzy/setup.sh && colcon build --packages-select sort_msgs
 
 # --- 3단계: 런타임 ----------------------------------------------------------
@@ -41,16 +41,16 @@ WORKDIR /app
 # control/perception 노드는 CycloneDDS로 뜬다. 서로 다른 RMW끼리는 **토픽 목록은 보이지만
 # 데이터가 흐르지 않는다** — B4 검증에서 실제로 겪은 증상이다(`ros2 topic list`에
 # /world_state가 뜨는데 구독 콜백이 한 번도 안 불림). RMW는 시스템 전체가 같아야 한다.
-COPY web/requirements.txt .
+COPY web/backend/requirements.txt .
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-pip ros-jazzy-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 COPY --from=msgs /ros2_ws/install /ros2_ws/install
-COPY web/web/ ./web/
+COPY web/backend/web/ ./web/
 COPY --from=frontend /build/dist ./frontend_dist
-COPY web/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY web/backend/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV PYTHONUNBUFFERED=1 \

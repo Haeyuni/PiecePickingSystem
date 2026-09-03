@@ -1,6 +1,5 @@
 # 서비스 개요는 시스템명세서.md 5.2절 참조.
-# 빌드 컨텍스트는 저장소 루트 기준 각 패키지 폴더를 직접 가리킨다
-# (별도 services/ 상위 폴더 없음 — ROS2 워크스페이스 src/ 하위 구조와 일치시킨다).
+# ROS2 패키지는 src/, 웹 애플리케이션은 web/, 독립 서비스는 services/ 아래에 둔다.
 # 환경변수는 .env에서 읽는다 (.env.example 참조).
 #
 # B0 시점에 뜨는 것은 db + planner다. web/perception/grasp/control의 이미지는
@@ -26,7 +25,7 @@ services:
       retries: 20
 
   perception:
-    build: ./perception
+    build: ./src/perception
     depends_on: [db]
     deploy:
       resources:
@@ -35,7 +34,7 @@ services:
             - capabilities: [gpu]
 
   grasp:
-    build: ./grasp
+    build: ./src/grasp
     depends_on: [perception]
     deploy:
       resources:
@@ -44,7 +43,7 @@ services:
             - capabilities: [gpu]
 
   planner:
-    build: ./planner
+    build: ./services/planner
     depends_on:
       db:
         condition: service_healthy
@@ -54,11 +53,11 @@ services:
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
       DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-piece_picking}
     volumes:
-      # 스키마·시드는 이미지 밖에 둔다 (planner/Dockerfile 주석 참조)
-      - ./db/migrations:/migrations:ro
-      - ./perception/config/objects.yaml:/config/objects.yaml:ro
+      # 스키마·시드는 이미지 밖에 둔다 (services/planner/Dockerfile 주석 참조)
+      - ./database/migrations:/migrations:ro
+      - ./src/perception/config/objects.yaml:/config/objects.yaml:ro
       # 그라운딩 대상 목적지 목록 (control이 소유하는 파일을 읽기 전용으로 공유)
-      - ./control/config/bins.yaml:/config/bins.yaml:ro
+      - ./src/control/config/bins.yaml:/config/bins.yaml:ro
       # 캘리브레이션 결과 등 공용 데이터 (개발계획.md D-2)
       - ./data:/data:ro
     ports:
@@ -71,15 +70,15 @@ services:
       start_period: 10s
 
   control:
-    build: ./control
+    build: ./src/control
     network_mode: host   # DDS 통신 단순화
 
   # mock 모드 web (B2~B3). 브리지 네트워크에서 planner/db를 서비스 이름으로 부른다.
   web:
     build:
-      # 컨텍스트가 저장소 루트인 이유는 web/Dockerfile 주석 참조 (sort_msgs를 함께 빌드)
+      # 컨텍스트가 저장소 루트인 이유는 web/backend/Dockerfile 주석 참조 (sort_msgs를 함께 빌드)
       context: .
-      dockerfile: web/Dockerfile
+      dockerfile: web/backend/Dockerfile
     depends_on:
       db:
         condition: service_started
@@ -107,7 +106,7 @@ services:
     profiles: ["ros"]
     build:
       context: .
-      dockerfile: web/Dockerfile
+      dockerfile: web/backend/Dockerfile
     network_mode: host
     depends_on:
       db:
@@ -120,7 +119,7 @@ services:
       MOCK_MODE: "0"
       # 호스트의 control/perception 노드와 같은 도메인이어야 서로 보인다
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
-      # RMW는 시스템 전체가 같아야 한다 (web/Dockerfile 주석). 호스트 노드도 CycloneDDS다.
+      # RMW는 시스템 전체가 같아야 한다 (web/backend/Dockerfile 주석). 호스트 노드도 CycloneDDS다.
       CYCLONEDDS_URI: file:///cyclonedds/cyclonedds.xml
     volumes:
       - ./data:/data:ro

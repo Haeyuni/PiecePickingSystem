@@ -9,7 +9,7 @@
 build/
 install/
 log/
-model/
-training/
+models/
+tools/training/
 docs/
 .env
