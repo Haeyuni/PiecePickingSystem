@@ -12,8 +12,8 @@
 │   ├── grasp/
 │   ├── perception/
 │   └── sort_msgs/
+│   └── web/              # FastAPI 및 ROS2 브리지
 ├── web/
-│   ├── backend/          # FastAPI 및 ROS2 브리지
 │   └── frontend/         # Vite UI
 ├── services/planner/     # ROS2와 분리된 계획 API
 ├── database/migrations/  # PostgreSQL 스키마
@@ -23,11 +23,11 @@
 └── docs/
 ```
 
-ROS2 패키지는 다음으로 빌드한다. 웹 백엔드는 ROS2 브리지를 포함하므로 별도 base path로 함께 지정한다.
+ROS2 패키지는 모두 `src/` 아래에 있다.
 
 ```bash
 cd /ros2_ws
-colcon build --base-paths src web/backend
+colcon build
 ```
 
 컨테이너 서비스는 저장소 루트에서 실행한다.

@@ -252,7 +252,7 @@ web/frontend/dist/
 web/frontend/.next/
 
 # 웹 백엔드의 ament Python 메타데이터
-web/backend/*.egg-info/
+src/web/*.egg-info/
 
 # Docker Compose 로컬 오버라이드/환경변수
 docker-compose.override.yml
