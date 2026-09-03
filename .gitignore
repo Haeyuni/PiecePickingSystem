@@ -243,6 +243,8 @@ weights/
 data/samples/*
 !data/samples/.gitkeep
 data/unknown_crops/
+data/scenes/*
+!data/scenes/.gitkeep
 
 # web/frontend 빌드 산출물
 web/frontend/node_modules/
