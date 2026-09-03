@@ -10,3 +10,6 @@ pydantic
 
 # DB (시스템명세서 2절, PostgreSQL 16)
 psycopg[binary]
+
+# objects.yaml 시드 로딩 (planner/src/seed.py)
+pyyaml

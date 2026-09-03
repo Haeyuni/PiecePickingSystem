@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0.0",
+  "trace_id": "tr-mock-empty",
+  "stamp": { "sec": 1772000400, "nanosec": 0 },
+  "frame_id": "base",
+  "objects": [],
+  "needs_reobserve": []
+}

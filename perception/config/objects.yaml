@@ -8,6 +8,8 @@ profiles:
   fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
   deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
 
+# 최종 클래스 목록은 트랙 A(검출 모델 실험)에서 확정된다 (개발계획.md D-7).
+# 아래 3종은 mock 픽스처(data/mock/)와 짝을 이루는 잠정 항목이다.
 objects:
   glass_bottle:
     name_ko: 유리병
@@ -16,6 +18,20 @@ objects:
     deformable: false
     transparent: true
     profile: fragile
+  steel_can:
+    name_ko: 캔
+    mass_g: 210
+    fragile: false
+    deformable: false
+    transparent: false
+    profile: normal
+  paper_cup:
+    name_ko: 종이컵
+    mass_g: 12
+    fragile: false
+    deformable: true
+    transparent: false
+    profile: deformable
 
 fallback:            # DB에 없는 신규 클래스에 적용하는 보수적 기본값 (FR-05)
   mass_g: null

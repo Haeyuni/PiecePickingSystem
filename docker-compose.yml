@@ -1,7 +1,10 @@
 # 서비스 개요는 시스템명세서.md 5.2절 참조.
 # 빌드 컨텍스트는 저장소 루트 기준 각 패키지 폴더를 직접 가리킨다
 # (별도 services/ 상위 폴더 없음 — ROS2 워크스페이스 src/ 하위 구조와 일치시킨다).
-# TODO: .env, 볼륨 마운트 경로는 착수 시점에 확정
+# 환경변수는 .env에서 읽는다 (.env.example 참조).
+#
+# B0 시점에 뜨는 것은 db + planner다. web/perception/grasp/control의 이미지는
+# 각 계층 착수 시점에 채운다 (개발계획.md 4.2절).
 
 services:
   db:
@@ -12,6 +15,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # planner가 마이그레이션을 돌리기 전에 DB가 실제 쿼리를 받을 수 있어야 한다
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-piece_picking} -d ${POSTGRES_DB:-piece_picking}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
 
   perception:
     build: ./perception
@@ -33,11 +42,27 @@ services:
 
   planner:
     build: ./planner
-    depends_on: [db]
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       # LLM/VLM은 OpenAI API (개발계획.md D-3). 키는 .env에 두고 이미지에 굽지 않는다
       OPENAI_API_KEY: ${OPENAI_API_KEY:?set in .env}
       DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-piece_picking}
+    volumes:
+      # 스키마·시드는 이미지 밖에 둔다 (planner/Dockerfile 주석 참조)
+      - ./db/migrations:/migrations:ro
+      - ./perception/config/objects.yaml:/config/objects.yaml:ro
+      # 캘리브레이션 결과 등 공용 데이터 (개발계획.md D-2)
+      - ./data:/data:ro
+    ports:
+      - "8100:8100"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8100/health').status==200 else 1)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   control:
     build: ./control
@@ -45,7 +70,17 @@ services:
 
   web:
     build: ./web
-    depends_on: [db, planner]
+    depends_on:
+      db:
+        condition: service_started
+      planner:
+        condition: service_healthy
+    environment:
+      PLANNER_URL: http://planner:8100
+      DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-piece_picking}
+      MOCK_MODE: ${MOCK_MODE:-1}
+    volumes:
+      - ./data:/data:ro
     ports:
       - "8000:8000"
 
