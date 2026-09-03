@@ -33,12 +33,43 @@ ros2 run rqt_image_view rqt_image_view /perception/debug_image   # 다른 터미
 #   창을 직접 띄우려면 --show
 ```
 
+## perception 노드 실행
+
+```bash
+source /opt/ros/jazzy/setup.bash && source ~/cobot2_ws/install/setup.bash
+ros2 launch perception perception_launch.py        # .venv 인터프리터로 뜬다
+```
+
+launch가 `.venv/bin/python`을 prefix로 붙인다 — `ros2 run`이 만드는 스크립트는 시스템
+파이썬 셔뱅이라 ultralytics를 못 찾는다. 직접 띄우려면:
+
+```bash
+DATABASE_URL=postgresql://... .venv/bin/python -m perception.node
+```
+
+**필요한 것**: 카메라(`realsense2_camera`)와 로봇 드라이버가 떠 있어야 한다. 로봇 드라이버가
+필요한 이유는 카메라가 그리퍼에 붙어 있어서(eye-in-hand) base 좌표 변환에 현재 TCP 자세가
+들어가기 때문이다 — `get_current_posx` 서비스를 부른다. `DATABASE_URL`은 없어도 동작하며,
+그때는 `objects.yaml` seed 값을 쓴다.
+
+주요 파라미터: `conf`(0.25), `period_s`(0.5), `min_depth_valid_ratio`(0.35),
+`pose_max_age_s`(1.0), `require_robot_pose`(true).
+
+검증: `python3 scripts/check_perception.py` — 발행 내용이 인터페이스 계약을 지키는지 본다
+(두 토픽의 stamp 짝, 마스크 형식·해상도, 좌표계, 속성 일치, object_id 유지).
+
 ## 아직 안 된 것
 
-- `perception/perception/node.py`는 여전히 스텁이다. 위 스크립트는 **모델 검증용 임시 도구**이고
-  `/perception/world_state_raw` / `/perception/instance_masks`는 발행하지 않는다.
-- 3D 좌표는 **카메라 좌표계 mm**까지만 나온다. `DetectedObject.position_base_mm`으로 가려면
-  `data/calibration/T_gripper2camera.npy` + 현재 TCP 자세로 base 변환을 붙여야 한다.
+- ~~`node.py`가 스텁이다~~ → **구현 완료**. 위 세 스크립트는 여전히 모델 검증용 임시 도구다
+  (노드를 띄우지 않고 가중치만 확인할 때 쓴다).
+- ~~3D 좌표가 카메라 좌표계까지만 나온다~~ → **base 좌표 변환 구현**(`geometry.py`).
+- **`grasp`가 아직 스텁이라 `/world_state`가 나오지 않는다.** perception은
+  `/perception/world_state_raw`까지만 낸다(릴레이 구조, 인터페이스_정의서 2.0절). planner/web은
+  `/world_state`를 구독하므로, grasp가 붙기 전까지 상위 계층은 `fake_world_publisher`를 본다.
+- **좌표 정확도는 아직 실측되지 않았다.** 변환 수식이 캘리브레이션 코드와 같은 해석인지는
+  대조했고(무작위 자세 2000개, 최대 오차 5e-13mm), 정지 물체 측정의 반복 표준편차는
+  0.1~0.3mm였다. 그러나 **절대 오차**는 로봇을 두 자세로 옮겨 같은 물체가 같은 base 좌표로
+  나오는지 보거나, `calibration/verify.py`로 TCP를 실제로 보내 재야 알 수 있다.
 - ~~`config/objects.yaml`의 클래스가 학습된 3종과 다르다~~ → **해소(2026-09-03, D-7)**.
   `objects.yaml`이 `suncream`/`nail`/`tape` 3종을 담고 있다. 단 **모델 라벨은 `nail_product`이고
   정식 `class_name`은 `nail`**이라, `node.py`가 모델 출력을 `DetectedObject.class_name`으로

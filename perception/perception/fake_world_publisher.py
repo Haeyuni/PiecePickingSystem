@@ -22,38 +22,11 @@ from rclpy.node import Node
 
 from sort_msgs.msg import DetectedObject, GraspCandidate, WorldState
 
+from .paths import find_repo_path
+
 def default_mock_dir() -> pathlib.Path:
-    """`data/mock`의 위치. 소스 트리와 colcon 설치 트리 양쪽에서 찾아야 한다.
-
-    `__file__` 기준 상대경로만 쓰면 **설치본에서 조용히 깨진다** — 설치되면 이 파일은
-    `install/perception/lib/python3.12/site-packages/`로 복사되는데, 픽스처는 저장소의
-    `data/mock/`에 남아 있기 때문이다(패키지 밖 데이터라 share에 설치되지 않는다).
-    `place_server.bins_yaml_path()`가 막아 둔 것과 같은 함정이다.
-
-    픽스처를 이미지·설치본에 굽지 않는 이유는 마이그레이션·시드와 같다: 픽스처 한 줄
-    고치려고 colcon 빌드를 다시 돌릴 이유가 없다.
-    """
-    override = os.environ.get("MOCK_DIR")
-    if override:
-        return pathlib.Path(override)
-
-    here = pathlib.Path(__file__).resolve()
-    # 1) 소스에서 직접 실행: 조상 어딘가에 data/mock이 있다
-    for parent in here.parents:
-        candidate = parent / "data" / "mock"
-        if candidate.is_dir():
-            return candidate
-    # 2) colcon 설치본: 워크스페이스 루트(install/ 위)에서 src/*/data/mock을 찾는다
-    for parent in here.parents:
-        if parent.name == "install":
-            for found in sorted((parent.parent / "src").glob("*/data/mock")):
-                if found.is_dir():
-                    return found
-            break
-    raise RuntimeError(
-        "data/mock을 찾지 못했습니다. MOCK_DIR 환경변수나 "
-        "--ros-args -p mock_dir:=<경로>로 지정하세요."
-    )
+    """`data/mock`의 위치. 소스 트리와 colcon 설치 트리 양쪽에서 찾는다 (paths.find_repo_path)."""
+    return find_repo_path("data", "mock", env_var="MOCK_DIR")
 
 
 def _pose(data: dict) -> Pose:

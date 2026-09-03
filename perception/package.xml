@@ -16,6 +16,10 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sort_msgs</depend>
+  <depend>std_msgs</depend>
+  <!-- 현재 TCP 자세(get_current_posx 서비스). eye-in-hand 변환에 필요하다 —
+       robot_pose.py 주석 참조. DSR_ROBOT2 API가 아니라 서비스만 쓴다. -->
+  <depend>dsr_msgs2</depend>
 
   <export>
     <build_type>ament_python</build_type>
