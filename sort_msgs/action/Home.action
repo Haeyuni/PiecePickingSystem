@@ -1,0 +1,28 @@
+# 홈 자세 복귀. 자연어 해석·그라운딩이 필요 없는 결정적 동작이라 planner를 거치지 않고
+# web이 직접 호출한다 (웹_인터페이스_정의서.md 2.6절).
+#
+# **서비스가 아니라 액션인 이유**: 2.6절은 정지(`/api/robot/stop`)를 "mode와 무관하게 항상
+# 허용되는 유일한 엔드포인트"로 규정한다. 정지는 진행 중인 액션 goal을 취소하는 방식으로
+# 구현되므로, 홈이동이 서비스였다면 **한번 시작하면 멈출 수 없는 모션**이 된다.
+# 홈이동도 수 초간 로봇을 움직이는 동작이라 그 예외를 만들 이유가 없다.
+#
+# trace_id가 없는 이유: LLM 계획 대상이 아니라 요청 추적 계층(1절)에 편입되지 않는다.
+# request_id는 남긴다 — 재전송 시 중복 실행 방지는 추적 계층과 무관한 전송 계층의 계약이다.
+
+# --- Goal ---
+string schema_version
+string request_id
+---
+# --- Result ---
+bool success
+
+string REASON_NONE=none
+string REASON_UNREACHABLE=unreachable
+string REASON_COLLISION_EXPECTED=collision_expected
+string failure_reason
+
+float32 cycle_time_ms
+---
+# --- Feedback ---
+string PHASE_MOVING=moving
+string phase

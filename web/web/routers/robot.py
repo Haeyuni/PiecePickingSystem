@@ -4,6 +4,7 @@
 `trace_id`/`sequence_id`를 발급하지 않지만, `execution_logs`에는 남겨 이력 화면에서
 분류 작업과 시간순으로 같이 보이게 한다.
 """
+import asyncio
 import logging
 
 from fastapi import APIRouter, Request
@@ -31,9 +32,29 @@ async def stop(request: Request):
     return {"schema_version": "1.0.0", "stopped": True, "cancelled_request_id": cancelled}
 
 
+async def _run_home(executor) -> None:
+    """홈 이동을 끝까지 수행하고 이력을 남긴다. 백그라운드 태스크로 실행된다."""
+    try:
+        await executor.home()
+        store.insert_execution_log(skill_name="home", result="success")
+    except Exception as e:
+        logger.exception("홈 이동 실패")
+        store.insert_execution_log(skill_name="home", result="failure",
+                                   failure_reason=str(e)[:200])
+
+
 @router.post("/api/robot/home")
 async def home(request: Request):
-    """동작 중 홈이동은 위험하므로 idle일 때만 허용한다(2.1절과 같은 차단 규칙)."""
+    """동작 중 홈이동은 위험하므로 idle일 때만 허용한다(2.1절과 같은 차단 규칙).
+
+    **모션 완료를 기다리지 않고 202를 돌려준다.** 2.6절의 202 `moving_home`은 "이동을
+    접수했다"는 뜻이지 "이동이 끝났다"가 아니다. `/api/commands`가 같은 모양이다(2.1절).
+
+    완료를 기다리면 홈 이동이 도는 동안 로봇이 busy라는 사실을 아무도 관측할 수 없다 —
+    응답이 돌아온 시점에는 이미 끝나 있기 때문이다. 그러면 2.1절 차단 규칙이 홈 이동에
+    대해서는 실질적으로 없는 것이 되고, 화면도 진행 중 표시를 띄울 수 없다.
+    실행 결과는 `execution_logs`와 `robot_state`로 확인한다.
+    """
     executor = request.app.state.executor
     mode = executor.robot_state().get("mode", "idle")
     if mode != "idle":
@@ -44,7 +65,6 @@ async def home(request: Request):
                                "message": f"로봇이 {mode} 상태라 홈 이동할 수 없습니다"}},
         )
 
-    await executor.home()
-    store.insert_execution_log(skill_name="home", result="success")
+    asyncio.create_task(_run_home(executor))
     return JSONResponse(status_code=202,
                         content={"schema_version": "1.0.0", "status": "moving_home"})

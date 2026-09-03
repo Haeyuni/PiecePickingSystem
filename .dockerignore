@@ -1,0 +1,15 @@
+# 빌드 컨텍스트는 저장소 루트다(web/Dockerfile 주석). 이미지에 들어갈 이유가 없는 것을
+# 컨텍스트 단계에서 잘라낸다 — 특히 .venv/node_modules는 호스트 경로에 묶인 산물이라
+# 이미지 안에서는 쓸 수 없고 전송 시간만 늘린다.
+.git
+.venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+build/
+install/
+log/
+model/
+training/
+docs/
+.env

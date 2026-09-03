@@ -11,13 +11,14 @@ import asyncio
 import logging
 import threading
 import time
+import uuid
 from typing import Awaitable, Callable
 
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
 
-from sort_msgs.action import Pick, PlaceInto
+from sort_msgs.action import Home, Pick, PlaceInto
 from sort_msgs.msg import RobotState, SafetyEvent, WorldState
 
 from .executor import SkillGoal, SkillResult
@@ -110,19 +111,32 @@ class _BridgeNode(Node):
 
         self.pick_client = ActionClient(self, Pick, "pick")
         self.place_client = ActionClient(self, PlaceInto, "place_into")
+        self.home_client = ActionClient(self, Home, "home")
 
     def _on_world_state(self, msg: WorldState) -> None:
         self.latest_world_state = _world_state_to_dict(msg)
 
     def _on_robot_state(self, msg: RobotState) -> None:
-        self.latest_robot_state = {
+        """최신값은 항상 갱신하고, **변화가 있을 때만** web으로 올린다.
+
+        control은 상태를 5Hz로 주기 발행한다(주기 발행이라야 구독자가 언제 붙어도 현재
+        상태를 알 수 있다). 그것을 그대로 WebSocket에 중계하면 아무 일도 일어나지 않는
+        동안에도 모든 브라우저에 초당 5건이 나간다 — 실제로 B4 E2E 로그가 동일한
+        `mode=idle` 이벤트로 뒤덮였다. 화면이 필요한 것은 전이이지 주기가 아니다.
+
+        폴백 경로(`GET /health`, `GET /api/world-state`)는 `latest_robot_state`를 읽으므로
+        방송을 줄여도 새로 접속한 화면이 상태를 못 보는 일은 없다.
+        """
+        state = {
             "schema_version": msg.schema_version,
             "mode": msg.mode,
             "current_skill": msg.current_skill,
             "gripper_width_mm": msg.gripper_width_mm,
         }
-        if self.on_event:
-            self.on_event({"type": "robot_state", **self.latest_robot_state})
+        changed = state != self.latest_robot_state
+        self.latest_robot_state = state
+        if changed and self.on_event:
+            self.on_event({"type": "robot_state", **state})
 
     def _on_safety_event(self, msg: SafetyEvent) -> None:
         # 안전 이벤트는 지연 없이 즉시 올린다(4절)
@@ -205,10 +219,12 @@ class RosExecutor:
             self._active_goal_handle = None
             self._active_request_id = None
 
+        # 액션마다 Result 필드가 다르다 (Home에는 재시도·토크 개념이 없다).
+        # 공통 필드만 직접 읽고 나머지는 getattr로 낮춘다.
         return SkillResult(
             success=result.success,
             failure_reason=result.failure_reason,
-            retries_used=result.retries_used,
+            retries_used=getattr(result, "retries_used", 0),
             cycle_time_ms=result.cycle_time_ms or (time.monotonic() - started) * 1000,
             visual_verification_passed=getattr(result, "visual_verification_passed", None),
             torque_trace=list(getattr(result, "torque_trace_summary", []) or []),
@@ -246,9 +262,25 @@ class RosExecutor:
         return request_id
 
     async def home(self) -> None:
-        # TODO(B4): control에 home 이동 인터페이스가 없다. 스킬로 추가할지 별도 서비스로 둘지
-        # control 착수 시점에 결정한다 (웹_인터페이스_정의서 2.6절).
-        raise NotImplementedError("home 이동은 control 인터페이스 확정 후 연결한다 (B4)")
+        """홈 자세 복귀 (인터페이스_정의서 4.3절 Home.action).
+
+        pick/place_into와 같은 `_send`를 지나므로 `_active_goal_handle`에 등록되고,
+        따라서 `stop()`으로 취소된다 — 홈이동이 서비스가 아니라 액션인 이유다.
+
+        `request_id`는 여기서 만든다. 홈이동은 planner를 거치지 않아 발급해 줄 상위 계층이
+        없지만, 중복 실행 방지는 control 쪽 계약이라 빈 값으로 보내면 캐시가 동작하지 않는다.
+        """
+        msg = Home.Goal()
+        msg.schema_version = SCHEMA_VERSION
+        msg.request_id = f"rq-home-{uuid.uuid4().hex[:8]}"
+
+        async def _ignore_feedback(_request_id: str, _phase: str) -> None:
+            """홈이동은 trace에 속하지 않아 중계할 진행률 화면이 없다 (2.6절)."""
+
+        result = await self._send(self._node.home_client, msg, msg.request_id,
+                                  _ignore_feedback)
+        if not result.success:
+            raise RuntimeError(f"home 이동 실패: {result.failure_reason}")
 
 
 async def _await_ros_future(ros_future):

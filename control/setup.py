@@ -25,8 +25,11 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            # 4개 노드를 한 프로세스에서 띄우는 기본 진입점 (control/main.py 주석 참조)
+            'control_node = control.main:main',
             'pick_server = control.pick_server:main',
             'place_server = control.place_server:main',
+            'home_server = control.home_server:main',
             'robot_state_publisher_node = control.robot_state_publisher:main',
             'safety_monitor = control.safety_monitor:main',
         ],

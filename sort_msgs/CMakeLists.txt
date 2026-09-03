@@ -21,6 +21,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/SafetyEvent.msg"
   "action/Pick.action"
   "action/PlaceInto.action"
+  "action/Home.action"
   DEPENDENCIES std_msgs geometry_msgs sensor_msgs builtin_interfaces
 )
 
