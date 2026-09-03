@@ -1,0 +1,12 @@
+# TODO: 버전 고정 (착수 시점에 pip freeze로 확정)
+fastapi
+uvicorn[standard]     # WebSocket 지원 포함
+
+# planner(/internal/plan) 호출
+httpx
+
+# execution_logs / object_attributes 직접 접근 (웹_인터페이스_정의서 2.5절)
+psycopg[binary]
+
+# 주의: rclpy는 여기에 없다. ROS2 환경(ros:jazzy 베이스)에서만 제공되며,
+# MOCK_MODE=0일 때 ros_bridge.py에서만 import된다 (web/Dockerfile 참조).

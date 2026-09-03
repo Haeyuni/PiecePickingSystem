@@ -19,6 +19,7 @@ MOCK_DIR = ROOT / "data" / "mock"
 # (픽스처, 명령, 기대 상태, 추가 검사)
 CASES = [
     ("world_state_normal", "깨지기 쉬운 것만 왼쪽 박스로 옮겨줘", "approved", "fragile_only"),
+    ("world_state_normal", "전부 왼쪽 박스로 옮겨줘", "approved", "all_three"),
     ("world_state_unknown_class", "전부 오른쪽 박스에 넣어줘", "approved", "fallback_forced"),
     ("world_state_missing_target", "유리병을 왼쪽 박스에 넣어줘", "rejected", None),
     ("world_state_not_graspable", "전부 왼쪽 박스로 옮겨줘", "approved", "excludes_obj_005"),
@@ -54,6 +55,13 @@ def extra_check(name: str, world: dict, steps: list) -> str | None:
         for s in steps:
             if s["object_id"] == "obj_004" and s["profile"] != "fragile":
                 return f"미확인 클래스 obj_004의 프로파일이 {s['profile']} (fragile로 강제되어야 함)"
+    elif name == "all_three":
+        # "전부"는 파지 가능한 물체를 하나도 빠뜨리지 않아야 한다. 조심스러운 속성
+        # (파손위험·투명)은 제외 사유가 아니다 — 프로파일로 다뤄질 뿐이다.
+        picked = {s["object_id"] for s in steps if s["skill"] == "pick"}
+        expected = {o["object_id"] for o in world["objects"] if o.get("graspable", True)}
+        if picked != expected:
+            return f"'전부' 지시인데 {sorted(expected - picked)}가 누락됐다 (집은 것: {sorted(picked)})"
     elif name == "excludes_obj_005":
         if any(s["object_id"] == "obj_005" for s in steps):
             return "파지 불가 물체 obj_005가 시퀀스에 포함됐다"
