@@ -4,13 +4,17 @@
 `executor.py` 어댑터를 지나며, ROS2를 아는 코드는 `ros_bridge.py` 하나뿐이다.
 """
 import logging
+import os
+import pathlib
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from . import executor as executor_mod
 from .events import hub
-from .routers import commands, confirmations, executions, live, robot, traces
+from .routers import commands, confirmations, executions, live, robot, traces, world
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -43,6 +47,7 @@ app.include_router(traces.router)
 app.include_router(executions.router)
 app.include_router(confirmations.router)
 app.include_router(robot.router)
+app.include_router(world.router)
 app.include_router(live.router)
 
 
@@ -58,6 +63,28 @@ def health():
         "world_state_objects": len(world_state.get("objects", [])) if world_state else None,
         "ws_clients": hub.client_count,
     }
+
+
+# --- 프론트엔드 정적 자산 ----------------------------------------------------
+# 라우터를 전부 등록한 뒤에 마운트한다 — SPA 폴백이 /api·/ws를 가로채면 안 된다.
+FRONTEND_DIST = pathlib.Path(os.environ.get("FRONTEND_DIST", "/app/frontend_dist"))
+
+if FRONTEND_DIST.is_dir():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{full_path:path}")
+    def spa(full_path: str):
+        """클라이언트 라우팅(/, /history)을 위한 폴백.
+
+        실제 파일이 있으면 그 파일을, 없으면 index.html을 돌려준다. 브라우저에서
+        /history를 직접 새로고침해도 404가 나지 않게 하는 부분이다.
+        """
+        candidate = FRONTEND_DIST / full_path
+        if full_path and candidate.is_file():
+            return FileResponse(candidate)
+        return FileResponse(FRONTEND_DIST / "index.html")
+else:
+    logger.warning("프론트엔드 빌드 산출물이 없습니다: %s (API만 제공)", FRONTEND_DIST)
 
 
 def main():
