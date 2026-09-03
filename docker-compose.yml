@@ -1,0 +1,49 @@
+# 서비스 개요는 시스템명세서.md 5.2절 참조.
+# 빌드 컨텍스트는 저장소 루트 기준 각 패키지 폴더를 직접 가리킨다
+# (별도 services/ 상위 폴더 없음 — ROS2 워크스페이스 src/ 하위 구조와 일치시킨다).
+# TODO: .env, 볼륨 마운트 경로는 착수 시점에 확정
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-piece_picking}
+      POSTGRES_USER: ${POSTGRES_USER:-piece_picking}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  perception:
+    build: ./perception
+    depends_on: [db]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  grasp:
+    build: ./grasp
+    depends_on: [perception]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
+  planner:
+    build: ./planner
+    depends_on: [db]
+
+  control:
+    build: ./control
+    network_mode: host   # DDS 통신 단순화
+
+  web:
+    build: ./web
+    depends_on: [db, planner]
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:

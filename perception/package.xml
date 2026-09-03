@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>perception</name>
+  <version>0.0.1</version>
+  <description>RGB-D 손목 카메라 기반 물체 검출·세그멘테이션, /perception/world_state_raw 및 /perception/instance_masks 발행</description>
+  <maintainer email="jje320594@gmail.com">jje</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_copyright</buildtool_depend>
+  <buildtool_depend>ament_flake8</buildtool_depend>
+  <buildtool_depend>ament_pep257</buildtool_depend>
+  <buildtool_depend>python3-pytest</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sort_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

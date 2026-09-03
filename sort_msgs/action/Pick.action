@@ -1,0 +1,32 @@
+# --- Goal ---
+string schema_version
+string trace_id
+string request_id
+string object_id
+string profile                 # DetectedObject.profile 값을 그대로 전달 (제어 파라미터 결정)
+geometry_msgs/Pose grasp_pose   # planner가 grasp_candidates 중 고른 것
+int32 max_retries
+---
+# --- Result ---
+bool success                    # torque 판정 AND visual_verification_passed 모두 통과해야 true
+
+string REASON_NONE=none
+string REASON_NO_CONTACT=no_contact
+string REASON_GRASP_FAILED=grasp_failed
+string REASON_UNREACHABLE=unreachable
+string REASON_COLLISION_EXPECTED=collision_expected
+string failure_reason
+
+int32 retries_used
+float32 cycle_time_ms
+float32[] torque_trace_summary  # 접촉~파지 구간 토크 변화 요약값 (원시값은 DB execution_logs로)
+
+bool visual_verification_passed   # 손목 카메라로 그리퍼 사이 물체 유무 확인 (토크만으로 못 잡는 헛파지 보완)
+string visual_verification_note   # 실패 시 사유, 예: "그리퍼 사이 빈 공간 감지". 통과 시 빈 문자열
+---
+# --- Feedback ---
+string PHASE_APPROACHING=approaching
+string PHASE_CONTACT_DETECTED=contact_detected
+string PHASE_LIFTING=lifting
+string PHASE_VERIFYING=verifying
+string phase

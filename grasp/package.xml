@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>grasp</name>
+  <version>0.0.1</version>
+  <description>포인트클라우드 기반 파지 자세 추정 (heuristic_pca / contact_graspnet / graspnet_baseline). world_state_raw+instance_masks 동기화 → /world_state 최종 발행</description>
+  <maintainer email="jje320594@gmail.com">jje</maintainer>
+  <license>TODO</license>
+
+  <buildtool_depend>ament_copyright</buildtool_depend>
+  <buildtool_depend>ament_flake8</buildtool_depend>
+  <buildtool_depend>ament_pep257</buildtool_depend>
+  <buildtool_depend>python3-pytest</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>message_filters</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sort_msgs</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

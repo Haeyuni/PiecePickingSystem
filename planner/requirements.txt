@@ -1,0 +1,3 @@
+# TODO: 버전 고정 (LLM/VLM SDK, FastAPI, DB 클라이언트 등)
+fastapi
+uvicorn

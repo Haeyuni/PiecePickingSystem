@@ -1,0 +1,31 @@
+# --- Goal ---
+string schema_version
+string trace_id
+string request_id
+string object_id
+string profile
+string bin_id                    # bins.yaml에 등록된 목적지 중 하나. LLM은 이 중에서만 선택 가능 (그라운딩)
+bool use_pose_override
+geometry_msgs/Pose pose_override  # use_pose_override=false면 무시. 1차 범위에서는 사용하지 않으며,
+                                   # 확장 단계(정렬 배치 등)에서 bin_pose 기준 정밀 자세 조정이 필요할 때 사용
+int32 max_retries
+---
+# --- Result ---
+bool success
+
+string REASON_NONE=none
+string REASON_NO_CONTACT=no_contact
+string REASON_PLACE_FAILED=place_failed
+string REASON_UNREACHABLE=unreachable
+string REASON_COLLISION_EXPECTED=collision_expected
+string failure_reason
+
+int32 retries_used
+float32 cycle_time_ms
+---
+# --- Feedback ---
+string PHASE_MOVING=moving
+string PHASE_INSERTING=inserting
+string PHASE_RELEASING=releasing
+string PHASE_VERIFYING=verifying
+string phase

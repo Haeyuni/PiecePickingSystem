@@ -1,0 +1,11 @@
+# profile별 힘/속도 파라미터 + 시각검증 상대이동값
+# 미확정 — perception/config/objects.yaml의 profiles와 일치시켜 관리 (중복 정의 주의)
+# TODO: 값 확정 (시스템명세서 미확정 항목 참조)
+
+profiles:
+  normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
+  fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
+  deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
+
+visual_verification:
+  wrist_camera_offset_m: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정)

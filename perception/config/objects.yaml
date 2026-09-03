@@ -1,0 +1,23 @@
+# 물체 속성 마스터의 초기값(seed). 런타임에는 DB object_attributes 테이블로 옮겨져 갱신된다.
+# 참조: 인터페이스_정의서.md 5.1절
+
+profiles:
+  normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
+  fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
+  deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
+
+objects:
+  glass_bottle:
+    name_ko: 유리병
+    mass_g: 380
+    fragile: true
+    deformable: false
+    transparent: true
+    profile: fragile
+
+fallback:            # DB에 없는 신규 클래스에 적용하는 보수적 기본값 (FR-05)
+  mass_g: null
+  fragile: true
+  deformable: false
+  transparent: false
+  profile: fragile
