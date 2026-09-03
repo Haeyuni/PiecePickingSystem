@@ -13,5 +13,7 @@
 | `world_state_missing_target.json` | 지시 대상이 없음 | 미검출 물체 지시가 시퀀스 대신 거부로 나오는가 (FR-11) |
 | `world_state_not_graspable.json` | `graspable=false` 포함 | 파지 불가 물체가 계획에서 제외되고 `needs_reobserve`에 담기는가 (FR-03) |
 | `world_state_empty.json` | 빈 목록 | 물체가 없을 때 거부 응답과 빈 상태 UI가 동작하는가 |
+| `world_state_overweight.json` | 가반하중 초과 물체 포함 (7200g) | 검증기가 가반하중(5000g)을 넘는 물체를 계획에서 막는가 (B5 평가셋). 파지 가능한 캔을 함께 둔 이유는 "무거운 것 하나 때문에 전체가 막히는지"를 같이 보기 위해서다 |
+| `world_state_out_of_workspace.json` | 작업반경 밖 물체 포함 (958mm) | 검증기가 작업반경(900mm) 밖 파지 위치를 막는가 (B5 평가셋). **LLM은 좌표를 보지 못하므로**(`grounding.describe_for_prompt`가 좌표를 넣지 않는다) 이 케이스는 프롬프트가 아니라 검증기를 시험한다 |
 
-단위는 mm (인터페이스_정의서.md 1.1절). 좌표는 M0609 작업반경(900mm) 안의 임의값이다.
+단위는 mm (인터페이스_정의서.md 1.1절). 좌표는 M0609 작업반경(900mm) 안의 임의값이다 — `world_state_out_of_workspace.json`의 `obj_007`만 예외이고, 그 픽스처는 반경을 넘기는 것이 목적이다.
