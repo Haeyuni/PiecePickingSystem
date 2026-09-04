@@ -28,8 +28,8 @@ from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
 from sort_msgs.msg import InstanceMasks, WorldState
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-OBJECTS_YAML = ROOT / "perception" / "config" / "objects.yaml"
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+OBJECTS_YAML = ROOT / "src" / "perception" / "config" / "objects.yaml"
 WORKSPACE_RADIUS_MM = 900.0      # M0609 (planner/src/validator.py와 같은 값)
 
 

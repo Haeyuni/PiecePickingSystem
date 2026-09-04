@@ -13,7 +13,7 @@ import sys
 import urllib.error
 import urllib.request
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 MOCK_DIR = ROOT / "data" / "mock"
 
 # (픽스처, 명령, 기대 상태, 추가 검사)

@@ -12,8 +12,8 @@ import pathlib
 import re
 import sys
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
-MSG_DIR = ROOT / "sort_msgs" / "msg"
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+MSG_DIR = ROOT / "src" / "sort_msgs" / "msg"
 MOCK_DIR = ROOT / "data" / "mock"
 
 # ROS2 msg의 상수 정의(`string FOO=bar`)와 필드 정의(`string foo`)를 구분한다.

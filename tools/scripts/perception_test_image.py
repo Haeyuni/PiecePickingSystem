@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-DEFAULT_MODEL = Path(__file__).resolve().parents[1] / 'model' / 'best.pt'
+DEFAULT_MODEL = Path(__file__).resolve().parents[2] / 'models' / 'best.pt'
 
 
 def collect(paths):

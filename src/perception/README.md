@@ -1,6 +1,6 @@
 # perception 검출 모델 테스트
 
-`model/best.pt` = ultralytics **yolo26n-seg** (task=segment, imgsz=640, nc=3)
+`models/best.pt` = ultralytics **yolo26n-seg** (task=segment, imgsz=640, nc=3)
 클래스: `0 suncream`, `1 tape`, `2 nail_product`
 
 ## 1회 준비
@@ -11,7 +11,7 @@ python3 -m venv --system-site-packages .venv     # ROS(rclpy)를 그대로 쓰�
 ```
 
 cv_bridge는 쓰지 않는다. venv의 opencv-python과 시스템 cv_bridge가 섞이면 깨지므로
-sensor_msgs/Image ↔ ndarray 변환을 `scripts/perception_capture.py:image_to_numpy`에서 직접 한다.
+sensor_msgs/Image ↔ ndarray 변환을 `tools/scripts/perception_capture.py:image_to_numpy`에서 직접 한다.
 
 ## 테스트 3단계
 
@@ -21,14 +21,14 @@ sensor_msgs/Image ↔ ndarray 변환을 `scripts/perception_capture.py:image_to_
 source /opt/ros/jazzy/setup.bash
 
 # (1) 샘플 수집 — color .png + aligned depth .npy + intrinsics .json
-.venv/bin/python scripts/perception_capture.py -n 5 --interval 1.0
+.venv/bin/python tools/scripts/perception_capture.py -n 5 --interval 1.0
 
 # (2) 정지 이미지 검증 — 클래스/신뢰도/마스크 픽셀수/depth_valid_ratio/카메라 좌표 3D(mm)
-.venv/bin/python scripts/perception_test_image.py data/samples --conf 0.25
+.venv/bin/python tools/scripts/perception_test_image.py data/samples --conf 0.25
 #   결과 오버레이: data/samples/pred/*_pred.png
 
 # (3) 라이브 검증 — /perception/debug_image 로 오버레이 발행 (약 30 Hz, RTX 4060 기준 추론 6 ms)
-.venv/bin/python scripts/perception_test_live.py
+.venv/bin/python tools/scripts/perception_test_live.py
 ros2 run rqt_image_view rqt_image_view /perception/debug_image   # 다른 터미널
 #   창을 직접 띄우려면 --show
 ```
@@ -55,7 +55,7 @@ DATABASE_URL=postgresql://... .venv/bin/python -m perception.node
 주요 파라미터: `conf`(0.25), `period_s`(0.5), `min_depth_valid_ratio`(0.35),
 `pose_max_age_s`(1.0), `require_robot_pose`(true).
 
-검증: `python3 scripts/check_perception.py` — 발행 내용이 인터페이스 계약을 지키는지 본다
+검증: `python3 tools/scripts/check_perception.py` — 발행 내용이 인터페이스 계약을 지키는지 본다
 (두 토픽의 stamp 짝, 마스크 형식·해상도, 좌표계, 속성 일치, object_id 유지).
 
 ## 아직 안 된 것

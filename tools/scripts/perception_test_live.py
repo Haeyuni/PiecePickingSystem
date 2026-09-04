@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from perception_capture import image_to_numpy          # noqa: E402
 from perception_test_image import mask_3d              # noqa: E402
 
-DEFAULT_MODEL = Path(__file__).resolve().parents[1] / 'model' / 'best.pt'
+DEFAULT_MODEL = Path(__file__).resolve().parents[2] / 'models' / 'best.pt'
 
 
 class LiveTest(Node):
