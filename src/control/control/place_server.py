@@ -199,7 +199,7 @@ class PlaceServer(Node):
         def posx_at(xyz):
             """`xyz`로 위치만 바꾸고 회전은 방금 도달한 실제 자세를 그대로 쓴다
             (dsr_motion.py 모듈 docstring — ZYZ 특이점 참조)."""
-            current = dsr_motion.get_current_posx(self._posx_client)
+            current = dsr_motion.get_current_posx(self._posx_client, goal_handle)
             if current is None:
                 return None
             return [xyz[0], xyz[1], xyz[2], current[3], current[4], current[5]]
@@ -213,6 +213,8 @@ class PlaceServer(Node):
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_INSERTING)
         insert_posx = posx_at(target_xyz)
         if insert_posx is None:
+            if goal_handle.is_cancel_requested:
+                return None
             raise RuntimeError("현재 자세를 읽지 못했다")
         if not move(insert_posx):
             if goal_handle.is_cancel_requested:
@@ -233,6 +235,8 @@ class PlaceServer(Node):
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_VERIFYING)
         retreat_posx = posx_at(approach_xyz)
         if retreat_posx is None:
+            if goal_handle.is_cancel_requested:
+                return None
             raise RuntimeError("현재 자세를 읽지 못했다")
         if not move(retreat_posx):
             if goal_handle.is_cancel_requested:

@@ -39,28 +39,39 @@ GRIPPER_COMMAND_SERVICE = "/onrobot/sendCommand"
 GRIPPER_JOINT_STATES_TOPIC = "/onrobot_joint_states"
 
 
-def get_current_posx(client, timeout_s: float = 3.0) -> list[float] | None:
-    """get_current_posx를 한 번 동기 호출한다 — [x,y,z,rx,ry,rz](mm, deg).
+def get_current_posx(client, goal_handle, timeout_s: float = 5.0, retries: int = 6,
+                     retry_delay_s: float = 3.0) -> list[float] | None:
+    """get_current_posx를 호출한다 — [x,y,z,rx,ry,rz](mm, deg). 실패하면 잠깐 쉬었다
+    재시도한다(기본값 기준 최대 약 `retries * (timeout_s + retry_delay_s)` ≈ 48초).
+
+    **실물로 확인**: movel 직후 이 서비스(aux_control)가 10~20초 이상 무응답인 구간이
+    있다 — 컨트롤러가 방금 끝난 모션을 정리하는 동안으로 보인다. 한 번 실패로 바로
+    포기하면 정상적인 지연을 오류로 오판한다. `goal_handle`이 취소되면 재시도를
+    멈추고 None을 돌려준다(오류가 아니라 취소로 처리하도록 호출부가 구분해야 한다).
 
     perception_common.robot_pose.RobotPoseClient(주기 캐싱, 검출 프레임마다 필요)와
     달리 여기서는 movel 사이사이 딱 한 번씩만 필요해 별도 캐시 없이 그때그때 묻는다.
     """
     from dsr_msgs2.srv import GetCurrentPosx
 
-    if not client.wait_for_service(timeout_sec=2.0):
-        return None
-    request = GetCurrentPosx.Request()
-    request.ref = 0  # DR_BASE
-
-    done = threading.Event()
-    future = client.call_async(request)
-    future.add_done_callback(lambda _f: done.set())
-    done.wait(timeout=timeout_s)
-    result = future.result()
-    if result is None or not result.success or not result.task_pos_info:
-        return None
-    data = list(result.task_pos_info[0].data)
-    return [float(v) for v in data[:6]] if len(data) >= 6 else None
+    for attempt in range(retries):
+        if goal_handle.is_cancel_requested:
+            return None
+        if client.wait_for_service(timeout_sec=2.0):
+            request = GetCurrentPosx.Request()
+            request.ref = 0  # DR_BASE
+            done = threading.Event()
+            future = client.call_async(request)
+            future.add_done_callback(lambda _f: done.set())
+            done.wait(timeout=timeout_s)
+            result = future.result()
+            if result is not None and result.success and result.task_pos_info:
+                data = list(result.task_pos_info[0].data)
+                if len(data) >= 6:
+                    return [float(v) for v in data[:6]]
+        if attempt < retries - 1:
+            time.sleep(retry_delay_s)
+    return None
 
 
 def bin_pose_to_posx(pose: dict) -> list[float]:
@@ -81,10 +92,16 @@ def pose_mm_to_posx(pose) -> list[float]:
 
 
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,
-                         cancel_timeout_s: float = 5.0):
+                         cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0):
     """액션을 보내고 결과를 기다린다(현재 스레드를 막는다). goal_handle이 취소 요청을
     받으면(웹의 정지 버튼) 원격 목표도 함께 취소한다 — 안 그러면 화면엔 "취소됨"으로
     보이는데 로봇은 계속 움직이는 상태가 된다.
+
+    **`overall_timeout_s`가 없으면 아무도 취소하지 않는 한 영원히 기다린다** — 실물로
+    겪은 사고: movel_h2r 하나가 응답 없이 19분간 멈췄는데, 취소 감지만 있고 자체
+    상한이 없어 사람이 수동으로 취소하기 전까지 그대로 대기했다. 넘으면 우리가
+    먼저 취소를 보내고 실패로 처리한다 — pick/place 전체가 무한정 멈추는 대신
+    유한 시간 안에 실패로 끝나야 재계획(FR-16)이 돌 수 있다.
 
     반환: (성공 여부, 원격 액션의 result 객체 또는 None).
     """
@@ -108,8 +125,9 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     result_future = remote_handle.get_result_async()
     result_future.add_done_callback(lambda _f: finished.set())
 
+    deadline = time.monotonic() + overall_timeout_s
     while not finished.wait(timeout=0.1):
-        if goal_handle.is_cancel_requested:
+        if goal_handle.is_cancel_requested or time.monotonic() > deadline:
             remote_handle.cancel_goal_async()
             finished.wait(timeout=cancel_timeout_s)
             return False, None
