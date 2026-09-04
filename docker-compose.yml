@@ -47,6 +47,10 @@ services:
       # dsr_msgs2(get_current_posx 서비스 타입)의 출처. src/perception/docker-entrypoint.sh 참조.
       - ${DOOSAN_WS_DIR:-${HOME}/cobot2_ws}/install/dsr_msgs2:/doosan_ws:ro
       - ./data:/data:ro
+      # 신규 클래스 크롭 저장(node.py:_maybe_save_unknown_crop, 시스템명세서 4.4절)은
+      # 유일하게 쓰기가 필요한 경로다 — 그 아래만 별도로 rw 마운트한다. /data 전체를
+      # rw로 열면 캘리브레이션 결과 같은 입력을 실수로 덮어쓸 수 있어 그건 막아 둔다.
+      - ./data/unknown_crops:/data/unknown_crops:rw
       - ./models:/models:ro
     deploy:
       resources:

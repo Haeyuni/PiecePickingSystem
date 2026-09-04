@@ -316,11 +316,19 @@ class PerceptionNode(Node):
             return
         import cv2
 
-        self._unknown_crops_dir.mkdir(parents=True, exist_ok=True)
-        path = self._unknown_crops_dir / f"{class_name}.png"
-        cv2.imwrite(str(path), crop)
+        # 크롭 저장은 사람 확인을 돕는 부수 기능이지 발행의 전제조건이 아니다 — 여기서
+        # 실패해도(예: /data가 읽기전용) world_state_raw/instance_masks 발행은 계속돼야
+        # 한다. 크래시로 노드 전체가 죽으면 그때부터는 알던 물체까지 전부 안 보이게 된다
+        # (실제로 겪음 — DB 장애를 objects.yaml seed로 넘기는 attribute_db.py와 같은 이유).
+        try:
+            self._unknown_crops_dir.mkdir(parents=True, exist_ok=True)
+            path = self._unknown_crops_dir / f"{class_name}.png"
+            cv2.imwrite(str(path), crop)
+            self.get_logger().warning(f"신규 클래스 '{class_name}' 크롭 저장: {path}")
+        except OSError as e:
+            self.get_logger().warning(
+                f"신규 클래스 '{class_name}' 크롭 저장 실패({e}) — 검출은 계속한다")
         self._saved_unknown_crops.add(class_name)
-        self.get_logger().warning(f"신규 클래스 '{class_name}' 크롭 저장: {path}")
 
 
 def main(args=None):
