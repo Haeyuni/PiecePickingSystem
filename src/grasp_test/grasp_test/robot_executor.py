@@ -85,12 +85,12 @@ class RobotExecutor:
             # not discover reachability or a collision by first commanding the physical robot.
             # motion_precheck.MotionPrecheck now provides a real one (Doosan Ikin + a
             # hand-rolled sphere-vs-AABB collision check, not MoveIt — see that module's
-            # docstring for why and for its known coverage limits). Collision geometry
-            # (obstacles/gripper_radius_m) is optional here by explicit operator decision
-            # (2026-09-04, direct human supervision at the robot) — if unset, MotionPrecheck
-            # still runs IK-only and logs a WARN every call; it does not silently claim safety.
+            # docstring for its known coverage limits). A local config can explicitly select
+            # supervised IK-only testing, but it is never the default.
             if not self._precheck.available():
                 missing.append('IK_COLLISION_VALIDATION_INTERFACE_UNAVAILABLE')
+            elif not self._precheck.geometry_configured() and not self._precheck.ready():
+                missing.append('COLLISION_GEOMETRY_NOT_CONFIGURED')
             for name, client in (('MOVEJ', self._movej_client), ('MOVEL', self._movel_client)):
                 if not client.wait_for_server(timeout_sec=3.0):
                     missing.append(f'{name}_ACTION_UNAVAILABLE')
@@ -138,7 +138,10 @@ class RobotExecutor:
                      and workspace['y'][0] <= y_mm <= workspace['y'][1]
                      and workspace['z'][0] <= z_mm <= workspace['z'][1])
         if not in_bounds:
-            return None, False, 'WORKSPACE_OUT_OF_BOUNDS'
+            diagnostics = (
+                f'target_mm=[{x_mm:.1f},{y_mm:.1f},{z_mm:.1f}], '
+                f'workspace_mm=x{workspace["x"]},y{workspace["y"]},z{workspace["z"]}')
+            return {'target_pos': [x_mm, y_mm, z_mm]}, False, f'WORKSPACE_OUT_OF_BOUNDS:{diagnostics}'
 
         rx, ry, rz = geometry.matrix_to_zyz_deg(_TOPDOWN_ROTATION)
         return {'target_pos': [x_mm, y_mm, z_mm, rx, ry, rz]}, True, ''

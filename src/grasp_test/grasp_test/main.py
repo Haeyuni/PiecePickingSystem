@@ -35,12 +35,13 @@ def methods(value):
     return selected
 
 
-def blank(scene_id, round_id, trial_id, method, status, failure='', note=''):
+def blank(scene_id, round_id, trial_id, method, status, failure='', note='', model_log='', model_error_message=''):
     return {'scene_id': scene_id, 'round_id': round_id, 'trial_id': trial_id, 'method': DISPLAY[method],
             'status': status, 'candidate_count': 0, 'valid_width_count': 0, 'model_init_ms': '',
             'inference_ms': '', 'total_elapsed_ms': '', 'candidate_pose_camera': '', 'candidate_pose_robot': '',
             'transform_ok': False, 'ik_ok': False, 'rg2_grip_state': '', 'reobservation_ok': False,
-            'pick_success': False, 'failure_code': failure, 'note': note}
+             'pick_success': False, 'failure_code': failure, 'note': note, 'model_log': model_log,
+             'model_error_message': model_error_message}
 
 
 def main(argv=None):
@@ -95,11 +96,12 @@ def main(argv=None):
                     scene_path = scene_dir / f'{scene_id}.npz'
                     runner.write_scene(frame, target, scene_path, scene_id)
                     try:
-                        result, model_error, _ = runner.run(method, scene_path, output.directory, trial_id)
+                        result, model_error, model_log = runner.run(method, scene_path, output.directory, trial_id)
                     except Exception as exc:
-                        result, model_error = None, f'MODEL_RUNNER_FAILED:{type(exc).__name__}:{exc}'
+                        result, model_error, model_log = None, f'MODEL_RUNNER_FAILED:{type(exc).__name__}:{exc}', None
                     if result is None:
-                        row = blank(scene_id, round_id, trial_id, method, 'ERROR', model_error)
+                        row = blank(scene_id, round_id, trial_id, method, 'ERROR', model_error,
+                                    model_log=model_log.name if model_log else '')
                     else:
                         candidate = {'x_m': result.get('x_m'), 'y_m': result.get('y_m'), 'z_m': result.get('z_m')}
                         try:
@@ -111,7 +113,9 @@ def main(argv=None):
                         except Exception as exc:
                             width_ok, robot_pose, transform_ok = False, None, False
                             transform_error = f'TRANSFORM_VALIDATION_FAILED:{type(exc).__name__}:{exc}'
-                        row = blank(scene_id, round_id, trial_id, method, 'ERROR' if model_error else 'DRY_RUN_ONLY', model_error or transform_error)
+                        model_message = str(result.get('error_message', ''))
+                        row = blank(scene_id, round_id, trial_id, method, 'ERROR' if model_error else 'DRY_RUN_ONLY', model_error or transform_error,
+                                    model_log=model_log.name if model_log else '', model_error_message=model_message)
                         row.update({'candidate_count': result.get('candidate_count', 0), 'valid_width_count': result.get('valid_width_count', 0),
                                     'model_init_ms': result.get('initialization_ms', ''), 'inference_ms': result.get('inference_ms', ''),
                                     'candidate_pose_camera': candidate, 'candidate_pose_robot': robot_pose or '', 'transform_ok': transform_ok})

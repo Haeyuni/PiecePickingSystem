@@ -22,11 +22,10 @@ approach -> grasp -> lift 세 구간을 사전 검증한다:
     gripper_radius_m)만 본다 — URDF 기반 전신 충돌검사가 아니다.
   - RG2+카메라 브래킷의 실제 형상을 반영하지 않는다. gripper_radius_m는 사람이 실측해
     보수적으로 넣어야 한다(기본값 없음).
-  - obstacles/gripper_radius_m이 비어있으면 충돌 검사는 **실행되지 않는다** — IK만 검사한다.
-    2026-09-04, 로봇 옆에서 직접 감독하겠다는 운영자 확인을 받고 `ready()`가 충돌 형상 없이도
-    True를 반환하도록 완화했다(이전엔 `geometry_configured()`도 요구해 무조건 막았음). 이
-    상태에서 `check_pick_path()`를 호출하면 매번 ROS 로거에 WARN으로 남긴다 — 콘솔에 안 보일
-    수는 있어도 조용히 넘어가지는 않는다.
+   - obstacles/gripper_radius_m이 비어있으면 충돌 검사를 실행할 수 없다. 기본적으로
+     `ready()`와 `check_pick_path()`는 `COLLISION_GEOMETRY_NOT_CONFIGURED`로 거절한다.
+     단, local YAML의 `allow_supervised_ik_only_execution: true`는 로봇 옆에서 E-stop을
+     직접 감독하는 시험에 한해 IK 검사만 허용한다. 이 우회는 ROS WARN으로 항상 남긴다.
 """
 import math
 
@@ -76,6 +75,7 @@ class MotionPrecheck:
         radius = config.get('gripper_radius_m')
         self._gripper_radius_m = float(radius) if radius is not None else None
         self._step_m = float(config.get('path_check_step_m', 0.01))
+        self._allow_supervised_ik_only = bool(config.get('allow_supervised_ik_only_execution', False))
 
     def available(self):
         """Ikin 서비스가 지금 응답 가능한지 (인터페이스 자체 유무)."""
@@ -86,10 +86,7 @@ class MotionPrecheck:
         return bool(self._obstacles) and self._gripper_radius_m is not None
 
     def ready(self):
-        # Collision geometry is no longer required to unblock execute:=true (operator-confirmed
-        # 2026-09-04: IK-only, with direct human supervision + E-stop at the robot). See module
-        # docstring. IK availability is still mandatory — that check never gets waived.
-        return self.available()
+        return self.available() and (self.geometry_configured() or self._allow_supervised_ik_only)
 
     def _current_sol_space(self):
         ok, result, _ = action_client.call_service_blocking(
@@ -128,14 +125,15 @@ class MotionPrecheck:
 
         반환: (ok, stage, code). ok=False면 code는 'IK_FAILED' 또는 'COLLISION_EXPECTED'
         (COLLISION_EXPECTED일 때 stage에 '<단계>:<obstacle 이름>'을 담는다).
-        geometry_configured()가 False면 충돌 검사 자체를 건너뛴다(IK만 본다) — 매번 WARN
-        로그를 남겨 "검사 안 함"이 "충돌 없음"으로 오인되지 않게 한다.
+        충돌 geometry가 없으면 기본적으로 거절한다. 명시적인 감독 시험 모드에서는 IK만 검사한다.
         """
         collision_check_enabled = self.geometry_configured()
+        if not collision_check_enabled and not self._allow_supervised_ik_only:
+            return False, '', 'COLLISION_GEOMETRY_NOT_CONFIGURED'
         if not collision_check_enabled:
             self._node.get_logger().warning(
-                'MotionPrecheck: obstacles/gripper_radius_m 미설정 — IK만 검사하고 충돌 사전검증은'
-                ' 건너뜁니다. 사람이 직접 감독해야 합니다.')
+                'SUPERVISED_IK_ONLY: 충돌 geometry 없이 IK만 검사합니다. '
+                'E-stop을 잡은 운영자가 로봇 옆에서 직접 감독해야 합니다.')
         stages = (
             ('approach', current_pos_mm, approach_pos_mm),
             ('grasp', approach_pos_mm, grasp_pos_mm),
