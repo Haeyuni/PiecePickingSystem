@@ -102,6 +102,12 @@ export default function ControlPage() {
         void refreshPending()
         void refreshWorld()
         break
+
+      case 'world_state':
+        // perception이 새로 발행할 때마다 실시간으로 반영한다 — 예전엔 이 이벤트가
+        // 아예 안 와서(ros_bridge.py의 _on_world_state 참조) 새로고침해야만 갱신됐다.
+        setObjects(event.objects)
+        break
     }
   }, [refreshPending, refreshTrace, refreshWorld])
 

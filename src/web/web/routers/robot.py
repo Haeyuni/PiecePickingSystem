@@ -45,7 +45,15 @@ async def _run_home(executor) -> None:
 
 @router.post("/api/robot/home")
 async def home(request: Request):
-    """동작 중 홈이동은 위험하므로 idle일 때만 허용한다(2.1절과 같은 차단 규칙).
+    """동작 중 홈이동은 위험하므로 idle·error일 때만 허용한다(2.1절과 같은 차단 규칙).
+
+    **error도 허용한다**: pick/place 실패 시 `RobotStateStore.set_error()`(control/
+    robot_state_publisher.py)가 mode를 error로 고정하고, 그 뒤로는 `/api/commands`도
+    이 엔드포인트도 idle 전용 차단 규칙에 막혀 아무 것도 못 부르는 데드엔드였다(스킬은
+    이미 끝나 current_skill=none이라 취소할 것도 없어 stop도 못 풀어준다). 홈 이동은
+    이미 로봇을 알려진 안전 자세로 되돌리는 기존 동작이라 여기서 새 복구 로직을 만들지
+    않고 이 엔드포인트의 허용 조건만 넓힌다. busy·estopped는 여전히 막는다 — busy 중
+    홈 이동은 원래도 위험하고, estopped는 조작자가 하드웨어를 직접 해제해야 한다.
 
     **모션 완료를 기다리지 않고 202를 돌려준다.** 2.6절의 202 `moving_home`은 "이동을
     접수했다"는 뜻이지 "이동이 끝났다"가 아니다. `/api/commands`가 같은 모양이다(2.1절).
@@ -57,7 +65,7 @@ async def home(request: Request):
     """
     executor = request.app.state.executor
     mode = executor.robot_state().get("mode", "idle")
-    if mode != "idle":
+    if mode not in ("idle", "error"):
         return JSONResponse(
             status_code=409,
             content={"schema_version": "1.0.0",

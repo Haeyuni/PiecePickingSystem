@@ -90,3 +90,4 @@ export type LiveEvent =
   | { type: 'execution_result'; trace_id: string; request_id: string; success: boolean; failure_reason: string; validation_reason?: string }
   | ({ type: 'safety_event' } & SafetyEvent)
   | { type: 'object_confirmation_needed'; class_name: string }
+  | ({ type: 'world_state' } & WorldState)

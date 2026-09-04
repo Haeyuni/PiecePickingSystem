@@ -164,7 +164,18 @@ class _BridgeNode(Node):
         self.home_client = ActionClient(self, Home, "home")
 
     def _on_world_state(self, msg: WorldState) -> None:
+        """최신값을 갱신하고 그대로 브라우저로 밀어준다.
+
+        예전엔 `latest_world_state`만 갱신하고 `on_event`를 안 불러서, 화면의 "탐지 물체"
+        목록이 최초 진입·재연결 때 받은 스냅샷에 멈춰 있고 perception이 물체를 새로
+        보거나 놓쳐도 반영되지 않았다 — 새로고침(REST GET /api/world-state 재호출)해야만
+        갱신됐다. world_state는 perception이 이미 초당 1회 안팎으로 스로틀해 발행하므로
+        (grasp_test 세션에서 확인, ~0.5~2Hz) robot_state처럼 변화 여부를 따로 걸러낼
+        필요 없이 매 수신을 그대로 내보낸다.
+        """
         self.latest_world_state = _world_state_to_dict(msg)
+        if self.on_event:
+            self.on_event({"type": "world_state", **self.latest_world_state})
 
     def _on_robot_state(self, msg: RobotState) -> None:
         """최신값은 항상 갱신하고, **변화가 있을 때만** web으로 올린다.

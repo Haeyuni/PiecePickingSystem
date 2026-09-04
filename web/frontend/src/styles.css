@@ -137,6 +137,9 @@ img.view { width: 100%; height: 100%; object-fit: cover; padding: 0; border-styl
 /* 정지는 급할 때 눈에 바로 띄어야 한다 */
 .btn-stop { color: var(--danger); border-color: var(--danger); font-weight: 700; }
 .btn-stop:hover:not(:disabled) { background: rgba(239, 68, 68, 0.16); }
+/* mode=error일 때만 나타나는 복구 버튼 — mode-error와 같은 warn 색으로 상태와 연결짓는다 */
+.btn-recover { color: var(--warn); border-color: var(--warn); font-weight: 700; }
+.btn-recover:hover:not(:disabled) { background: rgba(234, 179, 8, 0.16); }
 
 /* --- 작업 진행도 (2.2.8) --- */
 .progress-step { display: flex; align-items: center; gap: 10px; margin-top: 9px; }

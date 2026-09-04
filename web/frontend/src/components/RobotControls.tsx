@@ -20,9 +20,14 @@ export default function RobotControls({ mode }: { mode: RobotMode }) {
   return (
     <div>
       <div className="controls">
-        {/* 동작 중 홈 이동은 위험하므로 idle일 때만 */}
-        <button disabled={mode !== 'idle'} onClick={() => run(homeRobot, '홈 이동')}>
-          홈 이동
+        {/* 동작 중 홈 이동은 위험하므로 idle·error일 때만 (error도 홈으로 보내 복구한다 —
+            web/routers/robot.py의 /api/robot/home 참조. busy·estopped는 계속 막는다) */}
+        <button
+          className={mode === 'error' ? 'btn-recover' : undefined}
+          disabled={mode !== 'idle' && mode !== 'error'}
+          onClick={() => run(homeRobot, mode === 'error' ? '오류 복구(홈 이동)' : '홈 이동')}
+        >
+          {mode === 'error' ? '오류 복구 (홈으로 이동)' : '홈 이동'}
         </button>
         {/* 정지는 mode와 무관하게 항상 활성 — busy일 때 가장 필요한 동작이다 */}
         <button className="btn-stop" onClick={() => run(stopRobot, '정지')}>
