@@ -43,6 +43,7 @@ from .tracker import ObjectTracker
 
 SCHEMA_VERSION = "1.0.0"
 BASE_FRAME = "base"
+DEPTH_ENCODINGS = ("16UC1", "mono16")
 
 # graspable=false 사유. mock 픽스처(data/mock)가 쓰는 값과 같아야 한다.
 REASON_DEPTH_INVALID = "depth_invalid"
@@ -62,10 +63,13 @@ class PerceptionNode(Node):
         self.declare_parameter("color_topic", "/camera/color/image_raw")
         self.declare_parameter("depth_topic", "/camera/aligned_depth_to_color/image_raw")
         self.declare_parameter("info_topic", "/camera/color/camera_info")
+        self.declare_parameter("max_frame_age_s", 0.5)
         # 마스크 안쪽 depth가 이보다 적게 유효하면 파지 대상에서 뺀다. 투명·반사 물체가
         # 주로 여기 걸리고, 그 물체들은 needs_reobserve로 올라가 능동 재촬영 대상이 된다(FR-03).
         self.declare_parameter("min_depth_valid_ratio", 0.35)
-        self.declare_parameter("min_mask_pixels", 200)
+        # 기본 valid ratio 0.35와 함께 최소 84개 유효점을 요구한다. PCA의 최소 80점보다
+        # 작으면 perception은 graspable인데 grasp는 후보가 없는 모순이 생긴다.
+        self.declare_parameter("min_mask_pixels", 240)
         # 이보다 오래된 TCP 자세로는 좌표를 만들지 않는다 (robot_pose.posx 주석 참조)
         self.declare_parameter("pose_max_age_s", 1.0)
         self.declare_parameter("publish_debug_image", True)
@@ -76,6 +80,7 @@ class PerceptionNode(Node):
         self._device = self.get_parameter("device").value or None
         self._min_ratio = float(self.get_parameter("min_depth_valid_ratio").value)
         self._min_pixels = int(self.get_parameter("min_mask_pixels").value)
+        self._max_frame_age_s = float(self.get_parameter("max_frame_age_s").value)
         self._pose_max_age_s = float(self.get_parameter("pose_max_age_s").value)
         self._publish_debug = bool(self.get_parameter("publish_debug_image").value)
         self._require_pose = bool(self.get_parameter("require_robot_pose").value)
@@ -98,7 +103,10 @@ class PerceptionNode(Node):
 
         self._color = None
         self._color_stamp = None
+        self._color_frame_id = ""
         self._depth = None
+        self._depth_stamp = None
+        self._depth_frame_id = ""
         self._intrinsics = None
         self._observation_count = 0
 
@@ -127,12 +135,27 @@ class PerceptionNode(Node):
         # WorldState.stamp가 되어야 grasp가 같은 depth 프레임을 다시 찾을 수 있다
         # (ROS 관례이기도 하다 — stamp는 데이터 취득 시각이다).
         self._color_stamp = msg.header.stamp
+        self._color_frame_id = msg.header.frame_id
 
     def _on_depth(self, msg: Image) -> None:
+        if msg.encoding not in DEPTH_ENCODINGS:
+            self._depth = None
+            self.get_logger().warning(
+                f"지원하지 않는 aligned depth encoding: {msg.encoding}",
+                throttle_duration_sec=5.0)
+            return
         self._depth = image_to_numpy(msg)
+        self._depth_stamp = msg.header.stamp
+        self._depth_frame_id = msg.header.frame_id
 
     def _on_info(self, msg: CameraInfo) -> None:
-        self._intrinsics = {"fx": msg.k[0], "fy": msg.k[4], "cx": msg.k[2], "cy": msg.k[5]}
+        if msg.k[0] <= 0.0 or msg.k[4] <= 0.0:
+            self._intrinsics = None
+            self.get_logger().warning("CameraInfo K가 유효하지 않다", throttle_duration_sec=5.0)
+            return
+        self._intrinsics = {"fx": msg.k[0], "fy": msg.k[4], "cx": msg.k[2], "cy": msg.k[5],
+                            "width": msg.width, "height": msg.height,
+                            "frame_id": msg.header.frame_id}
 
     # --- 한 프레임 ----------------------------------------------------------
     def _tick(self) -> None:
@@ -142,6 +165,11 @@ class PerceptionNode(Node):
             # "아무것도 없다"는 뜻이고, 그것은 여기서 할 수 있는 주장이 아니다.
             self.get_logger().warning(f"입력 대기 중: {', '.join(missing)}",
                                       throttle_duration_sec=5.0)
+            return
+
+        problem = self._rgbd_contract_problem()
+        if problem:
+            self.get_logger().warning(f"RGB-D 입력 불일치: {problem}", throttle_duration_sec=5.0)
             return
 
         color, depth = self._color, self._depth
@@ -175,6 +203,21 @@ class PerceptionNode(Node):
         if self._require_pose and self._pose_client.posx(self._pose_max_age_s) is None:
             missing.append("robot_pose(get_current_posx)")
         return missing
+
+    def _rgbd_contract_problem(self) -> str:
+        if self._color.shape[:2] != self._depth.shape:
+            return f"color{self._color.shape[:2]} depth{self._depth.shape}"
+        if self._color_frame_id != self._depth_frame_id:
+            return f"color frame={self._color_frame_id} depth frame={self._depth_frame_id}"
+        if (self._intrinsics["height"], self._intrinsics["width"]) != self._color.shape[:2]:
+            return "CameraInfo grid"
+        if self._intrinsics["frame_id"] != self._color_frame_id:
+            return f"CameraInfo frame={self._intrinsics['frame_id']}"
+        color_time = self._color_stamp.sec + self._color_stamp.nanosec * 1e-9
+        depth_time = self._depth_stamp.sec + self._depth_stamp.nanosec * 1e-9
+        if abs(color_time - depth_time) > self._max_frame_age_s:
+            return "color/depth timestamp"
+        return ""
 
     def _build_detections(self, result, color: np.ndarray, depth: np.ndarray,
                           base2gripper) -> list[dict]:
@@ -288,7 +331,9 @@ class PerceptionNode(Node):
 
         header = Header()
         header.stamp = stamp
-        header.frame_id = BASE_FRAME
+        # mask의 픽셀 좌표는 aligned color/depth grid 기준이다. base는 WorldState와
+        # GraspCandidate의 좌표계이며 Image header에 넣으면 안 된다.
+        header.frame_id = self._color_frame_id
         return header
 
     def _publish_debug_image(self, result, stamp: Time) -> None:
