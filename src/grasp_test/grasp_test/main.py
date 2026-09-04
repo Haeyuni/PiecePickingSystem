@@ -83,31 +83,56 @@ def main(argv=None):
             elif yolo is None:
                 row = blank('', round_id, trial_id, method, 'ERROR', yolo_error)
             else:
-                target, target_error = yolo.target_mask(frame.rgb, frame.depth_mm)
+                try:
+                    target, target_error = yolo.target_mask(frame.rgb, frame.depth_mm)
+                except Exception as exc:
+                    target, target_error = None, f'YOLO_INFERENCE_FAILED:{type(exc).__name__}:{exc}'
                 if target is None:
-                    row = blank('', round_id, trial_id, method, 'TARGET_NOT_READY', target_error)
+                    status = 'ERROR' if target_error.startswith('YOLO_INFERENCE_FAILED:') else 'TARGET_NOT_READY'
+                    row = blank('', round_id, trial_id, method, status, target_error)
                 else:
                     scene_id = f'live_{trial_id}'
                     scene_path = scene_dir / f'{scene_id}.npz'
                     runner.write_scene(frame, target, scene_path, scene_id)
-                    result, model_error, _ = runner.run(method, scene_path, output.directory, trial_id)
+                    try:
+                        result, model_error, _ = runner.run(method, scene_path, output.directory, trial_id)
+                    except Exception as exc:
+                        result, model_error = None, f'MODEL_RUNNER_FAILED:{type(exc).__name__}:{exc}'
                     if result is None:
                         row = blank(scene_id, round_id, trial_id, method, 'ERROR', model_error)
                     else:
                         candidate = {'x_m': result.get('x_m'), 'y_m': result.get('y_m'), 'z_m': result.get('z_m')}
-                        robot_pose, transform_ok, transform_error = executor.transform_and_validate(candidate)
+                        try:
+                            width_ok, width_error = executor.validate_width(result)
+                            if width_ok:
+                                robot_pose, transform_ok, transform_error = executor.transform_and_validate(candidate)
+                            else:
+                                robot_pose, transform_ok, transform_error = None, False, width_error
+                        except Exception as exc:
+                            width_ok, robot_pose, transform_ok = False, None, False
+                            transform_error = f'TRANSFORM_VALIDATION_FAILED:{type(exc).__name__}:{exc}'
                         row = blank(scene_id, round_id, trial_id, method, 'ERROR' if model_error else 'DRY_RUN_ONLY', model_error or transform_error)
                         row.update({'candidate_count': result.get('candidate_count', 0), 'valid_width_count': result.get('valid_width_count', 0),
                                     'model_init_ms': result.get('initialization_ms', ''), 'inference_ms': result.get('inference_ms', ''),
                                     'candidate_pose_camera': candidate, 'candidate_pose_robot': robot_pose or '', 'transform_ok': transform_ok})
-                        if not model_error and execute and transform_ok and ready:
-                            picked, code = executor.execute_pick(robot_pose)
-                            grip_state, reobserved, verify_code = verifier.verify(executor.last_grip)
+                        if not model_error and width_ok and execute and transform_ok and ready:
+                            try:
+                                picked, code = executor.execute_pick(robot_pose)
+                                grip_state, reobserved, verify_code = verifier.verify(executor.last_grip, target)
+                            except Exception as exc:
+                                picked, grip_state, reobserved = False, '', False
+                                code, verify_code = f'EXECUTION_EXCEPTION:{type(exc).__name__}:{exc}', ''
+                            # A failed trial may leave the arm below Home. Always attempt the
+                            # configured return path before asking the operator for the next reset.
+                            try:
+                                home_ok = executor.return_home()
+                            except Exception as exc:
+                                home_ok = False
+                                code = code or f'HOME_RETURN_EXCEPTION:{type(exc).__name__}:{exc}'
                             pick_success = picked and grip_state == 'gripped' and reobserved
-                            row.update({'status': 'OK' if pick_success else 'EXECUTION_FAILED', 'ik_ok': picked,
+                            row.update({'status': 'OK' if pick_success and home_ok else 'EXECUTION_FAILED', 'ik_ok': False,
                                         'rg2_grip_state': grip_state, 'reobservation_ok': reobserved, 'pick_success': pick_success,
-                                        'failure_code': code or verify_code})
-                            executor.release_and_home()
+                                        'failure_code': code or verify_code or ('' if home_ok else 'HOME_RETURN_FAILED')})
             row['total_elapsed_ms'] = round((time.monotonic() - started) * 1000, 2)
             output.add(row)
             output.save()

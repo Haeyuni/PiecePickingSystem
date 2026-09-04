@@ -11,8 +11,9 @@ class YoloSegmentation:
 
     def target_mask(self, rgb, depth_mm):
         result = self._model.predict(rgb, conf=float(self._config['min_confidence']), verbose=False)[0]
-        if result.boxes is None or result.masks is None or len(result.boxes) != 1:
-            return None, 'TARGET_NOT_READY:EXPECTED_EXACTLY_ONE_MASK'
+        count = 0 if result.boxes is None or result.masks is None else len(result.boxes)
+        if count != 1:
+            return None, f'TARGET_NOT_READY:EXPECTED_EXACTLY_ONE_MASK:{count}'
         mask = result.masks.data[0].cpu().numpy() > 0.5
         if mask.shape != rgb.shape[:2]:
             import cv2
@@ -23,4 +24,6 @@ class YoloSegmentation:
             return None, 'TARGET_NOT_READY:MASK_TOO_SMALL'
         if valid.sum() / mask.sum() < float(self._config['min_depth_valid_ratio']):
             return None, 'TARGET_NOT_READY:DEPTH_QUALITY_LOW'
-        return {'mask': mask, 'confidence': confidence, 'depth_valid_ratio': float(valid.sum() / mask.sum())}, ''
+        class_name = result.names[int(result.boxes.cls[0])]
+        return {'mask': mask, 'class_name': class_name, 'confidence': confidence,
+                'depth_valid_ratio': float(valid.sum() / mask.sum())}, ''

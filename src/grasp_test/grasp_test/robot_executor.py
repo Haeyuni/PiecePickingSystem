@@ -79,6 +79,9 @@ class RobotExecutor:
         if not Path(self._config['handeye_path']).is_file():
             missing.append('HANDEYE_MISSING')
         if execute:
+            # MoveL controller rejection is not an IK/collision *pre-check*. The benchmark must
+            # not discover reachability or a collision by first commanding the physical robot.
+            missing.append('IK_COLLISION_VALIDATION_INTERFACE_UNAVAILABLE')
             for name, client in (('MOVEJ', self._movej_client), ('MOVEL', self._movel_client)):
                 if not client.wait_for_server(timeout_sec=3.0):
                     missing.append(f'{name}_ACTION_UNAVAILABLE')
@@ -131,6 +134,18 @@ class RobotExecutor:
         rx, ry, rz = geometry.matrix_to_zyz_deg(_TOPDOWN_ROTATION)
         return {'target_pos': [x_mm, y_mm, z_mm, rx, ry, rz]}, True, ''
 
+    def validate_width(self, model_result):
+        """Only execute candidates whose RG2 width was actually validated by the model."""
+        if model_result.get('width_validation') != 'VALID':
+            return False, 'RG2_WIDTH_UNAVAILABLE'
+        width_m = model_result.get('width_m')
+        if width_m is None:
+            return False, 'RG2_WIDTH_UNAVAILABLE'
+        width_mm = float(width_m) * 1000.0
+        if not self._config['min_grip_width_mm'] <= width_mm <= self._config['max_grip_width_mm']:
+            return False, 'RG2_WIDTH_OUT_OF_RANGE'
+        return True, ''
+
     def execute_pick(self, robot_pose):
         self.last_grip = None
         target = list(robot_pose['target_pos'])
@@ -153,12 +168,13 @@ class RobotExecutor:
             return False, 'MOVE_LIFT_FAILED'
         return True, ''
 
-    def release_and_home(self):
-        """trial 종료 후: 쥔 물체를 놓고 Home으로 복귀한다. 성공 여부와 무관하게 항상 부른다 —
-        다음 trial의 수동 리셋(reset_mode=manual)은 로봇이 Home에 있다는 것을 전제로 한다."""
-        opened = self._gripper_open()
-        homed = self._move_home()
-        return opened, homed
+    def return_home(self):
+        """쥔 물체를 작업영역에서 떨어뜨리지 않고 Home으로 복귀한다.
+
+        물체를 여는 일은 사람이 Home 위치에서 안전하게 꺼낸 뒤 다음 trial을 준비하는
+        `reset_mode=manual`의 책임이다. 실패한 이동 뒤에도 호출자가 이 메서드를 시도한다.
+        """
+        return self._move_home()
 
     def _move_linear(self, target_pos, vel, acc):
         goal = MovelH2r.Goal()
