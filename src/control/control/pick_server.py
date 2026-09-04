@@ -73,6 +73,9 @@ class PickServer(Node):
         self._rot_vel_deg_s = float(motion.get("rot_vel_deg_s", 20.0))
         self._rot_acc_deg_s2 = float(motion.get("rot_acc_deg_s2", 20.0))
         self._gripper_open_m = float(motion.get("gripper_open_m", 0.110))
+        # grasp_pose.z까지만 내려가면 실물에서 접근이 부족한 사례가 있었다 — 하강 목표를
+        # 이만큼 더 낮춘다 (skill_params.yaml 주석 참조).
+        self._pick_depth_extra_mm = float(motion.get("pick_depth_extra_mm", 0.0))
         gripper = params.get("gripper") or {}
         # 이 미만이면 "닫혔지만 아무것도 안 물렸다"로 본다. compliance/visual_verification이
         # 아직 없어 이게 유일한 파지 확인 수단이다 — grasp_test/robot_executor.py의
@@ -193,6 +196,7 @@ class PickServer(Node):
         두 경우를 구분한다(취소는 오류가 아니다).
         """
         target_posx = dsr_motion.pose_mm_to_posx(goal.grasp_pose)
+        target_posx[2] -= self._pick_depth_extra_mm
         approach_posx = list(target_posx)
         approach_posx[2] += self._approach_height_mm
         target_xyz = target_posx[:3]
@@ -204,14 +208,19 @@ class PickServer(Node):
                                           self._rot_vel_deg_s, self._rot_acc_deg_s2,
                                           posx_client=self._posx_client)
 
-        def posx_at(xyz):
+        def next_target(xyz, last_pose):
             """`xyz`로 위치만 바꾸고 회전은 방금 도달한 실제 자세를 그대로 쓴다 —
             연속 이동에서 계산값을 재사용하면 안 되는 이유는 dsr_motion.py 모듈
-            docstring(ZYZ 특이점) 참조."""
-            current = dsr_motion.get_current_posx(self._posx_client, goal_handle)
-            if current is None:
-                return None
-            return [xyz[0], xyz[1], xyz[2], current[3], current[4], current[5]]
+            docstring(ZYZ 특이점) 참조. `last_pose`는 바로 앞 move()가 돌려준 액션
+            feedback 기반 pose — get_current_posx(aux_control)를 다시 부르지 않는다,
+            movel 직후 그 서비스가 10~20초 이상 무응답인 구간이 있어서다
+            (dsr_motion.get_current_posx 참조). feedback을 못 받았을 때만(드묾)
+            그쪽으로 폴백한다."""
+            if last_pose is None:
+                last_pose = dsr_motion.get_current_posx(self._posx_client, goal_handle)
+                if last_pose is None:
+                    return None
+            return [xyz[0], xyz[1], xyz[2], last_pose[3], last_pose[4], last_pose[5]]
 
         # 그리퍼를 먼저 연다. 예전엔 여기서 열지 않고 바로 닫기만 했다 — 이전 사이클에서
         # 그리퍼가 닫힌 채 남아 있으면(파지 실패 후, 또는 place_into가 도중에 멈춘 경우)
@@ -227,17 +236,19 @@ class PickServer(Node):
             raise RuntimeError("그리퍼가 열리는 동안 응답이 없다")
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_APPROACHING)
-        if not move(approach_posx):
+        approach_ok, approach_pose = move(approach_posx)
+        if not approach_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("접근 위치로 이동 실패")
 
-        descend_posx = posx_at(target_xyz)
+        descend_posx = next_target(target_xyz, approach_pose)
         if descend_posx is None:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("현재 자세를 읽지 못했다")
-        if not move(descend_posx):
+        descend_ok, descend_pose = move(descend_posx)
+        if not descend_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("파지 위치로 이동 실패")
@@ -255,12 +266,13 @@ class PickServer(Node):
             raise RuntimeError("그리퍼가 닫히는 동안 응답이 없다")
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_LIFTING)
-        lift_posx = posx_at(approach_xyz)
+        lift_posx = next_target(approach_xyz, descend_pose)
         if lift_posx is None:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("현재 자세를 읽지 못했다")
-        if not move(lift_posx):
+        lift_ok, _ = move(lift_posx)
+        if not lift_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("들어올리기 실패")

@@ -93,7 +93,8 @@ def pose_mm_to_posx(pose) -> list[float]:
 
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,
                          cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0,
-                         on_timeout_verify=None):
+                         on_timeout_verify=None, feedback_callback=None,
+                         verify_poll_s: float = 5.0):
     """액션을 보내고 결과를 기다린다(현재 스레드를 막는다). goal_handle이 취소 요청을
     받으면(웹의 정지 버튼) 원격 목표도 함께 취소한다 — 안 그러면 화면엔 "취소됨"으로
     보이는데 로봇은 계속 움직이는 상태가 된다.
@@ -104,13 +105,16 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     먼저 취소를 보내고 실패로 처리한다 — pick/place 전체가 무한정 멈추는 대신
     유한 시간 안에 실패로 끝나야 재계획(FR-16)이 돌 수 있다.
 
-    **`on_timeout_verify`**: 상한을 넘겼을 때(취소가 아니라 진짜 타임아웃일 때만)
-    부르는 콜러블 — True면 실패로 단정하지 않고 성공으로 처리한다. 실물로 확인한
-    사고: movel_h2r이 목표 지점에 실제로 정확히 도달했는데도 result 콜백이 끝내
-    안 와서 타임아웃으로 실패 처리된 적이 있다(get_current_posx로 도달을 직접
-    확인함 — DDS로 결과 통지가 유실되는 것으로 보인다, 이 환경의 네트워크 신뢰성
-    문제라 근본 해결은 못 한다). `move_linear`가 이 자리에 실제 도달 여부 확인을
-    넣는다.
+    **`on_timeout_verify`**: `verify_poll_s`마다(상한까지 기다리지 않고) 부르는
+    콜러블 — True면 실패로 단정하지 않고 바로 성공으로 처리한다. 실물로 확인한
+    사고: movel_h2r이 목표 지점에 실제로(1~2초 만에) 정확히 도달했는데도 result
+    콜백이 끝내 안 와서(get_current_posx로 도달을 직접 확인함 — DDS로 결과
+    통지가 유실되는 것으로 보인다, 이 환경의 네트워크 신뢰성 문제라 근본 해결은
+    못 한다) 예전엔 `overall_timeout_s`를 다 채우고 나서야 확인했다 — pick 한 번의
+    movel 세 번이 각각 60초씩 걸려 파지 사이클 전체가 3분 넘게 걸리는 원인이었다
+    (2026-09-04 실물로 확인). 짧은 주기로 먼저 확인해서 이 지연을 줄인다 — 진짜
+    결과 콜백이 오면 그쪽을 우선한다(추측이 아니라 실제 결과가 항상 더 정확하다).
+    `move_linear`가 이 자리에 실제 도달 여부 확인을 넣는다.
 
     반환: (성공 여부, 원격 액션의 result 객체 또는 None).
     """
@@ -124,7 +128,8 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
         state["handle"] = future.result()
         sent.set()
 
-    client.send_goal_async(goal).add_done_callback(on_send_done)
+    client.send_goal_async(
+        goal, feedback_callback=feedback_callback).add_done_callback(on_send_done)
     sent.wait(timeout=send_timeout_s)
     remote_handle = state.get("handle")
     if remote_handle is None or not remote_handle.accepted:
@@ -135,14 +140,18 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     result_future.add_done_callback(lambda _f: finished.set())
 
     deadline = time.monotonic() + overall_timeout_s
+    next_verify = time.monotonic() + verify_poll_s if on_timeout_verify is not None else None
     while not finished.wait(timeout=0.1):
         if goal_handle.is_cancel_requested:
             remote_handle.cancel_goal_async()
             finished.wait(timeout=cancel_timeout_s)
             return False, None
-        if time.monotonic() > deadline:
-            if on_timeout_verify is not None and on_timeout_verify():
+        now = time.monotonic()
+        if next_verify is not None and now >= next_verify:
+            if on_timeout_verify():
                 return True, None
+            next_verify = now + verify_poll_s
+        if now > deadline:
             remote_handle.cancel_goal_async()
             finished.wait(timeout=cancel_timeout_s)
             return False, None
@@ -154,12 +163,22 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
 def move_linear(client, target_pos: list[float], goal_handle,
                 vel_mm_s: float, acc_mm_s2: float,
                 vel_deg_s: float, acc_deg_s2: float,
-                posx_client=None, position_tolerance_mm: float = 3.0) -> bool:
+                posx_client=None,
+                position_tolerance_mm: float = 3.0) -> tuple[bool, list[float] | None]:
     """MovelH2r 하나를 블로킹으로 실행. `target_pos`는 [x,y,z,rx,ry,rz](mm, deg).
 
     `posx_client`를 넘기면 타임아웃 시 get_current_posx로 실제 위치를 한 번 더
     확인해서, `position_tolerance_mm` 안에 들어와 있으면 성공으로 처리한다 —
     call_action_blocking의 on_timeout_verify 참조(결과 통지 유실 대응).
+
+    반환: (성공 여부, 도착 시점의 실제 pose 또는 None). 이 pose는 액션 feedback
+    (`MovelH2r.Feedback.pos`, 드라이버가 100Hz로 채워 보낸다)에서 그대로 가져온
+    것이라 get_current_posx를 다시 호출하지 않고도 다음 이동의 회전값 재사용에
+    쓸 수 있다 — movel 직후 aux_control(get_current_posx)이 10~20초 이상
+    무응답인 구간이 실물에서 관측됐는데(위 get_current_posx 참조), 예전에는
+    pick_server.py/place_server.py가 이동마다 그 서비스를 다시 불러서 이 지연을
+    그대로 맞았다. feedback을 못 받았으면(드묾) None — 호출부가 get_current_posx로
+    폴백해야 한다.
     """
     from dsr_msgs2.action import MovelH2r
 
@@ -167,6 +186,12 @@ def move_linear(client, target_pos: list[float], goal_handle,
     goal.target_pos = [float(v) for v in target_pos]
     goal.target_vel = [float(vel_mm_s), float(vel_deg_s)]
     goal.target_acc = [float(acc_mm_s2), float(acc_deg_s2)]
+
+    last_pose: list[float] | None = None
+
+    def on_feedback(feedback_msg):
+        nonlocal last_pose
+        last_pose = list(feedback_msg.feedback.pos)
 
     def verify_arrived():
         if posx_client is None:
@@ -176,8 +201,9 @@ def move_linear(client, target_pos: list[float], goal_handle,
             return False
         return all(abs(a - b) <= position_tolerance_mm for a, b in zip(current[:3], target_pos[:3]))
 
-    success, _ = call_action_blocking(client, goal, goal_handle, on_timeout_verify=verify_arrived)
-    return success
+    success, _ = call_action_blocking(client, goal, goal_handle, on_timeout_verify=verify_arrived,
+                                      feedback_callback=on_feedback)
+    return success, (last_pose if success else None)
 
 
 def move_joint(client, target_deg: list[float], goal_handle,

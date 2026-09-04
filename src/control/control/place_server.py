@@ -203,27 +203,34 @@ class PlaceServer(Node):
                                           self._rot_vel_deg_s, self._rot_acc_deg_s2,
                                           posx_client=self._posx_client)
 
-        def posx_at(xyz):
+        def next_target(xyz, last_pose):
             """`xyz`로 위치만 바꾸고 회전은 방금 도달한 실제 자세를 그대로 쓴다
-            (dsr_motion.py 모듈 docstring — ZYZ 특이점 참조)."""
-            current = dsr_motion.get_current_posx(self._posx_client, goal_handle)
-            if current is None:
-                return None
-            return [xyz[0], xyz[1], xyz[2], current[3], current[4], current[5]]
+            (dsr_motion.py 모듈 docstring — ZYZ 특이점 참조). `last_pose`는 바로
+            앞 move()가 돌려준 액션 feedback 기반 pose — get_current_posx(aux_control)를
+            다시 부르지 않는다, movel 직후 그 서비스가 10~20초 이상 무응답인 구간이
+            있어서다(dsr_motion.get_current_posx 참조). feedback을 못 받았을 때만
+            (드묾) 그쪽으로 폴백한다."""
+            if last_pose is None:
+                last_pose = dsr_motion.get_current_posx(self._posx_client, goal_handle)
+                if last_pose is None:
+                    return None
+            return [xyz[0], xyz[1], xyz[2], last_pose[3], last_pose[4], last_pose[5]]
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_MOVING)
-        if not move(approach_posx):
+        approach_ok, approach_pose = move(approach_posx)
+        if not approach_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("접근 위치로 이동 실패")
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_INSERTING)
-        insert_posx = posx_at(target_xyz)
+        insert_posx = next_target(target_xyz, approach_pose)
         if insert_posx is None:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("현재 자세를 읽지 못했다")
-        if not move(insert_posx):
+        insert_ok, insert_pose = move(insert_posx)
+        if not insert_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("배치 위치로 이동 실패")
@@ -240,12 +247,13 @@ class PlaceServer(Node):
             raise RuntimeError("그리퍼가 열리는 동안 응답이 없다")
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_VERIFYING)
-        retreat_posx = posx_at(approach_xyz)
+        retreat_posx = next_target(approach_xyz, insert_pose)
         if retreat_posx is None:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("현재 자세를 읽지 못했다")
-        if not move(retreat_posx):
+        retreat_ok, _ = move(retreat_posx)
+        if not retreat_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("물러나기 실패")
