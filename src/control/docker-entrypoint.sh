@@ -16,4 +16,10 @@ else
     echo "경고: dsr_msgs2 local_setup.bash가 없다 — DOOSAN_WS_DIR 마운트를 확인하라." \
          "dsr_msgs2를 못 찾아 home_server가 기동에 실패한다." >&2
 fi
+if [ -f /onrobot_ws/share/onrobot_rg_msgs/local_setup.bash ]; then
+    source /onrobot_ws/share/onrobot_rg_msgs/local_setup.bash
+else
+    echo "경고: onrobot_rg_msgs local_setup.bash가 없다 — DOOSAN_WS_DIR 마운트를 확인하라." \
+         "그리퍼 제어(dsr_motion.py)가 기동에 실패한다." >&2
+fi
 exec "$@"

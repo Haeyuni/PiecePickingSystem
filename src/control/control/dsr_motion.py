@@ -1,18 +1,31 @@
-"""dsr_msgs2 액션 호출 공용 헬퍼: 블로킹 대기 + 취소 전파, pose(mm, 쿼터니언) → posx 변환.
+"""dsr_msgs2 액션 호출 공용 헬퍼: 블로킹 대기 + 취소 전파, pose(mm, 쿼터니언) → posx 변환,
+OnRobot RG2 그리퍼 제어.
 
 home_server.py가 MovejH2r을 부르며 만든 패턴(ActionClient를 threading.Event로 동기식
 대기하되, 콜백은 MultiThreadedExecutor의 다른 스레드가 처리)을 pick_server.py/
 place_server.py의 MovelH2r 호출도 그대로 필요로 해서 여기로 뺐다. 세 서버 모두
 ReentrantCallbackGroup을 액션 서버와 이 모듈이 만드는 ActionClient에 공유해야
 데드락 없이 동작한다 — 호출부에서 그 그룹을 넘겨준다.
+
+**그리퍼는 표준 액션(`/rg6_controller`, control_msgs/GripperCommand)을 쓰지 않는다.**
+실물로 확인해 보니 이 액션의 `execute_callback`(onrobot_rg_control 패키지)이 두 가지
+문제가 있다 — (1) `position`(미터, 개폭)을 관절각(rad)으로 변환 없이 그대로 넘긴다
+(같은 파일의 서비스 핸들러 `sendCommandCallback`은 `widthToJointValue()`로 제대로
+변환한다), (2) 첫 목표 처리 시 내부 상태가 아직 `None`인 채로 비교 연산을 해 예외로
+죽고 rclpy가 빈 결과로 ABORTED 처리한다. 두 번 다 실물로 재현했다. 대신 같은 드라이버가
+제공하는 `/onrobot/sendCommand`(문자 명령, 그 서버가 자기 그리퍼 타입에 맞는 변환을
+알아서 한다)를 쓴다 — 단, 이 서비스는 명령만 보내고 완료를 기다리지 않으므로
+`/onrobot_joint_states`를 직접 폴링해 안정될 때까지 기다린다.
 """
 import threading
+import time
 
 from perception_common.geometry import matrix_to_zyz_deg, quaternion_to_matrix
 
 MOVEJ_ACTION = "/dsr01/motion/movej_h2r"
 MOVEL_ACTION = "/dsr01/motion/movel_h2r"
-GRIPPER_ACTION = "/rg6_controller"
+GRIPPER_COMMAND_SERVICE = "/onrobot/sendCommand"
+GRIPPER_JOINT_STATES_TOPIC = "/onrobot_joint_states"
 
 
 def bin_pose_to_posx(pose: dict) -> list[float]:
@@ -97,20 +110,77 @@ def move_joint(client, target_deg: list[float], goal_handle,
     return success
 
 
-def move_gripper(client, position_m: float, max_effort_n: float, goal_handle) -> tuple[bool, float]:
-    """OnRobot RG6를 /rg6_controller(control_msgs/GripperCommand)로 블로킹 제어.
+def send_gripper_command(client, command: str, timeout_s: float = 3.0) -> bool:
+    """/onrobot/sendCommand(SetCommand) 호출. 'c'=닫기, 'o'=열기.
 
-    `position_m`은 목표 개폭(m, 0=완전히 닫힘). `max_effort_n`이 그리퍼 자체의 힘 제한이다
-    — 팔의 접촉감지(compliance.py, 아직 미구현)와는 별개로, 그리퍼 하드웨어가 이 이상
-    힘을 주지 않고 멈추는 안전장치라 위치제어만으로도 최소한의 보호가 된다.
-
-    반환: (목표에 도달했는지, 실제 개폭 m).
+    힘(force)은 이 문자 명령으로 정확한 N값을 지정할 수 없다 — 서버가 내부에 들고 있는
+    값에 상대적으로만 ±25씩 조절되는 구조라(onrobot_rg_control의 genCommand 참조),
+    profile별 max_grip_force_n을 여기서 정확히 반영하지 못한다. 서버 기본값(대략 6N
+    상당, 보수적인 축)을 그대로 쓴다 — 1단계 제약 중 하나로 남겨둔다.
     """
-    from control_msgs.action import GripperCommand
+    from onrobot_rg_msgs.srv import SetCommand
 
-    goal = GripperCommand.Goal()
-    goal.command.position = float(position_m)
-    goal.command.max_effort = float(max_effort_n)
-    success, result = call_action_blocking(client, goal, goal_handle)
-    width = float(result.position) if result is not None else 0.0
-    return success, width
+    if not client.wait_for_service(timeout_sec=2.0):
+        return False
+    request = SetCommand.Request()
+    request.command = command
+
+    done = threading.Event()
+    client.call_async(request).add_done_callback(lambda _f: done.set())
+    done.wait(timeout=timeout_s)
+    return True  # 서비스 자체는 접수만 하고 바로 응답한다 — 물리적 완료는 별도로 기다린다
+
+
+def gripper_width_command(width_m: float) -> str:
+    """`send_gripper_command`에 넘길 문자열 — 정수 문자열은 목표 개폭(0.1mm 단위)으로
+    해석된다(onrobot_rg_control.genCommand, sendCommandCallback 경로라 실물 pick/place에
+    쓴 'c'와 같은 정확한 변환을 거친다). 'c'/'o'는 완전히 닫기/최대로 열기만 가능해서
+    place_into처럼 특정 개폭(gripper_open_m)을 원할 때는 이걸 쓴다."""
+    return str(int(round(width_m * 10000)))
+
+
+def gripper_width_mm(pose_client, joint_angle: float, timeout_s: float = 1.5) -> float:
+    """관절각(rad) → 개폭(mm). `/onrobot/pose`(GripperPose)에 `known.theta`로 물어보면
+    서버가 자기 그리퍼 타입(RG2/RG6)에 맞는 기하 상수로 변환해 준다 — 그 상수를 여기서
+    하드코딩하면 그리퍼 모델을 잘못 가정할 위험이 있다(RG6로 착각했던 사고를 이미 겪었다).
+    실패하면 0.0(정보성 값이라 실패해도 pick/place 자체를 막지 않는다).
+    """
+    from onrobot_rg_msgs.srv import GripperPose
+
+    if not pose_client.wait_for_service(timeout_sec=1.0):
+        return 0.0
+    request = GripperPose.Request()
+    request.known.theta = float(joint_angle)
+
+    done = threading.Event()
+    future = pose_client.call_async(request)
+    future.add_done_callback(lambda _f: done.set())
+    done.wait(timeout=timeout_s)
+    result = future.result()
+    return float(result.pose.x) * 1000.0 if result is not None else 0.0
+
+
+def wait_gripper_settled(get_joint_angle, goal_handle, timeout_s: float = 8.0,
+                         poll_interval_s: float = 0.2, stable_polls: int = 3) -> float | None:
+    """그리퍼 관절각(rad)이 더 안 바뀔 때까지 기다린다. `/onrobot/sendCommand`는 완료
+    신호가 없는 fire-and-forget이라(모듈 docstring 참조) 직접 폴링해서 확인한다.
+
+    `get_joint_angle`은 최신 관절각을 돌려주는 콜러블(없으면 None) — 호출부가
+    `/onrobot_joint_states` 구독의 최신값을 캡처해 넘긴다. 취소되거나 타임아웃되면 None.
+    """
+    deadline = time.monotonic() + timeout_s
+    last = None
+    stable = 0
+    while time.monotonic() < deadline:
+        if goal_handle.is_cancel_requested:
+            return None
+        current = get_joint_angle()
+        if current is not None and last is not None and abs(current - last) < 1e-3:
+            stable += 1
+            if stable >= stable_polls:
+                return current
+        else:
+            stable = 0
+        last = current
+        time.sleep(poll_interval_s)
+    return None

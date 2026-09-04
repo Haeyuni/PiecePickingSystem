@@ -17,8 +17,9 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from control_msgs.action import GripperCommand
 from dsr_msgs2.action import MovelH2r
+from onrobot_rg_msgs.srv import SetCommand
+from sensor_msgs.msg import JointState
 from sort_msgs.action import PlaceInto
 
 from . import dsr_motion
@@ -100,12 +101,19 @@ class PlaceServer(Node):
         self._gripper_open_m = float(motion.get("gripper_open_m", 0.110))
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
-        self._gripper_client = ActionClient(self, GripperCommand, dsr_motion.GRIPPER_ACTION,
-                                            callback_group=callbacks)
+        self._gripper_cmd_client = self.create_client(
+            SetCommand, dsr_motion.GRIPPER_COMMAND_SERVICE, callback_group=callbacks)
+        self._gripper_joint_angle: float | None = None
+        self.create_subscription(JointState, dsr_motion.GRIPPER_JOINT_STATES_TOPIC,
+                                 self._on_gripper_state, 5, callback_group=callbacks)
 
         self.get_logger().info(
             f"place_into 액션 서버 준비 (목적지 {list(self._bins)}, "
             f"{'fake' if is_fake_robot() else '실물'} 모드)")
+
+    def _on_gripper_state(self, msg: JointState) -> None:
+        if msg.position:
+            self._gripper_joint_angle = msg.position[0]
 
     def _cancel_callback(self, goal_handle):
         self.get_logger().warning("place_into 취소 요청 수신")
@@ -196,12 +204,15 @@ class PlaceServer(Node):
             raise RuntimeError("배치 위치로 이동 실패")
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_RELEASING)
-        ok, _ = dsr_motion.move_gripper(self._gripper_client, self._gripper_open_m, 0.0,
-                                        goal_handle)
-        if not ok:
+        width_command = dsr_motion.gripper_width_command(self._gripper_open_m)
+        if not dsr_motion.send_gripper_command(self._gripper_cmd_client, width_command):
             if goal_handle.is_cancel_requested:
                 return None
-            raise RuntimeError("그리퍼 열기 실패")
+            raise RuntimeError("그리퍼 열기 명령 전송 실패")
+        if dsr_motion.wait_gripper_settled(lambda: self._gripper_joint_angle, goal_handle) is None:
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("그리퍼가 열리는 동안 응답이 없다")
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_VERIFYING)
         if not move(approach_posx):

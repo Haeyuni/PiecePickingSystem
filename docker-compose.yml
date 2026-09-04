@@ -122,8 +122,12 @@ services:
       CYCLONEDDS_URI: file:///cyclonedds/cyclonedds.xml
     volumes:
       - ${CYCLONEDDS_CONFIG_DIR:-${HOME}/.config/cyclonedds}:/cyclonedds:ro
-      # dsr_msgs2(MovejH2r 액션 타입)의 출처. src/control/docker-entrypoint.sh 참조.
+      # dsr_msgs2(MovejH2r/MovelH2r 액션 타입)의 출처. src/control/docker-entrypoint.sh 참조.
       - ${DOOSAN_WS_DIR:-${HOME}/cobot2_ws}/install/dsr_msgs2:/doosan_ws:ro
+      # onrobot_rg_msgs(SetCommand/GripperPose 타입, dsr_motion.py 참조) — 같은 이유로
+      # 패키지 하나만 마운트한다(cobot2_ws 전체를 마운트하면 안 되는 이유는
+      # src/control/docker-entrypoint.sh 참조).
+      - ${DOOSAN_WS_DIR:-${HOME}/cobot2_ws}/install/onrobot_rg_msgs:/onrobot_ws:ro
 
   # mock 모드 web (B2~B3). 브리지 네트워크에서 planner/db를 서비스 이름으로 부른다.
   web:
