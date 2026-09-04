@@ -21,21 +21,36 @@ class RobotPoseClient:
     """최근 TCP 자세를 들고 있는다. `posx`는 [x, y, z, rx, ry, rz] (mm, ZYZ 도)."""
 
     def __init__(self, node, service_name: str = SERVICE_NAME, period_s: float = 0.2,
-                 callback_group=None):
+                 callback_group=None, pending_timeout_s: float = 3.0):
         self._node = node
         self._lock = threading.Lock()
         self._posx: list[float] | None = None
         self._updated_at: float | None = None
         self._pending = False
+        self._pending_since: float | None = None
+        self._pending_timeout_s = pending_timeout_s
         self._client = node.create_client(GetCurrentPosx, service_name,
                                           callback_group=callback_group)
         self._timer = node.create_timer(period_s, self._request,
                                         callback_group=callback_group)
 
     def _request(self) -> None:
-        if self._pending or not self._client.service_is_ready():
+        if self._pending:
+            # 이전 요청이 응답 없이 너무 오래 걸려 있으면 포기하고 새로 보낸다.
+            # 실물로 겪은 사고: 응답 하나가 유실되자(드라이버가 한동안 무응답이던 구간)
+            # _pending이 영원히 True로 남아 그 뒤로 다시는 요청을 안 보냈다 —
+            # posx()가 계속 None을 돌려주고 perception이 "입력 대기 중"만 반복했다.
+            if (self._pending_since is not None
+                    and time.monotonic() - self._pending_since > self._pending_timeout_s):
+                self._node.get_logger().warning(
+                    "get_current_posx 응답이 없어 이전 요청을 포기하고 다시 보낸다",
+                    throttle_duration_sec=5.0)
+            else:
+                return
+        if not self._client.service_is_ready():
             return
         self._pending = True
+        self._pending_since = time.monotonic()
         request = GetCurrentPosx.Request()
         request.ref = DR_BASE
         self._client.call_async(request).add_done_callback(self._on_response)
