@@ -1,0 +1,31 @@
+# Copy to ~/grasp_test_assets/grasp_test.local.yaml. Paths must be absolute.
+assets:
+  yolo_weight: /home/USER/grasp_test_assets/yolo/best.pt
+  checkpoints: /home/USER/grasp_test_assets/checkpoints
+results_dir: /home/USER/grasp_test_assets/results
+camera:
+  color_topic: /camera/color/image_raw
+  depth_topic: /camera/aligned_depth_to_color/image_raw
+  info_topic: /camera/color/camera_info
+  frame: camera_color_optical_frame
+  min_confidence: 0.50
+  min_mask_pixels: 200
+  min_depth_valid_ratio: 0.35
+robot:
+  base_frame: base_link
+  pose_service: /dsr01/dsr_controller2/aux_control/get_current_posx
+  handeye_path: /home/USER/workspace/PiecePickingSystem/data/calibration/T_gripper2camera.npy
+  # A real move/action adapter is intentionally not guessed. Leave null until an existing verified adapter exists.
+  motion_action: null
+  home_pose: [0, 0, 90, 0, 90, 0]
+  workspace_mm: {x: [-350, 350], y: [-350, 350], z: [80, 500]}
+  approach_height_mm: 80.0
+  lift_height_mm: 40.0
+rg2:
+  state_topic: null
+  command_action: null
+  min_grip_width_mm: 5.0
+  max_grip_width_mm: 100.0
+  # Direct Modbus control is deliberately unsupported here; use an existing verified ROS interface.
+model:
+  max_inference_ms: 30000

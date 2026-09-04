@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>grasp_benchmark</name>
+  <version>0.1.0</version>
+  <description>Independent Docker-based offline grasp model comparison.</description>
+  <maintainer email="jje320594@gmail.com">jje</maintainer>
+  <license>TODO</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>
