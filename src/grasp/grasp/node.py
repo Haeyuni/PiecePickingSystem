@@ -17,6 +17,13 @@
 **message_filters를 쓰지 않는다.** `WorldState`/`InstanceMasks`에는 `header`가 없고 `stamp`가
 직접 필드로 있어 동기화기가 요구하는 모양이 아니다. 게다가 perception이 두 메시지를 같은
 호출에서 같은 stamp로 내보내므로, 근사 동기화가 아니라 **정확 일치**로 짝지을 수 있다.
+
+**어느 쪽이 먼저 도착할지는 보장되지 않는다.** perception이 world_state_raw를 먼저, 그
+직후 instance_masks를 publish하지만(node.py), 후자는 마스크 이미지를 실어 직렬화·전송이
+더 오래 걸린다 — 실측으로도 world_state_raw가 먼저 도착하는 쪽이 우세했다. 그래서 두 콜백
+(`_on_world_state`/`_on_masks`) 모두 "내 짝이 이미 와 있으면 바로 처리, 없으면 내가 대신
+대기열에 남는다"는 대칭 구조다. 한쪽만 대기열을 두면(예: masks만) 반대 순서로 도착하는
+쪽에서 매번 유실된다.
 """
 import bisect
 import pathlib
@@ -108,6 +115,7 @@ class GraspNode(Node):
         self._depth_times: list[float] = []          # 오름차순 유지 (bisect로 검색)
         self._depths: list[np.ndarray] = []
         self._pending_masks: dict[tuple[int, int], InstanceMasks] = {}
+        self._pending_worlds: dict[tuple[int, int], WorldState] = {}
 
         callbacks = ReentrantCallbackGroup()
         image_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -138,7 +146,12 @@ class GraspNode(Node):
             self._depths.pop(0)
 
     def _on_masks(self, msg: InstanceMasks) -> None:
-        self._pending_masks[stamp_key(msg.stamp)] = msg
+        key = stamp_key(msg.stamp)
+        world = self._pending_worlds.pop(key, None)
+        if world is not None:
+            self._process(world, msg)
+            return
+        self._pending_masks[key] = msg
         if len(self._pending_masks) > 10:
             self._pending_masks.pop(next(iter(self._pending_masks)))
 
@@ -163,7 +176,16 @@ class GraspNode(Node):
 
     # --- 한 관측 ------------------------------------------------------------
     def _on_world_state(self, world: WorldState) -> None:
-        masks = self._pending_masks.pop(stamp_key(world.stamp), None)
+        key = stamp_key(world.stamp)
+        masks = self._pending_masks.pop(key, None)
+        if masks is not None:
+            self._process(world, masks)
+            return
+        self._pending_worlds[key] = world
+        if len(self._pending_worlds) > 10:
+            self._pending_worlds.pop(next(iter(self._pending_worlds)))
+
+    def _process(self, world: WorldState, masks: InstanceMasks) -> None:
         blockers = self._blockers(world, masks)
         if blockers:
             # 후보를 못 채운 world_state를 내보내지 않는다. planner는 `/world_state`가
@@ -192,10 +214,8 @@ class GraspNode(Node):
             f"{len(world.objects)}개 중 {filled}개에 파지 후보 생성 "
             f"({self._strategy_name})", throttle_duration_sec=2.0)
 
-    def _blockers(self, world: WorldState, masks) -> list[str]:
+    def _blockers(self, world: WorldState, masks: InstanceMasks) -> list[str]:
         blockers = []
-        if masks is None:
-            blockers.append(f"stamp {stamp_key(world.stamp)}의 instance_masks 없음")
         if self._intrinsics is None:
             blockers.append("camera_info 미수신")
         if self._nearest_depth(stamp_seconds(world.stamp)) is None:
