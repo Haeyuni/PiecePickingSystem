@@ -70,8 +70,19 @@ services:
       start_period: 10s
 
   control:
-    build: ./src/control
+    build:
+      # 컨텍스트가 저장소 루트인 이유는 src/control/Dockerfile 주석 참조 (sort_msgs를 함께 빌드)
+      context: .
+      dockerfile: src/control/Dockerfile
     network_mode: host   # DDS 통신 단순화
+    environment:
+      # 실물 로봇 연동 전까지 기본값. 실제 로봇에 붙일 때 compose 기동 시 FAKE_ROBOT=0으로 덮어쓴다.
+      FAKE_ROBOT: ${FAKE_ROBOT:-1}
+      # 호스트의 control/perception 노드와 같은 도메인이어야 서로 보인다 (web_ros와 동일 이유)
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      CYCLONEDDS_URI: file:///cyclonedds/cyclonedds.xml
+    volumes:
+      - ${CYCLONEDDS_CONFIG_DIR:-${HOME}/.config/cyclonedds}:/cyclonedds:ro
 
   # mock 모드 web (B2~B3). 브리지 네트워크에서 planner/db를 서비스 이름으로 부른다.
   web:
