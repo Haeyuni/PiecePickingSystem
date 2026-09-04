@@ -10,3 +10,10 @@ profiles:
 
 visual_verification:
   wrist_camera_offset_mm: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정). 단위 mm
+
+home:
+  # 2026-09-04 실측: dsr_msgs2/MoveJoint·MovejH2r이 요구하는 단위 그대로(도, deg/sec) 둔다.
+  # bins.yaml의 pose(mm)와 달리 좌표 변환이 없어 units.py를 지나지 않는다(home_server.py 참조).
+  joint_deg: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]   # j1~j6
+  vel_deg_s: 20.0
+  acc_deg_s2: 20.0
