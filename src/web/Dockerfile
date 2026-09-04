@@ -42,10 +42,12 @@ WORKDIR /app
 # 데이터가 흐르지 않는다** — B4 검증에서 실제로 겪은 증상이다(`ros2 topic list`에
 # /world_state가 뜨는데 구독 콜백이 한 번도 안 불림). RMW는 시스템 전체가 같아야 한다.
 COPY src/web/requirements.txt .
+# --ignore-installed: apt로 깔린 python3-numpy 등을 pip이 RECORD 파일 없이는 못 지운다
+# ("installed by debian" 오류, src/perception/Dockerfile에서 같은 문제를 먼저 겪었다).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3-pip ros-jazzy-rmw-cyclonedds-cpp \
     && rm -rf /var/lib/apt/lists/* \
-    && pip install --no-cache-dir --break-system-packages -r requirements.txt
+    && pip install --no-cache-dir --break-system-packages --ignore-installed -r requirements.txt
 
 COPY --from=msgs /ros2_ws/install /ros2_ws/install
 COPY src/web/web/ ./web/

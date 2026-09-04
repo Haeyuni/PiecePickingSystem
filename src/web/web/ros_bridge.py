@@ -14,9 +14,13 @@ import time
 import uuid
 from typing import Awaitable, Callable
 
+import cv2
+import numpy as np
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import Image
 
 from sort_msgs.action import Home, Pick, PlaceInto
 from sort_msgs.msg import RobotState, SafetyEvent, WorldState
@@ -26,6 +30,40 @@ from .executor import SkillGoal, SkillResult
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0.0"
+
+
+# --- 카메라·뎁스 뷰 (화면정의서 2.2.4절: RGB 원본 스트림, 마스크 오버레이 없음) -----------
+#
+# perception_common.image_utils를 그대로 쓰지 않는 이유는 web이 ROS2 패키지가 아니라서다
+# (rclpy는 여기서만 import되는 순수 pip 의존성 — executor.py 주석 참조). 필요한 인코딩
+# 두 개(bgr8, 16UC1)만 이 파일 안에서 직접 변환한다 — perception_capture.py가 cv_bridge
+# 대신 자기만의 image_to_numpy를 갖는 것과 같은 이유(중복이지만 결합을 만들지 않는다).
+
+def _color_to_bgr(msg: Image) -> np.ndarray:
+    """bgr8/rgb8 → BGR ndarray. 리얼센스는 rgb8로 낸다(cv2가 기대하는 건 bgr8)."""
+    buf = np.frombuffer(msg.data, dtype=np.uint8)
+    arr = buf.reshape(msg.height, msg.step)[:, : msg.width * 3].reshape(msg.height, msg.width, 3)
+    return arr[:, :, ::-1] if msg.encoding == "rgb8" else arr
+
+
+def _depth_to_colormap(msg: Image) -> np.ndarray:
+    """16UC1 depth(mm) → JET 컬러맵. 0(무효 픽셀)은 검게 남긴다."""
+    buf = np.frombuffer(msg.data, dtype=np.uint16)
+    depth = buf.reshape(msg.height, msg.step // 2)[:, : msg.width]
+    valid = depth > 0
+    if not valid.any():
+        return np.zeros((msg.height, msg.width, 3), dtype=np.uint8)
+    low, high = int(depth[valid].min()), int(depth[valid].max())
+    span = max(high - low, 1)
+    normalized = np.clip((depth.astype(np.float32) - low) * (255.0 / span), 0, 255).astype(np.uint8)
+    colored = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
+    colored[~valid] = 0
+    return colored
+
+
+def _encode_jpeg(bgr: np.ndarray) -> bytes | None:
+    ok, buf = cv2.imencode(".jpg", bgr)
+    return buf.tobytes() if ok else None
 
 
 def _pose_to_msg(pose: dict):
@@ -103,11 +141,23 @@ class _BridgeNode(Node):
         self.latest_world_state: dict | None = None
         self.latest_robot_state: dict = {"schema_version": SCHEMA_VERSION, "mode": "idle",
                                          "current_skill": "none", "gripper_width_mm": 0.0}
+        self.latest_color_jpeg: bytes | None = None
+        self.latest_depth_jpeg: bytes | None = None
         self.on_event: Callable[[dict], None] | None = None
 
         self.create_subscription(WorldState, "/world_state", self._on_world_state, 10)
         self.create_subscription(RobotState, "/control/robot_state", self._on_robot_state, 10)
         self.create_subscription(SafetyEvent, "/control/safety_events", self._on_safety_event, 10)
+
+        # 카메라·뎁스 뷰. perception이 아니라 리얼센스 드라이버가 직접 내는 원본을 구독한다
+        # (화면정의서 2.2.4절 — 마스크 오버레이 없는 원본). 이미지 토픽은 대역폭이 커서
+        # BEST_EFFORT — 화면 프레임 하나 놓쳐도 다음 프레임이 금방 오므로 재전송을 기다릴
+        # 이유가 없다(grasp의 depth 구독과 같은 QoS 선택, grasp/node.py 참조).
+        image_qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(Image, "/camera/color/image_raw", self._on_color_image,
+                                 image_qos)
+        self.create_subscription(Image, "/camera/aligned_depth_to_color/image_raw",
+                                 self._on_depth_image, image_qos)
 
         self.pick_client = ActionClient(self, Pick, "pick")
         self.place_client = ActionClient(self, PlaceInto, "place_into")
@@ -137,6 +187,20 @@ class _BridgeNode(Node):
         self.latest_robot_state = state
         if changed and self.on_event:
             self.on_event({"type": "robot_state", **state})
+
+    def _on_color_image(self, msg: Image) -> None:
+        if msg.encoding not in ("bgr8", "rgb8"):
+            self.get_logger().warning(f"카메라 뷰: 지원하지 않는 인코딩 {msg.encoding}",
+                                      throttle_duration_sec=10.0)
+            return
+        self.latest_color_jpeg = _encode_jpeg(_color_to_bgr(msg))
+
+    def _on_depth_image(self, msg: Image) -> None:
+        if msg.encoding not in ("16UC1", "mono16"):
+            self.get_logger().warning(f"뎁스 뷰: 지원하지 않는 인코딩 {msg.encoding}",
+                                      throttle_duration_sec=10.0)
+            return
+        self.latest_depth_jpeg = _encode_jpeg(_depth_to_colormap(msg))
 
     def _on_safety_event(self, msg: SafetyEvent) -> None:
         # 안전 이벤트는 지연 없이 즉시 올린다(4절)
@@ -180,6 +244,12 @@ class RosExecutor:
 
     def robot_state(self) -> dict:
         return self._node.latest_robot_state if self._node else {"mode": "error"}
+
+    def latest_color_jpeg(self) -> bytes | None:
+        return self._node.latest_color_jpeg if self._node else None
+
+    def latest_depth_jpeg(self) -> bytes | None:
+        return self._node.latest_depth_jpeg if self._node else None
 
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
         loop = self._loop

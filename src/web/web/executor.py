@@ -51,6 +51,13 @@ class Executor(Protocol):
     def robot_state(self) -> dict:
         """최신 RobotState. 최소한 mode를 포함한다 (2.1절 busy 차단 판단에 쓰인다)."""
 
+    def latest_color_jpeg(self) -> bytes | None:
+        """카메라 원본 스트림의 최근 프레임(JPEG, 화면정의서 2.2.4절 — 마스크 오버레이 없음).
+        아직 못 받았거나(mock/카메라 미연결) 스트림 자체가 없으면 None."""
+
+    def latest_depth_jpeg(self) -> bytes | None:
+        """뎁스 맵을 컬러맵으로 시각화한 최근 프레임(JPEG). 없으면 None."""
+
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
         """robot_state / safety_event 변화를 web으로 밀어 올리는 콜백을 등록한다."""
 

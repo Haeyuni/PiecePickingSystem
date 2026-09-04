@@ -8,5 +8,11 @@ httpx
 # execution_logs / object_attributes 직접 접근 (웹_인터페이스_정의서 2.5절)
 psycopg[binary]
 
+# 카메라·뎁스 뷰 JPEG 인코딩 (ros_bridge.py, 화면정의서 2.2.4절). GUI 없는 컨테이너라
+# headless 빌드 — perception과 달리 여기선 opencv-python(비headless)이 요구하는 libGL이
+# 필요 없다.
+opencv-python-headless
+numpy
+
 # 주의: rclpy는 여기에 없다. ROS2 환경(ros:jazzy 베이스)에서만 제공되며,
 # MOCK_MODE=0일 때 ros_bridge.py에서만 import된다 (web/Dockerfile 참조).

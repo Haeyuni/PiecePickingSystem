@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import executor as executor_mod
 from .events import hub
-from .routers import commands, confirmations, executions, live, robot, traces, world
+from .routers import camera, commands, confirmations, executions, live, robot, traces, world
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ app.include_router(confirmations.router)
 app.include_router(robot.router)
 app.include_router(world.router)
 app.include_router(live.router)
+app.include_router(camera.router)
 
 
 @app.get("/health")
