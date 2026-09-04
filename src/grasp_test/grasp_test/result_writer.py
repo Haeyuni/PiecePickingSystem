@@ -4,7 +4,8 @@ from pathlib import Path
 
 FIELDS = ('scene_id', 'round_id', 'trial_id', 'method', 'status', 'candidate_count', 'valid_width_count',
           'model_init_ms', 'inference_ms', 'total_elapsed_ms', 'candidate_pose_camera', 'candidate_pose_robot',
-          'transform_ok', 'ik_ok', 'rg2_grip_state', 'reobservation_ok', 'pick_success', 'failure_code', 'note')
+           'transform_ok', 'ik_ok', 'rg2_grip_state', 'reobservation_ok', 'pick_success', 'failure_code', 'note',
+           'model_log', 'model_error_message')
 
 
 def cell_value(value):

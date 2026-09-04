@@ -9,6 +9,8 @@ from common.scene_io import load_scene, pixel_from_xyz, result, write_result
 
 ROOT = Path('/opt/contact_graspnet')
 sys.path.insert(0, str(ROOT))
+# Upstream inference.py runs from this directory, so its sibling imports are available.
+sys.path.insert(0, str(ROOT / 'contact_graspnet'))
 MODEL_FOLDER = 'https://drive.google.com/drive/folders/1tBHKf60K8DLM5arm-Chyf7jxkzOr5zGl'
 
 

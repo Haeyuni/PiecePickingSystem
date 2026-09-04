@@ -18,10 +18,12 @@ robot:
   # IK/collision pre-check (motion_precheck.py — Doosan Ikin API directly, not MoveIt2).
   # execute:=true stays DRY_RUN_ONLY until /dsr01/dsr_controller2/motion/ikin is reachable
   # (checked live, not a config value) — IK checking can never be skipped.
-  # Collision checking (obstacles + gripper_radius_m below) is best-effort and OPTIONAL: if
-  # either is unset, motion_precheck.py runs IK-only and logs a WARN on every trial instead of
-  # blocking — this must be an explicit, informed operator decision (direct supervision +
-  # E-stop at the robot), not a default to rely on. Collision checking itself, even when
+  # Collision checking requires BOTH obstacles and gripper_radius_m below. If either is unset,
+  # execute:=true is blocked with COLLISION_GEOMETRY_NOT_CONFIGURED. Set the following to true
+  # ONLY for a directly supervised, E-stop-ready robot test; that mode checks IK but skips
+  # collision geometry and logs SUPERVISED_IK_ONLY for every trial.
+  allow_supervised_ik_only_execution: false
+  # Collision checking itself, even when
   # configured, is a hand-rolled sphere(gripper_radius_m)-vs-AABB(obstacles) sweep along each
   # approach/grasp/lift segment — NOT a full-body/URDF check; it doesn't know the arm's
   # forearm/elbow shape or the exact RG2+camera bracket geometry, only a single sphere around

@@ -56,6 +56,6 @@ ros2 launch grasp_test grasp_test.launch.py \
 ```
 
 `execute:=true`는 `/dsr01/dsr_controller2/motion/ikin`이 응답하지 않으면 여전히 `DRY_RUN_ONLY:IK_COLLISION_VALIDATION_INTERFACE_UNAVAILABLE`로 차단됩니다(IK 검사는 항상 필수).
-`robot.obstacles`/`robot.gripper_radius_m`(충돌 사전검증)은 비어 있어도 더 이상 막지 않습니다 — 2026-09-04, 로봇 옆에서 직접 감독하겠다는 운영자 확인을 받고 IK만으로 실행을 허용하도록 바꿨습니다. 이 상태에서는 `motion_precheck.py`가 trial마다 "충돌 검사를 건너뛴다"는 WARN을 남기고, 사람이 눈으로 테이블/지그 충돌을 감독해야 합니다. 채워 넣으면 자동으로 충돌 사전검증이 켜집니다.
+`robot.obstacles`와 `robot.gripper_radius_m`은 기본 실제 실행의 필수값입니다. 둘 중 하나라도 비어 있으면 `execute:=true`는 `DRY_RUN_ONLY:COLLISION_GEOMETRY_NOT_CONFIGURED`로 차단됩니다. 로봇 옆에서 E-stop을 잡고 직접 감독하는 시험만 local YAML에서 `robot.allow_supervised_ik_only_execution: true`를 명시할 수 있습니다. 이 모드는 IK만 검사하고 충돌 geometry 검사는 생략하며, 매 trial에 `SUPERVISED_IK_ONLY` 경고를 남깁니다.
 
 결과는 설정의 `results_dir`에 `live_physical_comparison.xlsx`, CSV, trial JSON, 모델별 로그로 저장됩니다. Contact-GraspNet은 공개 출력에 RG2 폭이 없으므로 `RG2_WIDTH_UNAVAILABLE`로 기록하고 실제 RG2 실행은 하지 않습니다. `best_score`는 모델별 스케일이 달라 비교하지 않으며, 실제 테스트가 가능해진 뒤 선택 기준은 성공률, 실패 유형, 전체 시간입니다.
