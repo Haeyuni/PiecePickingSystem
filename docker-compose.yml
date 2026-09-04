@@ -34,8 +34,22 @@ services:
             - capabilities: [gpu]
 
   grasp:
-    build: ./src/grasp
+    build:
+      # 컨텍스트가 저장소 루트인 이유는 src/grasp/Dockerfile 주석 참조 (sort_msgs·perception_common을 함께 빌드)
+      context: .
+      dockerfile: src/grasp/Dockerfile
     depends_on: [perception]
+    network_mode: host   # perception의 world_state_raw/instance_masks + get_current_posx를 host DDS에서 봐야 한다
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      CYCLONEDDS_URI: file:///cyclonedds/cyclonedds.xml
+      # 컨테이너 내부 경로. 호스트의 data/calibration/을 아래 볼륨으로 마운트한 위치를 가리킨다.
+      HANDEYE_PATH: /data/calibration/T_gripper2camera.npy
+    volumes:
+      - ${CYCLONEDDS_CONFIG_DIR:-${HOME}/.config/cyclonedds}:/cyclonedds:ro
+      # dsr_msgs2(get_current_posx 서비스 타입)의 출처. src/grasp/docker-entrypoint.sh 참조.
+      - ${DOOSAN_WS_DIR:-${HOME}/cobot2_ws}/install:/doosan_ws:ro
+      - ./data:/data:ro
     deploy:
       resources:
         reservations:
