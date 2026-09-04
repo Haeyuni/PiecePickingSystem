@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>grasp_test</name><version>0.1.0</version>
+  <description>Safety-gated live physical grasp model benchmark.</description>
+  <maintainer email="jje320594@gmail.com">jje</maintainer><license>TODO</license>
+  <buildtool_depend>ament_python</buildtool_depend>
+  <exec_depend>ament_index_python</exec_depend><exec_depend>launch</exec_depend><exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend><exec_depend>sensor_msgs</exec_depend><exec_depend>dsr_msgs2</exec_depend>
+  <exec_depend>grasp_benchmark</exec_depend>
+  <export><build_type>ament_python</build_type></export>
+</package>

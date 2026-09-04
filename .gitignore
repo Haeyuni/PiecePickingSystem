@@ -266,5 +266,7 @@ label_studio_data/
 # 캘리브레이션/실험 로컬 산출물
 *.npz
 *.npy
+results/
+grasp_test.local.yaml
 # 예외: hand-eye 결과는 256B이고 모든 서비스의 좌표 변환 기준값이라 버전관리한다 (개발계획.md D-2)
 !data/calibration/T_gripper2camera.npy
