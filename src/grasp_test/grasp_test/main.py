@@ -62,9 +62,13 @@ def main(argv=None):
     rclpy.init()
     capture = LiveSceneCapture(config['camera'])
     executor = RobotExecutor(capture, {**config['robot'], **config['rg2']})
+    # Early, one-shot diagnostic only — do NOT reuse this for the per-trial execute gate below.
+    # get_current_posx has repeatedly been transiently slow in this cell; a single check here
+    # can fail while the driver is briefly busy and then recover seconds later, which used to
+    # lock the whole run into DRY_RUN_ONLY even though nothing was actually still wrong.
     ready, reason = executor.preflight(execute)
     if execute and not ready:
-        print(f'실제 실행 차단: {reason}', file=sys.stderr)
+        print(f'실제 실행 차단(시작 시점 확인): {reason} — trial마다 다시 확인합니다.', file=sys.stderr)
     try:
         yolo = YoloSegmentation(Path(config['assets']['yolo_weight']).expanduser(), config['camera'])
     except Exception as exc:
@@ -115,24 +119,31 @@ def main(argv=None):
                         row.update({'candidate_count': result.get('candidate_count', 0), 'valid_width_count': result.get('valid_width_count', 0),
                                     'model_init_ms': result.get('initialization_ms', ''), 'inference_ms': result.get('inference_ms', ''),
                                     'candidate_pose_camera': candidate, 'candidate_pose_robot': robot_pose or '', 'transform_ok': transform_ok})
-                        if not model_error and width_ok and execute and transform_ok and ready:
-                            try:
-                                picked, code = executor.execute_pick(robot_pose)
-                                grip_state, reobserved, verify_code = verifier.verify(executor.last_grip, target)
-                            except Exception as exc:
-                                picked, grip_state, reobserved = False, '', False
-                                code, verify_code = f'EXECUTION_EXCEPTION:{type(exc).__name__}:{exc}', ''
-                            # A failed trial may leave the arm below Home. Always attempt the
-                            # configured return path before asking the operator for the next reset.
-                            try:
-                                home_ok = executor.return_home()
-                            except Exception as exc:
-                                home_ok = False
-                                code = code or f'HOME_RETURN_EXCEPTION:{type(exc).__name__}:{exc}'
-                            pick_success = picked and grip_state == 'gripped' and reobserved
-                            row.update({'status': 'OK' if pick_success and home_ok else 'EXECUTION_FAILED', 'ik_ok': False,
-                                        'rg2_grip_state': grip_state, 'reobservation_ok': reobserved, 'pick_success': pick_success,
-                                        'failure_code': code or verify_code or ('' if home_ok else 'HOME_RETURN_FAILED')})
+                        if not model_error and width_ok and execute and transform_ok:
+                            # Re-check right now, not the ready flag from process start — see
+                            # the comment above the initial preflight() call.
+                            trial_ready, trial_reason = executor.preflight(execute)
+                            if not trial_ready:
+                                print(f'실제 실행 차단({trial_id}): {trial_reason}', file=sys.stderr)
+                                row['failure_code'] = trial_reason
+                            else:
+                                try:
+                                    picked, code = executor.execute_pick(robot_pose)
+                                    grip_state, reobserved, verify_code = verifier.verify(executor.last_grip, target)
+                                except Exception as exc:
+                                    picked, grip_state, reobserved = False, '', False
+                                    code, verify_code = f'EXECUTION_EXCEPTION:{type(exc).__name__}:{exc}', ''
+                                # A failed trial may leave the arm below Home. Always attempt the
+                                # configured return path before asking the operator for the next reset.
+                                try:
+                                    home_ok = executor.return_home()
+                                except Exception as exc:
+                                    home_ok = False
+                                    code = code or f'HOME_RETURN_EXCEPTION:{type(exc).__name__}:{exc}'
+                                pick_success = picked and grip_state == 'gripped' and reobserved
+                                row.update({'status': 'OK' if pick_success and home_ok else 'EXECUTION_FAILED', 'ik_ok': False,
+                                            'rg2_grip_state': grip_state, 'reobservation_ok': reobserved, 'pick_success': pick_success,
+                                            'failure_code': code or verify_code or ('' if home_ok else 'HOME_RETURN_FAILED')})
             row['total_elapsed_ms'] = round((time.monotonic() - started) * 1000, 2)
             output.add(row)
             output.save()

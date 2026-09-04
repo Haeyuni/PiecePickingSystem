@@ -176,16 +176,19 @@ class RobotExecutor:
 
         if not self._gripper_open():
             return False, 'RG2_OPEN_FAILED'
-        if not self._move_linear(approach, vel, acc):
-            return False, 'MOVE_APPROACH_FAILED'
-        if not self._move_linear(target, vel, acc):
-            return False, 'MOVE_DESCEND_FAILED'
+        ok, reason = self._move_linear(approach, vel, acc)
+        if not ok:
+            return False, f'MOVE_APPROACH_FAILED:{reason}'
+        ok, reason = self._move_linear(target, vel, acc)
+        if not ok:
+            return False, f'MOVE_DESCEND_FAILED:{reason}'
         grip, code = self._gripper_close()
         self.last_grip = grip
         if grip is None:
             return False, code
-        if not self._move_linear(approach, vel, acc):
-            return False, 'MOVE_LIFT_FAILED'
+        ok, reason = self._move_linear(approach, vel, acc)
+        if not ok:
+            return False, f'MOVE_LIFT_FAILED:{reason}'
         return True, ''
 
     def return_home(self):
@@ -197,12 +200,17 @@ class RobotExecutor:
         return self._move_home()
 
     def _move_linear(self, target_pos, vel, acc):
+        """반환: (ok, reason). reason은 실패했을 때만 의미 있다 — 'ACTION_GOAL_TIMEOUT' 등
+        action_client.call_blocking의 error_code, 또는 액션은 완료됐지만
+        result.success=False였다는 뜻의 'CONTROLLER_REPORTED_FAILURE'."""
         goal = MovelH2r.Goal()
         goal.target_pos = [float(v) for v in target_pos]
         goal.target_vel = [float(vel[0]), float(vel[1])]
         goal.target_acc = [float(acc[0]), float(acc[1])]
-        ok, result, _ = action_client.call_blocking(self._node, self._movel_client, goal)
-        return ok and bool(getattr(result, 'success', False))
+        ok, result, error_code = action_client.call_blocking(self._node, self._movel_client, goal)
+        if not ok:
+            return False, error_code
+        return bool(getattr(result, 'success', False)), 'CONTROLLER_REPORTED_FAILURE'
 
     def _move_home(self):
         home_deg = [float(v) for v in self._config['home_pose_deg']]
