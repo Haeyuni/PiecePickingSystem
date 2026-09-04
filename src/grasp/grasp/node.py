@@ -58,6 +58,7 @@ from . import pointcloud_utils, strategies
 
 SCHEMA_VERSION = "1.0.0"
 DEPTH_BUFFER_SIZE = 60          # 30fps 기준 2초. 관측 stamp가 조금 뒤처져도 같은 프레임을 찾는다
+DEPTH_ENCODINGS = ("16UC1", "mono16")
 
 
 def config_path() -> pathlib.Path:
@@ -112,8 +113,7 @@ class GraspNode(Node):
 
         self._gripper2camera = geometry.load_handeye()
         self._intrinsics = None
-        self._depth_times: list[float] = []          # 오름차순 유지 (bisect로 검색)
-        self._depths: list[np.ndarray] = []
+        self._depth_frames: list[tuple[float, np.ndarray, str]] = []
         self._pending_masks: dict[tuple[int, int], InstanceMasks] = {}
         self._pending_worlds: dict[tuple[int, int], WorldState] = {}
 
@@ -136,14 +136,25 @@ class GraspNode(Node):
 
     # --- 입력 ---------------------------------------------------------------
     def _on_info(self, msg: CameraInfo) -> None:
-        self._intrinsics = {"fx": msg.k[0], "fy": msg.k[4], "cx": msg.k[2], "cy": msg.k[5]}
+        if msg.k[0] <= 0.0 or msg.k[4] <= 0.0:
+            self._intrinsics = None
+            self.get_logger().warning("CameraInfo K가 유효하지 않다", throttle_duration_sec=5.0)
+            return
+        self._intrinsics = {"fx": msg.k[0], "fy": msg.k[4], "cx": msg.k[2], "cy": msg.k[5],
+                            "width": msg.width, "height": msg.height,
+                            "frame_id": msg.header.frame_id}
 
     def _on_depth(self, msg: Image) -> None:
-        self._depth_times.append(stamp_seconds(msg.header.stamp))
-        self._depths.append(image_to_numpy(msg))
-        if len(self._depths) > DEPTH_BUFFER_SIZE:
-            self._depth_times.pop(0)
-            self._depths.pop(0)
+        if msg.encoding not in DEPTH_ENCODINGS:
+            self.get_logger().warning(
+                f"지원하지 않는 aligned depth encoding: {msg.encoding}",
+                throttle_duration_sec=5.0)
+            return
+        frame = (stamp_seconds(msg.header.stamp), image_to_numpy(msg), msg.header.frame_id)
+        index = bisect.bisect_right([item[0] for item in self._depth_frames], frame[0])
+        self._depth_frames.insert(index, frame)
+        if len(self._depth_frames) > DEPTH_BUFFER_SIZE:
+            self._depth_frames.pop(0)
 
     def _on_masks(self, msg: InstanceMasks) -> None:
         key = stamp_key(msg.stamp)
@@ -155,24 +166,26 @@ class GraspNode(Node):
         if len(self._pending_masks) > 10:
             self._pending_masks.pop(next(iter(self._pending_masks)))
 
-    def _nearest_depth(self, when: float) -> np.ndarray | None:
+    def _nearest_depth(self, when: float) -> tuple[np.ndarray, str] | None:
         """`when`에 가장 가까운 depth 프레임. 너무 멀면 None.
 
         "가장 최근"이 아니라 "가장 가까운"이다 — 관측 stamp는 카메라 취득 시각이라 지금보다
         조금 과거이고, 그 사이 프레임이 여러 장 들어와 있다.
         """
-        if not self._depth_times:
+        if not self._depth_frames:
             return None
-        index = bisect.bisect_left(self._depth_times, when)
+        times = [item[0] for item in self._depth_frames]
+        index = bisect.bisect_left(times, when)
         best, best_gap = None, float("inf")
         for candidate in (index - 1, index, index + 1):
-            if 0 <= candidate < len(self._depth_times):
-                gap = abs(self._depth_times[candidate] - when)
+            if 0 <= candidate < len(self._depth_frames):
+                gap = abs(self._depth_frames[candidate][0] - when)
                 if gap < best_gap:
                     best, best_gap = candidate, gap
         if best is None or best_gap > self._max_depth_age_s:
             return None
-        return self._depths[best]
+        _, depth, frame_id = self._depth_frames[best]
+        return depth, frame_id
 
     # --- 한 관측 ------------------------------------------------------------
     def _on_world_state(self, world: WorldState) -> None:
@@ -195,7 +208,7 @@ class GraspNode(Node):
                                       throttle_duration_sec=5.0)
             return
 
-        depth = self._nearest_depth(stamp_seconds(world.stamp))
+        depth, depth_frame_id = self._nearest_depth(stamp_seconds(world.stamp))
         base2gripper = geometry.posx_to_matrix(self._pose_client.posx(self._pose_max_age_s))
         base2camera = base2gripper @ self._gripper2camera
         mask_by_id = {object_id: image for object_id, image in zip(masks.object_ids, masks.masks)}
@@ -205,7 +218,7 @@ class GraspNode(Node):
             image = mask_by_id.get(obj.object_id)
             if image is None:
                 continue
-            candidates = self._candidates_for(image, depth, base2camera)
+            candidates = self._candidates_for(image, depth, depth_frame_id, base2camera)
             obj.grasp_candidates = candidates
             filled += bool(candidates)
 
@@ -224,13 +237,21 @@ class GraspNode(Node):
             blockers.append("최신 TCP 자세 없음")
         return blockers
 
-    def _candidates_for(self, mask_image: Image, depth: np.ndarray,
+    def _candidates_for(self, mask_image: Image, depth: np.ndarray, depth_frame_id: str,
                         base2camera: np.ndarray) -> list[GraspCandidate]:
         mask = image_to_numpy(mask_image) > 0
         if mask.shape != depth.shape:
             self.get_logger().warning(
                 f"마스크 {mask.shape}와 depth {depth.shape}의 해상도가 다르다",
                 throttle_duration_sec=10.0)
+            return []
+        camera_grid = (self._intrinsics["height"], self._intrinsics["width"])
+        if depth.shape != camera_grid:
+            self.get_logger().warning("depth와 CameraInfo grid가 다르다", throttle_duration_sec=10.0)
+            return []
+        if (mask_image.header.frame_id != depth_frame_id
+                or depth_frame_id != self._intrinsics["frame_id"]):
+            self.get_logger().warning("mask/depth/CameraInfo frame이 다르다", throttle_duration_sec=10.0)
             return []
 
         points_cam = pointcloud_utils.backproject(mask, depth, self._intrinsics)
@@ -239,6 +260,13 @@ class GraspNode(Node):
             z_percentile=float(self._pointcloud_params.get("z_percentile", 2.0)),
             max_radius_mm=float(self._pointcloud_params.get("max_radius_mm", 250.0)))
         points_base = pointcloud_utils.transform(points_cam, base2camera)
+
+        min_points = int(self._strategy_params.get("min_points", 0))
+        if min_points and len(points_base) < min_points:
+            self.get_logger().warning(
+                f"PCA 유효 point 부족: {len(points_base)} < {min_points}",
+                throttle_duration_sec=10.0)
+            return []
 
         return [self._to_msg(c) for c in self._plan(points_base, self._strategy_params)]
 

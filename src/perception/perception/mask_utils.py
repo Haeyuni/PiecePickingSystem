@@ -5,7 +5,6 @@
 한다** — 모델 입력 크기(640)로 나온 마스크를 그대로 실으면 grasp가 엉뚱한 픽셀을 집는다.
 """
 import numpy as np
-from sensor_msgs.msg import Image
 
 
 def resize_mask(mask_bool: np.ndarray, shape_hw: tuple[int, int]) -> np.ndarray:
@@ -30,6 +29,8 @@ def mask_3d(mask_bool: np.ndarray, depth_mm: np.ndarray,
     `depth_valid_ratio`는 마스크 안에서 depth가 0이 아닌 픽셀의 비율이다. 투명·반사 물체는
     이 값이 낮게 나오므로 파지 가능 판정과 8단계(투명 물체) 확장의 입력이 된다.
     """
+    if mask_bool.shape != depth_mm.shape:
+        return None, 0.0
     ys, xs = np.nonzero(mask_bool)
     if xs.size == 0:
         return None, 0.0
@@ -45,8 +46,10 @@ def mask_3d(mask_bool: np.ndarray, depth_mm: np.ndarray,
     return (x, y, zc), ratio
 
 
-def mask_to_image_msg(mask_bool: np.ndarray, header) -> Image:
+def mask_to_image_msg(mask_bool: np.ndarray, header):
     """mono8 0/255 단일 채널 Image (인터페이스_정의서 3.3절)."""
+    from sensor_msgs.msg import Image
+
     data = (mask_bool.astype(np.uint8) * 255)
     msg = Image()
     msg.header = header
