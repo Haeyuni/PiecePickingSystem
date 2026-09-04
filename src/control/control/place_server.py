@@ -100,6 +100,10 @@ class PlaceServer(Node):
         self._rot_vel_deg_s = float(motion.get("rot_vel_deg_s", 20.0))
         self._rot_acc_deg_s2 = float(motion.get("rot_acc_deg_s2", 20.0))
         self._gripper_open_m = float(motion.get("gripper_open_m", 0.110))
+        # bin_pose는 빈 그리퍼로 티칭한 높이라, 물체를 든 채로 그 z까지 그대로 내려가면
+        # 물체(또는 그리퍼)가 바구니 바닥/기존 내용물에 먼저 닿는다 — 실물에서 충돌로
+        # 안전모드에 들어간 사고가 있었다. 그 여유만큼 목표 z를 올려서 내려간다.
+        self._release_clearance_mm = float(motion.get("release_clearance_mm", 30.0))
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
         self._posx_client = self.create_client(
@@ -182,10 +186,12 @@ class PlaceServer(Node):
         """위치제어만으로 실물 place_into를 수행한다 (pick_server._pick_real과 같은 1단계
         제약 — compliance/visual_verification 없이 bins.yaml 좌표를 그대로 믿는다).
 
-        bin_pose 바로 위(approach_height_mm)에서 한 번 멈췄다 내려가 그리퍼를 열고
-        다시 들어올린다. 성공 True, 취소 None, 그 외 실패는 RuntimeError.
+        bin_pose 바로 위(approach_height_mm)에서 한 번 멈췄다, bin_pose.z + release_clearance_mm
+        까지만 내려가 그리퍼를 열고 다시 들어올린다 — bin_pose 그 자체(z)까지 내려가지 않는다.
+        성공 True, 취소 None, 그 외 실패는 RuntimeError.
         """
         target_posx = dsr_motion.bin_pose_to_posx(bin_pose)
+        target_posx[2] += self._release_clearance_mm
         approach_posx = list(target_posx)
         approach_posx[2] += self._approach_height_mm
         target_xyz = target_posx[:3]

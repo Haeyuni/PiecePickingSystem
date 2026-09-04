@@ -23,6 +23,19 @@ motion:
   # RG2 최대 개폭. grasp/config/grasp_params.yaml의 gripper.max_opening_mm(110.0)과 같은 값 —
   # 그쪽은 파지 후보 계산용(mm), 여기는 GripperCommand 액션 호출용(m)이라 단위만 다르다.
   gripper_open_m: 0.110
+  # place_into가 bin_pose.z까지 그대로 내려가면(예전 동작), bin_pose는 빈 그리퍼로 티칭한
+  # 높이라 실제로 물체를 든 상태에서는 물체가 그 높이에 닿기 전에 바구니 바닥/기존 내용물에
+  # 먼저 닿는다 — 실물에서 그리퍼가 열리기도 전에 충돌해 안전모드로 들어간 사고가 있었다.
+  # 그리퍼를 여는 목표 z를 이 값만큼 위로 올려서 그 여유를 둔다.
+  # TODO: 값 확정 — 30mm는 안전 쪽으로 보수적으로 잡은 시작값이다. 실물로 다시 확인해
+  # 목적지 안에서 확실히 놓이는지(너무 높으면 떨어뜨리는 모양이 된다) 튜닝이 필요하다.
+  release_clearance_mm: 30.0
+
+gripper:
+  # 이 미만 개폭으로 닫히면 "닫혔지만 아무것도 안 물렸다"로 본다 — grasp_test/
+  # robot_executor.py가 쓰는 것과 같은 기본값(RG2 개폭 기준 손가락이 완전히 맞닿는
+  # 지점 근처, 5.0mm).
+  min_grip_width_mm: 5.0
 
 visual_verification:
   wrist_camera_offset_mm: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정). 단위 mm

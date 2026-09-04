@@ -72,6 +72,12 @@ class PickServer(Node):
         self._linear_acc_mm_s2 = float(motion.get("linear_acc_mm_s2", 30.0))
         self._rot_vel_deg_s = float(motion.get("rot_vel_deg_s", 20.0))
         self._rot_acc_deg_s2 = float(motion.get("rot_acc_deg_s2", 20.0))
+        self._gripper_open_m = float(motion.get("gripper_open_m", 0.110))
+        gripper = params.get("gripper") or {}
+        # 이 미만이면 "닫혔지만 아무것도 안 물렸다"로 본다. compliance/visual_verification이
+        # 아직 없어 이게 유일한 파지 확인 수단이다 — grasp_test/robot_executor.py의
+        # 같은 판정(min_grip_width_mm)과 같은 기본값을 쓴다.
+        self._min_grip_width_mm = float(gripper.get("min_grip_width_mm", 5.0))
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
         self._posx_client = self.create_client(
@@ -130,6 +136,19 @@ class PickServer(Node):
                 if width_mm is None:
                     goal_handle.canceled()
                     return self._result(False, Pick.Result.REASON_NO_CONTACT, started)
+                if width_mm <= self._min_grip_width_mm:
+                    # 그리퍼가 끝까지 닫혔다 — 물체 없이 빈 채로 닫힌 것과 구분이 안 되던
+                    # 부분. 예전엔 여기서 모션이 끝까지 돌았다는 이유만으로 success=True를
+                    # 돌려줘서, 실제로는 아무것도 못 집었는데도 place_into가 그대로 이어져
+                    # 빈 그리퍼로 목적지까지 이동하는 사고로 이어졌다.
+                    self.get_logger().warning(
+                        f"pick 실패: 그리퍼가 빈 채로 닫힘 (width={width_mm:.1f}mm <= "
+                        f"min_grip_width_mm={self._min_grip_width_mm:.1f}mm)")
+                    store.set_gripper(width_mm=width_mm, closed=True)
+                    result = self._result(False, Pick.Result.REASON_GRASP_FAILED, started)
+                    self._cache.put(goal.request_id, result)
+                    goal_handle.succeed()
+                    return result
                 visual_passed, torque = False, []
 
             if self._injected_failure(goal.object_id):
@@ -193,6 +212,19 @@ class PickServer(Node):
             if current is None:
                 return None
             return [xyz[0], xyz[1], xyz[2], current[3], current[4], current[5]]
+
+        # 그리퍼를 먼저 연다. 예전엔 여기서 열지 않고 바로 닫기만 했다 — 이전 사이클에서
+        # 그리퍼가 닫힌 채 남아 있으면(파지 실패 후, 또는 place_into가 도중에 멈춘 경우)
+        # 다음 pick이 이미 닫힌 그리퍼로 "닫기"만 반복해 애초에 아무것도 못 무는 문제가 있었다.
+        open_command = dsr_motion.gripper_width_command(self._gripper_open_m)
+        if not dsr_motion.send_gripper_command(self._gripper_cmd_client, open_command):
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("그리퍼 열기 명령 전송 실패")
+        if dsr_motion.wait_gripper_settled(lambda: self._gripper_joint_angle, goal_handle) is None:
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("그리퍼가 열리는 동안 응답이 없다")
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_APPROACHING)
         if not move(approach_posx):
