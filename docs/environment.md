@@ -23,7 +23,16 @@
 
 ## 3. CUDA / PyTorch 조합
 
-TODO: `perception`(YOLO11-seg)과 `grasp`(Open3D, PyTorch, Contact-GraspNet, GraspNet-baseline)는 CUDA 버전을 분리한다 (시스템명세서 3.1절). 실측 후 조합 확정.
+**perception 확정 (2026-09-04 실측)**: 드라이버 595.84가 CUDA 13.2까지 지원한다. `pip install
+ultralytics`가 그대로 torch 2.14.0(cu13 빌드)·torchvision 0.29.0·opencv-python 5.0.0.93·
+numpy 2.5.2를 받아 오고, `nvidia-smi`/`torch.cuda.is_available()` 양쪽에서 GPU를 잡는 것까지
+확인했다(호스트 `.venv`, Docker 컨테이너 둘 다). 고정값은 `src/perception/requirements.txt`.
+베이스 이미지에는 CUDA 툴킷을 넣지 않는다 — torch 휠이 필요한 런타임을 pip 의존성으로
+가져오고, GPU 접근은 호스트 드라이버 + nvidia-container-toolkit이 맡는다
+(`docker-compose.yml`의 `deploy.resources.reservations.devices`).
+
+`grasp`는 아직 미해당 — heuristic_pca(numpy만 필요)만 구현되어 있어 Open3D/PyTorch/
+Contact-GraspNet/GraspNet-baseline이 실제로 붙는 시점에 다시 실측한다.
 
 ## 4. 서비스별 언어/런타임
 

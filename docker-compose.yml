@@ -25,8 +25,29 @@ services:
       retries: 20
 
   perception:
-    build: ./src/perception
-    depends_on: [db]
+    build:
+      # 컨텍스트가 저장소 루트인 이유는 src/perception/Dockerfile 주석 참조 (sort_msgs·perception_common을 함께 빌드)
+      context: .
+      dockerfile: src/perception/Dockerfile
+    depends_on:
+      db:
+        condition: service_started
+    network_mode: host   # 카메라(realsense2_camera)·get_current_posx·grasp 구독자를 host DDS에서 봐야 한다
+    environment:
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      CYCLONEDDS_URI: file:///cyclonedds/cyclonedds.xml
+      # 컨테이너 내부 경로. 호스트의 data/calibration/을 아래 볼륨으로 마운트한 위치를 가리킨다.
+      HANDEYE_PATH: /data/calibration/T_gripper2camera.npy
+      # host 네트워크라 서비스 이름 DNS가 없다 (web_ros와 같은 이유) — 게시된 포트로 부른다.
+      DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB:-piece_picking}
+      # *.pt는 이미지에 굽지 않는다(.gitignore) — 아래 볼륨이 가리키는 호스트 파일을 그대로 쓴다.
+      PERCEPTION_MODEL: /models/best.pt
+    volumes:
+      - ${CYCLONEDDS_CONFIG_DIR:-${HOME}/.config/cyclonedds}:/cyclonedds:ro
+      # dsr_msgs2(get_current_posx 서비스 타입)의 출처. src/perception/docker-entrypoint.sh 참조.
+      - ${DOOSAN_WS_DIR:-${HOME}/cobot2_ws}/install:/doosan_ws:ro
+      - ./data:/data:ro
+      - ./models:/models:ro
     deploy:
       resources:
         reservations:

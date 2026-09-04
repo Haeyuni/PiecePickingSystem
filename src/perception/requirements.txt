@@ -1,0 +1,13 @@
+# 호스트 .venv(perception/README.md 1회 준비 절차)에서 실측 검증된 조합을 그대로 고정한다.
+# docs/environment.md 3절의 CUDA/PyTorch TODO를 이 값으로 확정한다 — 드라이버 595.84가
+# CUDA 13.2까지 지원하므로 torch의 cu13 빌드(2.14.0)가 그대로 맞는다.
+ultralytics==8.4.138
+torch==2.14.0
+torchvision==0.29.0
+opencv-python==5.0.0.93
+numpy==2.5.2
+PyYAML==6.0.1
+
+# DB(object_attributes) 조회는 선택 사항이다 — 없으면 attribute_db.py가 objects.yaml
+# seed로 대신하고 경고만 남긴다(코드 참조). 버전을 못 박을 근거(host 실측)가 없어 미고정.
+psycopg[binary]

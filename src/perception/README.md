@@ -1,7 +1,10 @@
 # perception 검출 모델 테스트
 
-`models/best.pt` = ultralytics **yolo26n-seg** (task=segment, imgsz=640, nc=3)
-클래스: `0 suncream`, `1 tape`, `2 nail_product`
+`models/best.pt` = ultralytics **yolo11n-seg** (task=segment, imgsz=640, nc=6)
+클래스: `0 suncream`, `1 tape`, `2 nail_product`, `3 denmark_probiotics`, `4 ecla_wet_tissue`,
+`5 pigeon_spray_blue_bianca`. `config/objects.yaml`의 `model_labels`는 아직 앞의 3종만
+매핑한다 — 나머지 3종은 신규 클래스로 잡혀 fragile이 강제된다(개발계획.md D-7, 2026-09-04
+클래스 수 정정 참조).
 
 ## 1회 준비
 
