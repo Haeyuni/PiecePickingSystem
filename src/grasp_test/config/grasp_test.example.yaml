@@ -15,14 +15,31 @@ robot:
   base_frame: base_link
   pose_service: /dsr01/dsr_controller2/aux_control/get_current_posx
   handeye_path: /home/USER/workspace/PiecePickingSystem/data/calibration/T_gripper2camera.npy
-  # An existing, read-only IK + collision validation interface is required before execute:=true.
-  # This repository currently has no verified interface for it, so execution remains DRY_RUN_ONLY.
-  ik_collision_validation_interface: null
+  # IK/collision pre-check (motion_precheck.py — Doosan Ikin API directly, not MoveIt2).
+  # execute:=true stays DRY_RUN_ONLY until /dsr01/dsr_controller2/motion/ikin is reachable
+  # (checked live, not a config value) — IK checking can never be skipped.
+  # Collision checking (obstacles + gripper_radius_m below) is best-effort and OPTIONAL: if
+  # either is unset, motion_precheck.py runs IK-only and logs a WARN on every trial instead of
+  # blocking — this must be an explicit, informed operator decision (direct supervision +
+  # E-stop at the robot), not a default to rely on. Collision checking itself, even when
+  # configured, is a hand-rolled sphere(gripper_radius_m)-vs-AABB(obstacles) sweep along each
+  # approach/grasp/lift segment — NOT a full-body/URDF check; it doesn't know the arm's
+  # forearm/elbow shape or the exact RG2+camera bracket geometry, only a single sphere around
+  # the TCP. Keep gripper_radius_m conservative (larger than the true envelope).
+  # Strongly recommended: measure this cell's table/box/jig and fill in obstacles (meters, base frame).
+  obstacles: []
+  # obstacles: [{name: table, center_m: [x, y, z], size_m: [length, width, height]}, ...]
+  # MANUAL_REQUIRED: conservative radius (m) of a sphere around the TCP that contains the RG2
+  # gripper + camera bracket in every gripper open/close state. No default — must be measured.
+  gripper_radius_m: null
+  # Waypoint spacing (m) used when sweeping each segment for collisions. Smaller = more thorough,
+  # slower. 0.01 (1cm) is a reasonable default; no need to change unless obstacles are very thin.
+  path_check_step_m: 0.01
   # /dsr01/motion/movej_h2r, /dsr01/motion/movel_h2r (verified via `ros2 action list` on the
   # robot PC, 2026-09-04). robot_executor.py talks to them directly, not through control/'s
   # sort_msgs Pick/Home wrappers. See robot_executor.py module docstring for why.
   # z lower bound below doubles as the safety floor above the table/bin.
-  workspace_mm: {x: [-350, 350], y: [-350, 350], z: [80, 500]}
+  workspace_mm: {x: [-500, 500], y: [-500, 500], z: [0, 500]}
   approach_height_mm: 80.0
   linear_vel_mm_s: 30.0
   linear_acc_mm_s2: 30.0

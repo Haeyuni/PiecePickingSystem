@@ -18,6 +18,16 @@ DISPLAY_NAMES = {
 }
 
 
+def result_filename(scene_id, method):
+    # docker/common/scene_io.py's write_result() names the file from the *display* name
+    # (row['method']), not this module's method key — for every method except 'ggcnn' those
+    # happen to normalize to the same string, but 'GG-CNN' -> 'gg_cnn' != 'ggcnn'. Looking up
+    # the wrong filename here made a successful ggcnn container's real result invisible to the
+    # cleanup/fallback-error logic below (confirmed live, 2026-09-04 — see model_runner.py in
+    # grasp_test for the same bug, which did cause false MODEL_CONTAINER_FAILED reports there).
+    return f"{scene_id}_{DISPLAY_NAMES[method].lower().replace('-', '_')}.json"
+
+
 def resolve_scene(value):
     requested = Path(value).expanduser()
     choices = (requested, Path.cwd() / 'data' / 'scenes' / requested.name, Path.home() / 'Downloads' / requested.name)
@@ -76,7 +86,7 @@ def main(argv=None):
     models_dir.mkdir(exist_ok=True)
     scene_id = scene_path.stem
     for method in METHODS:
-        (results_dir / f'{scene_id}_{method}.json').unlink(missing_ok=True)
+        (results_dir / result_filename(scene_id, method)).unlink(missing_ok=True)
         (results_dir / f'{scene_id}_{method}.log').unlink(missing_ok=True)
     for suffix in ('comparison.csv', 'comparison.xlsx', 'comparison_preview.png'):
         (results_dir / f'{scene_id}_{suffix}').unlink(missing_ok=True)
@@ -88,14 +98,15 @@ def main(argv=None):
         build = ['docker', 'build', '--tag', image, '--file', str(dockerfile), str(package_share)]
         print(f'===== {DISPLAY_NAMES[method]} build/run =====')
         if run_logged(build, log_path) != 0:
-            (results_dir / f'{scene_id}_{method}.json').write_text(json.dumps(error_row(scene_id, method, 'Docker image build failed'), ensure_ascii=False, indent=2))
+            (results_dir / result_filename(scene_id, method)).write_text(json.dumps(error_row(scene_id, method, 'Docker image build failed'), ensure_ascii=False, indent=2))
             continue
         run = ['docker', 'run', '--rm', '-v', f'{scene_path.parent}:/scenes:ro', '-v', f'{results_dir}:/results', '-v', f'{models_dir}:/models']
         if method != 'pca_normal':
             run.extend(['--gpus', 'all'])
         run.extend([image, f'/scenes/{scene_path.name}'])
-        if run_logged(run, log_path) != 0 and not (results_dir / f'{scene_id}_{method}.json').exists():
-            (results_dir / f'{scene_id}_{method}.json').write_text(json.dumps(error_row(scene_id, method, 'Container exited before writing a result JSON'), ensure_ascii=False, indent=2))
+        result_path = results_dir / result_filename(scene_id, method)
+        if run_logged(run, log_path) != 0 and not result_path.exists():
+            result_path.write_text(json.dumps(error_row(scene_id, method, 'Container exited before writing a result JSON'), ensure_ascii=False, indent=2))
 
     aggregate_log = results_dir / f'{scene_id}_aggregate.log'
     aggregate_image = 'piece-picking-grasp-benchmark-aggregate:latest'

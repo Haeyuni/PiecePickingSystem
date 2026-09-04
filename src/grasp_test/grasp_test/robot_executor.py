@@ -46,6 +46,7 @@ from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
 
 from . import action_client
+from .motion_precheck import MotionPrecheck
 
 MOVEJ_ACTION = '/dsr01/motion/movej_h2r'
 MOVEL_ACTION = '/dsr01/motion/movel_h2r'
@@ -68,6 +69,7 @@ class RobotExecutor:
         self._gripper_joint_angle = None
         node.create_subscription(JointState, GRIPPER_JOINT_STATES_TOPIC, self._on_gripper_state, 5)
         self._pose_client = RobotPoseClient(node, service_name=config['pose_service'])
+        self._precheck = MotionPrecheck(node, config)
         self.last_grip = None
 
     def _on_gripper_state(self, msg):
@@ -81,7 +83,14 @@ class RobotExecutor:
         if execute:
             # MoveL controller rejection is not an IK/collision *pre-check*. The benchmark must
             # not discover reachability or a collision by first commanding the physical robot.
-            missing.append('IK_COLLISION_VALIDATION_INTERFACE_UNAVAILABLE')
+            # motion_precheck.MotionPrecheck now provides a real one (Doosan Ikin + a
+            # hand-rolled sphere-vs-AABB collision check, not MoveIt — see that module's
+            # docstring for why and for its known coverage limits). Collision geometry
+            # (obstacles/gripper_radius_m) is optional here by explicit operator decision
+            # (2026-09-04, direct human supervision at the robot) — if unset, MotionPrecheck
+            # still runs IK-only and logs a WARN every call; it does not silently claim safety.
+            if not self._precheck.available():
+                missing.append('IK_COLLISION_VALIDATION_INTERFACE_UNAVAILABLE')
             for name, client in (('MOVEJ', self._movej_client), ('MOVEL', self._movel_client)):
                 if not client.wait_for_server(timeout_sec=3.0):
                     missing.append(f'{name}_ACTION_UNAVAILABLE')
@@ -151,6 +160,17 @@ class RobotExecutor:
         target = list(robot_pose['target_pos'])
         approach = list(target)
         approach[2] += float(self._config['approach_height_mm'])
+
+        # Pre-plan approach -> grasp -> lift (lift reuses the approach pose, same as the
+        # real motion below) BEFORE commanding anything real. Any failure here blocks motion
+        # entirely — nothing past this point runs unless all three legs check out.
+        current = self._current_posx()
+        if current is None:
+            return False, 'ROBOT_POSE_UNAVAILABLE'
+        ok, stage, code = self._precheck.check_pick_path(current, approach, target, approach)
+        if not ok:
+            return False, f'{code}:{stage}' if stage else code
+
         vel = (self._config['linear_vel_mm_s'], self._config['rot_vel_deg_s'])
         acc = (self._config['linear_acc_mm_s2'], self._config['rot_acc_deg_s2'])
 

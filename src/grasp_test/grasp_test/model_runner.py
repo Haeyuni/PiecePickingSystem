@@ -37,7 +37,15 @@ class ModelRunner:
                 command += ['--gpus', 'all']
             command += [image, f'/scenes/{scene_path.name}']
             ran = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
-        result_path = output_dir / f'{scene_path.stem}_{method}.json'
+        # common/scene_io.py's write_result() names the file from the *display* method name
+        # (row['method']), not this dict's method key — they only happen to match for every
+        # method except 'ggcnn' (DISPLAY['ggcnn'] == 'GG-CNN' -> 'gg_cnn', not 'ggcnn'). Matching
+        # the wrong filename here made every successful ggcnn run get reported as
+        # MODEL_CONTAINER_FAILED, since result_path.is_file() was checking a name that never
+        # existed (2026-09-04, confirmed live: the container actually exits 0 and writes
+        # <scene>_gg_cnn.json).
+        result_name = DISPLAY[method].lower().replace('-', '_')
+        result_path = output_dir / f'{scene_path.stem}_{result_name}.json'
         if ran.returncode or not result_path.is_file():
             return None, 'MODEL_CONTAINER_FAILED', log_path
         result = json.loads(result_path.read_text())
