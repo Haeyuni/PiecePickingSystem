@@ -1,12 +1,13 @@
 # 분류 목적지 정의. 캘리브레이션 단계에서 실측해 고정한다.
 # 좌표 단위는 mm (인터페이스_정의서.md 1.1절). 회전은 쿼터니언.
 # 참조: 인터페이스_정의서.md 5.2절
-# TODO: left_box는 아직 placeholder — calibration/measure_bins.py(미구현)로 실측해 교체.
 
 bins:
   left_box:
+    # 2026-09-04 실측: get_current_posx()로 읽은 로봇의 실제 TCP 자세(base 좌표계).
+    # 변환 방식은 right_box와 동일(아래 주석 참조).
     name_ko: 왼쪽 박스
-    pose: { x: 350, y: 250, z: 50, qx: 0, qy: 0, qz: 0, qw: 1 }
+    pose: { x: -446.884, y: -379.274, z: 206.037, qx: 0.000355, qy: 1.000000, qz: 0.000059, qw: 0.000047 }
   right_box:
     # 2026-09-04 실측: get_current_posx()로 읽은 로봇의 실제 TCP 자세(base 좌표계).
     # ZYZ 오일러(rx=27.3077, ry=179.2408, rz=27.9209 deg) → 쿼터니언은
