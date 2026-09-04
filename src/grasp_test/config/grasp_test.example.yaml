@@ -15,6 +15,9 @@ robot:
   base_frame: base_link
   pose_service: /dsr01/dsr_controller2/aux_control/get_current_posx
   handeye_path: /home/USER/workspace/PiecePickingSystem/data/calibration/T_gripper2camera.npy
+  # An existing, read-only IK + collision validation interface is required before execute:=true.
+  # This repository currently has no verified interface for it, so execution remains DRY_RUN_ONLY.
+  ik_collision_validation_interface: null
   # /dsr01/motion/movej_h2r, /dsr01/motion/movel_h2r (verified via `ros2 action list` on the
   # robot PC, 2026-09-04). robot_executor.py talks to them directly, not through control/'s
   # sort_msgs Pick/Home wrappers. See robot_executor.py module docstring for why.
@@ -30,9 +33,11 @@ robot:
   home_vel_deg_s: 20.0
   home_acc_deg_s2: 20.0
 rg2:
+  expected_model: rg2
   # onrobot_rg_msgs/srv/SetCommand+GripperPose (/onrobot/sendCommand, /onrobot/pose), verified
-  # on the robot PC (2026-09-04). control_msgs/action/GripperCommand (/rg6_controller) is NOT
-  # used — confirmed unreliable on this hardware, see robot_executor.py module docstring.
+  # on the robot PC (2026-09-04). The vendor's /rg6_controller action name is fixed even for
+  # RG2, so the driver itself MUST be launched with `gripper:=rg2`. This package does not use
+  # that unreliable action; it uses SetCommand/GripperPose below.
   # Closing force isn't configurable through this path (server default, conservative); there is
   # no gripper_effort_n knob here anymore.
   min_grip_width_mm: 5.0

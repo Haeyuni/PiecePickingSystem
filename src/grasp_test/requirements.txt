@@ -1,0 +1,4 @@
+# Install into the same Python environment used by GRASP_TEST_PYTHON/.venv.
+ultralytics
+openpyxl
+PyYAML

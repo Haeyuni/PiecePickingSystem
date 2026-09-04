@@ -12,7 +12,7 @@ class PickVerifier:
         self._capture = capture
         self._yolo = yolo
 
-    def verify(self, grip):
+    def verify(self, grip, original_target):
         if grip is None:
             return '', False, 'RG2_STATUS_UNAVAILABLE'
         grip_state = grip['grip_state']
@@ -22,7 +22,13 @@ class PickVerifier:
         frame, capture_error = self._capture.capture()
         if frame is None:
             return grip_state, False, f'REOBSERVATION_CAPTURE_FAILED:{capture_error}'
-        target, _ = self._yolo.target_mask(frame.rgb, frame.depth_mm)
-        if target is not None:
+        target, reason = self._yolo.target_mask(frame.rgb, frame.depth_mm)
+        if target is None:
+            # Only zero masks mean the isolated target disappeared. Multiple masks are an
+            # ambiguous observation, not evidence that the picked object left the table.
+            if reason.endswith(':0'):
+                return grip_state, True, ''
+            return grip_state, False, f'REOBSERVATION_AMBIGUOUS:{reason}'
+        if target['class_name'] == original_target['class_name']:
             return grip_state, False, 'OBJECT_STILL_ON_TABLE'
-        return grip_state, True, ''
+        return grip_state, False, 'REOBSERVATION_DIFFERENT_OBJECT'

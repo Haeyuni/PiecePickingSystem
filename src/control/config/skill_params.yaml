@@ -20,7 +20,7 @@ motion:
   linear_acc_mm_s2: 30.0
   rot_vel_deg_s: 20.0
   rot_acc_deg_s2: 20.0
-  # RG6 최대 개폭. grasp/config/grasp_params.yaml의 gripper.max_opening_mm(110.0)과 같은 값 —
+  # RG2 최대 개폭. grasp/config/grasp_params.yaml의 gripper.max_opening_mm(110.0)과 같은 값 —
   # 그쪽은 파지 후보 계산용(mm), 여기는 GripperCommand 액션 호출용(m)이라 단위만 다르다.
   gripper_open_m: 0.110
 
