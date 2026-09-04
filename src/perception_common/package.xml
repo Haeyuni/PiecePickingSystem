@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>perception</name>
+  <name>perception_common</name>
   <version>0.0.1</version>
-  <description>RGB-D 손목 카메라 기반 물체 검출·세그멘테이션, /perception/world_state_raw 및 /perception/instance_masks 발행</description>
+  <description>perception/grasp가 함께 쓰는 좌표 변환·이미지 변환·TCP 자세 조회 (컨테이너 분리 시점에 perception에서 분리, 개발계획.md 참조)</description>
   <maintainer email="jje320594@gmail.com">jje</maintainer>
   <license>TODO</license>
 
@@ -12,14 +12,9 @@
   <buildtool_depend>ament_pep257</buildtool_depend>
   <buildtool_depend>python3-pytest</buildtool_depend>
 
-  <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
-  <depend>geometry_msgs</depend>
-  <depend>sort_msgs</depend>
-  <depend>std_msgs</depend>
-  <!-- 좌표 변환(geometry)·이미지 변환(image_utils)·경로 탐색(paths)·TCP 자세 조회
-       (robot_pose, get_current_posx 서비스). grasp와 공용이라 별도 패키지로 뺐다. -->
-  <depend>perception_common</depend>
+  <!-- robot_pose.py가 get_current_posx 서비스를 부른다 (perception/grasp 둘 다 필요) -->
+  <depend>dsr_msgs2</depend>
 
   <export>
     <build_type>ament_python</build_type>

@@ -20,7 +20,7 @@ def venv_python() -> str:
     if override:
         return override
     try:
-        from perception.paths import find_repo_path
+        from perception_common.paths import find_repo_path
 
         return str(find_repo_path(".venv", "bin", "python"))
     except Exception:

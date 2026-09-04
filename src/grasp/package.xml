@@ -17,6 +17,8 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sort_msgs</depend>
+  <!-- perception과 공용인 좌표 변환(geometry)·이미지 변환(image_utils)·TCP 자세 조회(robot_pose) -->
+  <depend>perception_common</depend>
 
   <export>
     <build_type>ament_python</build_type>

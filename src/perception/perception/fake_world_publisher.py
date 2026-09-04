@@ -22,7 +22,7 @@ from rclpy.node import Node
 
 from sort_msgs.msg import DetectedObject, GraspCandidate, WorldState
 
-from .paths import find_repo_path
+from perception_common.paths import find_repo_path
 
 def default_mock_dir() -> pathlib.Path:
     """`data/mock`의 위치. 소스 트리와 colcon 설치 트리 양쪽에서 찾는다 (paths.find_repo_path)."""

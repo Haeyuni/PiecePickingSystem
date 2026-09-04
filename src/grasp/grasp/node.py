@@ -32,20 +32,20 @@ from sensor_msgs.msg import CameraInfo, Image
 
 from sort_msgs.msg import GraspCandidate, InstanceMasks, WorldState
 
-# perception 패키지의 좌표 변환·이미지 변환을 그대로 쓴다.
+# perception_common(공용 패키지)의 좌표 변환·이미지 변환을 그대로 쓴다.
 #
 # **복제하지 않는 이유**: eye-in-hand 변환이 두 곳에 있으면 한쪽만 고쳐진 채로 돌 수 있고,
 # 그때 어긋나는 것은 로봇이 가는 좌표다(control/control/units.py의 mm 규칙과 같은 논리).
 # 캘리브레이션이 `get_current_posx()` 기준으로 풀렸기 때문에 TF로 우회할 수도 없다 —
 # 로봇 TF의 루트는 `base_link`이고 그것이 posx의 base와 같은 원점이라는 보장이 없다.
 #
-# perception/grasp를 각자 컨테이너로 분리하는 시점(시스템명세서 5.2절)에는 이 공용 코드가
-# 별도 패키지로 빠져야 한다. 그전까지는 의존 방향이 데이터 흐름과 같아(perception → grasp)
-# 순환이 생기지 않는다.
-from perception import geometry
-from perception.image_utils import image_to_numpy
-from perception.paths import find_repo_path
-from perception.robot_pose import RobotPoseClient
+# perception/grasp를 각자 컨테이너로 분리하면서(시스템명세서 5.2절) geometry/image_utils/
+# paths/robot_pose를 perception_common으로 뺐다 — grasp가 컨테이너 안에서 perception
+# 패키지(ultralytics 등 무거운 의존성 포함) 전체를 끌고 올 이유가 없어졌다.
+from perception_common import geometry
+from perception_common.image_utils import image_to_numpy
+from perception_common.paths import find_repo_path
+from perception_common.robot_pose import RobotPoseClient
 
 from . import pointcloud_utils, strategies
 
