@@ -12,13 +12,17 @@ import time
 
 import rclpy
 import yaml
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
+from control_msgs.action import GripperCommand
+from dsr_msgs2.action import MovelH2r
 from sort_msgs.action import PlaceInto
 
+from . import dsr_motion
+from .config_paths import skill_params_path
 from .request_cache import RequestCache
 from .robot_state_publisher import is_fake_robot, store
 
@@ -62,6 +66,13 @@ def load_bins(path: pathlib.Path | None = None) -> dict:
         return (yaml.safe_load(f) or {}).get("bins") or {}
 
 
+def load_motion_params(path: pathlib.Path | None = None) -> dict:
+    path = path or skill_params_path()
+    with path.open(encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    return config.get("motion") or {}
+
+
 class PlaceServer(Node):
     def __init__(self):
         super().__init__('place_server')
@@ -72,12 +83,26 @@ class PlaceServer(Node):
             self.get_logger().error(f"bins.yaml을 찾을 수 없습니다: {bins_yaml_path()}")
             self._bins = {}
 
+        callbacks = ReentrantCallbackGroup()
         self._action_server = ActionServer(
             self, PlaceInto, 'place_into', self.execute_callback,
             goal_callback=lambda _: GoalResponse.ACCEPT,
             cancel_callback=self._cancel_callback,
-            callback_group=ReentrantCallbackGroup(),
+            callback_group=callbacks,
         )
+
+        motion = load_motion_params()
+        self._approach_height_mm = float(motion.get("approach_height_mm", 80.0))
+        self._linear_vel_mm_s = float(motion.get("linear_vel_mm_s", 30.0))
+        self._linear_acc_mm_s2 = float(motion.get("linear_acc_mm_s2", 30.0))
+        self._rot_vel_deg_s = float(motion.get("rot_vel_deg_s", 20.0))
+        self._rot_acc_deg_s2 = float(motion.get("rot_acc_deg_s2", 20.0))
+        self._gripper_open_m = float(motion.get("gripper_open_m", 0.110))
+        self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
+                                          callback_group=callbacks)
+        self._gripper_client = ActionClient(self, GripperCommand, dsr_motion.GRIPPER_ACTION,
+                                            callback_group=callbacks)
+
         self.get_logger().info(
             f"place_into 액션 서버 준비 (목적지 {list(self._bins)}, "
             f"{'fake' if is_fake_robot() else '실물'} 모드)")
@@ -109,21 +134,17 @@ class PlaceServer(Node):
         started = time.monotonic()
 
         try:
-            for phase in PHASES:
-                if goal_handle.is_cancel_requested:
+            if is_fake_robot():
+                for phase in PHASES:
+                    if goal_handle.is_cancel_requested:
+                        goal_handle.canceled()
+                        return self._result(False, PlaceInto.Result.REASON_NO_CONTACT, started)
+                    self._publish_phase(goal_handle, phase)
+                    time.sleep(FAKE_PHASE_DURATION_S)
+            else:
+                if self._place_real(goal_handle, bin_pose) is None:
                     goal_handle.canceled()
                     return self._result(False, PlaceInto.Result.REASON_NO_CONTACT, started)
-
-                feedback = PlaceInto.Feedback()
-                feedback.phase = phase
-                goal_handle.publish_feedback(feedback)
-
-                if is_fake_robot():
-                    time.sleep(FAKE_PHASE_DURATION_S)
-                else:
-                    # TODO(실물): bins.yaml 좌표(mm) → units.mm_to_m() → MoveIt2 모션,
-                    # 놓기 후 compliance.py로 배치 성공 판정
-                    raise NotImplementedError("실물 place_into는 MoveIt2 연결 후 활성화한다")
 
             store.set_gripper(width_mm=0.0, closed=False)
             result = self._result(True, PlaceInto.Result.REASON_NONE, started)
@@ -139,6 +160,59 @@ class PlaceServer(Node):
         finally:
             if store.snapshot()["mode"] != "error":
                 store.set_idle()
+
+    @staticmethod
+    def _publish_phase(goal_handle, phase) -> None:
+        feedback = PlaceInto.Feedback()
+        feedback.phase = phase
+        goal_handle.publish_feedback(feedback)
+
+    def _place_real(self, goal_handle, bin_pose: dict) -> bool | None:
+        """위치제어만으로 실물 place_into를 수행한다 (pick_server._pick_real과 같은 1단계
+        제약 — compliance/visual_verification 없이 bins.yaml 좌표를 그대로 믿는다).
+
+        bin_pose 바로 위(approach_height_mm)에서 한 번 멈췄다 내려가 그리퍼를 열고
+        다시 들어올린다. 성공 True, 취소 None, 그 외 실패는 RuntimeError.
+        """
+        target_posx = dsr_motion.bin_pose_to_posx(bin_pose)
+        approach_posx = list(target_posx)
+        approach_posx[2] += self._approach_height_mm
+
+        def move(pos):
+            return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
+                                          self._linear_vel_mm_s, self._linear_acc_mm_s2,
+                                          self._rot_vel_deg_s, self._rot_acc_deg_s2)
+
+        self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_MOVING)
+        if not move(approach_posx):
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("접근 위치로 이동 실패")
+
+        self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_INSERTING)
+        if not move(target_posx):
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("배치 위치로 이동 실패")
+
+        self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_RELEASING)
+        ok, _ = dsr_motion.move_gripper(self._gripper_client, self._gripper_open_m, 0.0,
+                                        goal_handle)
+        if not ok:
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("그리퍼 열기 실패")
+
+        self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_VERIFYING)
+        if not move(approach_posx):
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("물러나기 실패")
+
+        self.get_logger().warning(
+            "위치제어만으로 place_into 완료 — compliance/visual_verification 미구현이라 "
+            "실제 배치 여부는 확인되지 않았다")
+        return True
 
     def _result(self, success, reason, started):
         result = PlaceInto.Result()

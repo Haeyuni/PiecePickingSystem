@@ -13,20 +13,32 @@
 바꿀 때 새로 검증할 것이 순응제어·모션뿐이다.
 """
 import os
+import pathlib
 import time
 
 import rclpy
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
+import yaml
+from rclpy.action import ActionClient, ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
+from control_msgs.action import GripperCommand
+from dsr_msgs2.action import MovelH2r
 from sort_msgs.action import Pick
 
+from . import dsr_motion
+from .config_paths import skill_params_path
 from .request_cache import RequestCache
 from .robot_state_publisher import is_fake_robot, store
 
 SCHEMA_VERSION = "1.0.0"
+
+
+def load_skill_params(path: pathlib.Path | None = None) -> dict:
+    path = path or skill_params_path()
+    with path.open(encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 # fake 모드에서 각 phase에 머무는 시간. 실물에서는 모션 시간이 이를 대체한다.
 FAKE_PHASE_DURATION_S = 0.4
@@ -43,12 +55,27 @@ class PickServer(Node):
     def __init__(self):
         super().__init__('pick_server')
         self._cache = RequestCache()
+        callbacks = ReentrantCallbackGroup()
         self._action_server = ActionServer(
             self, Pick, 'pick', self.execute_callback,
             goal_callback=self._goal_callback,
             cancel_callback=self._cancel_callback,
-            callback_group=ReentrantCallbackGroup(),
+            callback_group=callbacks,
         )
+
+        params = load_skill_params()
+        self._profiles = params.get("profiles") or {}
+        motion = params.get("motion") or {}
+        self._approach_height_mm = float(motion.get("approach_height_mm", 80.0))
+        self._linear_vel_mm_s = float(motion.get("linear_vel_mm_s", 30.0))
+        self._linear_acc_mm_s2 = float(motion.get("linear_acc_mm_s2", 30.0))
+        self._rot_vel_deg_s = float(motion.get("rot_vel_deg_s", 20.0))
+        self._rot_acc_deg_s2 = float(motion.get("rot_acc_deg_s2", 20.0))
+        self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
+                                          callback_group=callbacks)
+        self._gripper_client = ActionClient(self, GripperCommand, dsr_motion.GRIPPER_ACTION,
+                                            callback_group=callbacks)
+
         self.get_logger().info(f"pick 액션 서버 준비 ({'fake' if is_fake_robot() else '실물'} 모드)")
 
     def _goal_callback(self, goal_request):
@@ -78,21 +105,20 @@ class PickServer(Node):
         started = time.monotonic()
 
         try:
-            for phase in PHASES:
-                if goal_handle.is_cancel_requested:
+            if is_fake_robot():
+                for phase in PHASES:
+                    if goal_handle.is_cancel_requested:
+                        goal_handle.canceled()
+                        return self._result(False, Pick.Result.REASON_NO_CONTACT, started)
+                    self._publish_phase(goal_handle, phase)
+                    time.sleep(FAKE_PHASE_DURATION_S)
+                width_mm, visual_passed, torque = 42.0, True, [0.4, 1.9, 2.6, 2.4]
+            else:
+                width_mm = self._pick_real(goal_handle, goal)
+                if width_mm is None:
                     goal_handle.canceled()
                     return self._result(False, Pick.Result.REASON_NO_CONTACT, started)
-
-                feedback = Pick.Feedback()
-                feedback.phase = phase
-                goal_handle.publish_feedback(feedback)
-
-                if is_fake_robot():
-                    time.sleep(FAKE_PHASE_DURATION_S)
-                else:
-                    # TODO(실물): compliance.py(접촉 감지·토크 판정)와 MoveIt2 모션 연결.
-                    # 좌표는 mm로 들어오므로 units.pose_mm_to_m()으로 환산해 넘긴다.
-                    raise NotImplementedError("실물 pick은 compliance/MoveIt2 연결 후 활성화한다")
+                visual_passed, torque = False, []
 
             if self._injected_failure(goal.object_id):
                 self.get_logger().warning(
@@ -102,9 +128,9 @@ class PickServer(Node):
                 goal_handle.succeed()
                 return result
 
-            store.set_gripper(width_mm=42.0, closed=True)
+            store.set_gripper(width_mm=width_mm, closed=True)
             result = self._result(True, Pick.Result.REASON_NONE, started,
-                                  visual_passed=True, torque=[0.4, 1.9, 2.6, 2.4])
+                                  visual_passed=visual_passed, torque=torque)
             self._cache.put(goal.request_id, result)
             goal_handle.succeed()
             return result
@@ -117,6 +143,62 @@ class PickServer(Node):
         finally:
             if store.snapshot()["mode"] != "error":
                 store.set_idle()
+
+    @staticmethod
+    def _publish_phase(goal_handle, phase) -> None:
+        feedback = Pick.Feedback()
+        feedback.phase = phase
+        goal_handle.publish_feedback(feedback)
+
+    def _pick_real(self, goal_handle, goal) -> float | None:
+        """위치제어만으로 실물 pick을 수행한다 (1단계 — compliance.py/visual_verification.py가
+        아직 빈 스텁이라 접촉감지·파지확인 없이 grasp_pose를 그대로 믿고 움직인다).
+
+        grasp_pose 바로 위(approach_height_mm)에서 한 번 멈췄다 내려가 그리퍼를 힘 제한
+        (profile의 max_grip_force_n)으로 닫고 다시 들어올린다. 실패하면 RuntimeError,
+        취소되면 None — dsr_motion의 각 호출이 취소 시 False를 돌려주므로 여기서
+        `goal_handle.is_cancel_requested`로 두 경우를 구분한다(취소는 오류가 아니다).
+        """
+        from . import units
+
+        target_posx = dsr_motion.pose_mm_to_posx(goal.grasp_pose)
+        approach_posx = list(target_posx)
+        approach_posx[2] += self._approach_height_mm
+        max_force = float((self._profiles.get(goal.profile) or {}).get("max_grip_force_n", 20.0))
+
+        def move(pos):
+            return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
+                                          self._linear_vel_mm_s, self._linear_acc_mm_s2,
+                                          self._rot_vel_deg_s, self._rot_acc_deg_s2)
+
+        self._publish_phase(goal_handle, Pick.Feedback.PHASE_APPROACHING)
+        if not move(approach_posx):
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("접근 위치로 이동 실패")
+        if not move(target_posx):
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("파지 위치로 이동 실패")
+
+        self._publish_phase(goal_handle, Pick.Feedback.PHASE_CONTACT_DETECTED)
+        ok, width_m = dsr_motion.move_gripper(self._gripper_client, 0.0, max_force, goal_handle)
+        if not ok:
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("그리퍼 닫기 실패")
+
+        self._publish_phase(goal_handle, Pick.Feedback.PHASE_LIFTING)
+        if not move(approach_posx):
+            if goal_handle.is_cancel_requested:
+                return None
+            raise RuntimeError("들어올리기 실패")
+
+        self._publish_phase(goal_handle, Pick.Feedback.PHASE_VERIFYING)
+        self.get_logger().warning(
+            "위치제어만으로 pick 완료 — compliance/visual_verification 미구현이라 "
+            "실제 파지 여부는 확인되지 않았다")
+        return units.m_to_mm(width_m)
 
     @staticmethod
     def _injected_failure(object_id: str) -> bool:

@@ -71,3 +71,40 @@ def base_from_camera(point_cam_mm, base2gripper: np.ndarray,
     homogeneous = np.append(np.asarray(point_cam_mm, dtype=float), 1.0)
     base_point = base2gripper @ gripper2camera @ homogeneous
     return tuple(float(v) for v in base_point[:3])
+
+
+def quaternion_to_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
+    """단위 쿼터니언(x,y,z,w) → 3x3 회전행렬. `posx_to_matrix`의 역방향 변환에 쓴다
+    (control이 grasp_pose/bin_pose를 dsr_msgs2 movel의 ZYZ 오일러로 보내야 할 때,
+    `matrix_to_zyz_deg`와 함께 사용 — dsr_motion.py 참조)."""
+    x, y, z, w = qx, qy, qz, qw
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ])
+
+
+def matrix_to_zyz_deg(matrix: np.ndarray) -> tuple[float, float, float]:
+    """3x3(또는 4x4) 회전행렬 → (rx, ry, rz) 내재 ZYZ 오일러각(도). `posx_to_matrix`의
+    정확한 역함수다 — `posx_to_matrix([.., a, b, c]) == R`이면 `matrix_to_zyz_deg(R) == (a, b, c)`.
+
+    무작위 자세 2000개 + 이 로봇에서 실측한 자세(ry가 180° 근처, gimbal lock 부근)로
+    왕복 오차를 확인했다(최대 1e-13 수준) — 그리퍼가 위에서 수직으로 접근하는 자세가
+    바로 이 근처라(heuristic_pca.py 참조) 특이점 처리가 실제로 쓰인다.
+    """
+    r = np.asarray(matrix)[:3, :3]
+    ry = np.degrees(np.arccos(np.clip(r[2, 2], -1.0, 1.0)))
+    sin_ry = np.sin(np.radians(ry))
+    if sin_ry > 1e-6:
+        rx = np.degrees(np.arctan2(r[1, 2], r[0, 2]))
+        rz = np.degrees(np.arctan2(r[2, 1], -r[2, 0]))
+    else:
+        # ry가 0 또는 180 근처(gimbal lock) — rx/rz는 개별적으로 정해지지 않고 합(또는
+        # 차)만 정해진다. rz=0으로 고정하고 rx만으로 그 합을 표현한다.
+        if r[2, 2] > 0:
+            rx = np.degrees(np.arctan2(r[1, 0], r[0, 0]))
+        else:
+            rx = np.degrees(np.arctan2(-r[0, 1], r[1, 1]))
+        rz = 0.0
+    return float(rx), float(ry), float(rz)

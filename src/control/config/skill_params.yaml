@@ -2,11 +2,27 @@
 # 미확정 — perception/config/objects.yaml의 profiles와 일치시켜 관리 (중복 정의 주의)
 # 단위: 길이 mm, 힘 N (인터페이스_정의서.md 1.1절). approach_speed 단위는 objects.yaml의 TODO 참조
 # TODO: 값 확정 (시스템명세서 미확정 항목 참조)
+#
+# pick/place 실물 1단계(2026-09-04, 위치제어만)는 이 중 max_grip_force_n만 쓴다
+# (그리퍼의 힘 제한 close, dsr_motion.move_gripper 참조) — approach_speed·
+# contact_threshold_n은 compliance.py(순응제어, 아직 미구현)가 붙는 2단계의 몫이다.
 
 profiles:
   normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
   fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
   deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
+
+motion:
+  # pick/place 실물 1단계에 쓰는 값. dsr_msgs2 movel_h2r이 요구하는 단위 그대로
+  # (mm, mm/s, mm/s^2, deg/s, deg/s^2) 둔다 — home과 같은 이유(units.py를 지나지 않음).
+  approach_height_mm: 80.0       # grasp_pose/bin_pose 바로 위에서 한 번 멈췄다 내려간다
+  linear_vel_mm_s: 30.0
+  linear_acc_mm_s2: 30.0
+  rot_vel_deg_s: 20.0
+  rot_acc_deg_s2: 20.0
+  # RG6 최대 개폭. grasp/config/grasp_params.yaml의 gripper.max_opening_mm(110.0)과 같은 값 —
+  # 그쪽은 파지 후보 계산용(mm), 여기는 GripperCommand 액션 호출용(m)이라 단위만 다르다.
+  gripper_open_m: 0.110
 
 visual_verification:
   wrist_camera_offset_mm: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정). 단위 mm

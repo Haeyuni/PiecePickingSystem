@@ -16,8 +16,12 @@
   <depend>sensor_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>sort_msgs</depend>
-  <!-- 실물 home 이동(MovejH2r 액션). home_server.py 참조 -->
+  <!-- 실물 이동(MovejH2r/MovelH2r 액션). home_server.py/dsr_motion.py 참조 -->
   <depend>dsr_msgs2</depend>
+  <!-- grasp_pose/bin_pose(쿼터니언) → dsr posx(ZYZ 오일러) 변환. dsr_motion.py 참조 -->
+  <depend>perception_common</depend>
+  <!-- 그리퍼 제어(/rg6_controller). dsr_motion.move_gripper 참조 -->
+  <depend>control_msgs</depend>
 
   <export>
     <build_type>ament_python</build_type>
