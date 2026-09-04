@@ -8,11 +8,17 @@ from ament_index_python.packages import get_package_share_directory
 
 METHODS = ('pca_normal', 'ggcnn', 'graspnet_baseline', 'contact_graspnet')
 DISPLAY = {'pca_normal': 'PCA_Normal', 'ggcnn': 'GG-CNN', 'graspnet_baseline': 'GraspNet_baseline', 'contact_graspnet': 'Contact_GraspNet'}
+CHECKPOINT_SUBDIRS = ('ggcnn', 'graspnet', 'contact_graspnet')
 
 
 class ModelRunner:
     def __init__(self, checkpoints, max_inference_ms):
         self._checkpoints = Path(checkpoints)
+        # Created here (not left to `docker run -v`) so the bind-mounted host dirs are
+        # owned by the invoking user instead of being auto-created as root by dockerd,
+        # which would block the in-container first-run checkpoint download.
+        for name in CHECKPOINT_SUBDIRS:
+            (self._checkpoints / name).mkdir(parents=True, exist_ok=True)
         self._max_inference_ms = float(max_inference_ms)
         self._share = Path(get_package_share_directory('grasp_benchmark'))
 

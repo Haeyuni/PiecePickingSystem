@@ -23,11 +23,25 @@ def model_path():
     model_dir.mkdir(parents=True, exist_ok=True)
     archive = model_dir / 'ggcnn_weights_cornell.zip'
     if not archive.exists():
-        subprocess.run(['wget', '-q', WEIGHT_URL, '-O', str(archive)], check=True)
+        try:
+            subprocess.run(['wget', '-q', WEIGHT_URL, '-O', str(archive)], check=True)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            archive.unlink(missing_ok=True)  # drop any partial file so the next run retries cleanly
+            print(f'ERROR: GG-CNN checkpoint download failed ({WEIGHT_URL}): {exc}', file=sys.stderr)
+            raise
     files = list(model_dir.rglob('ggcnn_epoch*'))
     if not files:
-        shutil.unpack_archive(archive, model_dir)
+        try:
+            shutil.unpack_archive(archive, model_dir)
+        except Exception as exc:
+            archive.unlink(missing_ok=True)
+            print(f'ERROR: GG-CNN checkpoint archive is corrupt ({archive}): {exc}', file=sys.stderr)
+            raise
         files = list(model_dir.rglob('ggcnn_epoch*'))
+    if not files:
+        message = f'GG-CNN 체크포인트 압축 해제 후 가중치 파일을 찾지 못했습니다: {archive}'
+        print(f'ERROR: {message}', file=sys.stderr)
+        raise FileNotFoundError(message)
     return next((path for path in files if 'state' in path.name.lower()), files[0])
 
 

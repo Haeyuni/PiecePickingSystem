@@ -15,15 +15,26 @@ robot:
   base_frame: base_link
   pose_service: /dsr01/dsr_controller2/aux_control/get_current_posx
   handeye_path: /home/USER/workspace/PiecePickingSystem/data/calibration/T_gripper2camera.npy
-  # A real move/action adapter is intentionally not guessed. Leave null until an existing verified adapter exists.
-  motion_action: null
-  home_pose: [0, 0, 90, 0, 90, 0]
+  # /dsr01/motion/movej_h2r, /dsr01/motion/movel_h2r (verified via `ros2 action list` on the
+  # robot PC, 2026-09-04). robot_executor.py talks to them directly, not through control/'s
+  # sort_msgs Pick/Home wrappers. See robot_executor.py module docstring for why.
+  # z lower bound below doubles as the safety floor above the table/bin.
   workspace_mm: {x: [-350, 350], y: [-350, 350], z: [80, 500]}
   approach_height_mm: 80.0
-  lift_height_mm: 40.0
+  linear_vel_mm_s: 30.0
+  linear_acc_mm_s2: 30.0
+  rot_vel_deg_s: 20.0
+  rot_acc_deg_s2: 20.0
+  # j1~j6 deg. MUST match the robot's actual taught Home posture for this cell.
+  home_pose_deg: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+  home_vel_deg_s: 20.0
+  home_acc_deg_s2: 20.0
 rg2:
-  state_topic: null
-  command_action: null
+  # onrobot_rg_msgs/srv/SetCommand+GripperPose (/onrobot/sendCommand, /onrobot/pose), verified
+  # on the robot PC (2026-09-04). control_msgs/action/GripperCommand (/rg6_controller) is NOT
+  # used — confirmed unreliable on this hardware, see robot_executor.py module docstring.
+  # Closing force isn't configurable through this path (server default, conservative); there is
+  # no gripper_effort_n knob here anymore.
   min_grip_width_mm: 5.0
   max_grip_width_mm: 100.0
   # Direct Modbus control is deliberately unsupported here; use an existing verified ROS interface.

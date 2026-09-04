@@ -5,6 +5,7 @@ from pathlib import Path
 
 import rclpy
 import yaml
+from rclpy.utilities import remove_ros_args
 
 from .live_scene_capture import LiveSceneCapture
 from .model_runner import DISPLAY, METHODS, ModelRunner
@@ -43,6 +44,9 @@ def blank(scene_id, round_id, trial_id, method, status, failure='', note=''):
 
 
 def main(argv=None):
+    # launch_ros' Node action appends `--ros-args -r __node:=...` to argv; strip it before
+    # argparse sees it, or the launch-driven run above dies with "unrecognized arguments".
+    argv = remove_ros_args(args=sys.argv if argv is None else argv)[1:]
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True); parser.add_argument('--methods', default='all')
     parser.add_argument('--rounds', type=int, default=3); parser.add_argument('--input-mode', default='live')
@@ -57,8 +61,7 @@ def main(argv=None):
     output = ResultWriter(Path(config['results_dir']).expanduser())
     rclpy.init()
     capture = LiveSceneCapture(config['camera'])
-    executor = RobotExecutor(capture, {**config['robot'], 'rg2_command_action': config['rg2'].get('command_action'),
-                                        'rg2_state_topic': config['rg2'].get('state_topic')})
+    executor = RobotExecutor(capture, {**config['robot'], **config['rg2']})
     ready, reason = executor.preflight(execute)
     if execute and not ready:
         print(f'실제 실행 차단: {reason}', file=sys.stderr)
@@ -68,6 +71,7 @@ def main(argv=None):
         yolo = None
         yolo_error = f'YOLO_LOAD_FAILED:{type(exc).__name__}:{exc}'
     runner = ModelRunner(Path(config['assets']['checkpoints']).expanduser(), config['model']['max_inference_ms'])
+    verifier = PickVerifier(capture, yolo) if yolo is not None else None
     scene_dir = output.directory / 'scenes'; scene_dir.mkdir(exist_ok=True)
     for round_id in range(1, args.rounds + 1):
         for method in selected:
@@ -98,10 +102,12 @@ def main(argv=None):
                                     'candidate_pose_camera': candidate, 'candidate_pose_robot': robot_pose or '', 'transform_ok': transform_ok})
                         if not model_error and execute and transform_ok and ready:
                             picked, code = executor.execute_pick(robot_pose)
-                            grip, reobserved, verify_code = PickVerifier().verify()
-                            row.update({'status': 'OK' if picked and grip and reobserved else 'EXECUTION_FAILED',
-                                        'rg2_grip_state': grip, 'reobservation_ok': reobserved, 'pick_success': picked and grip and reobserved,
+                            grip_state, reobserved, verify_code = verifier.verify(executor.last_grip)
+                            pick_success = picked and grip_state == 'gripped' and reobserved
+                            row.update({'status': 'OK' if pick_success else 'EXECUTION_FAILED', 'ik_ok': picked,
+                                        'rg2_grip_state': grip_state, 'reobservation_ok': reobserved, 'pick_success': pick_success,
                                         'failure_code': code or verify_code})
+                            executor.release_and_home()
             row['total_elapsed_ms'] = round((time.monotonic() - started) * 1000, 2)
             output.add(row)
             output.save()

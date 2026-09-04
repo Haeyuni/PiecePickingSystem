@@ -24,6 +24,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from dsr_msgs2.action import MovelH2r
+from dsr_msgs2.srv import GetCurrentPosx
 from onrobot_rg_msgs.srv import GripperPose, SetCommand
 from sensor_msgs.msg import JointState
 from sort_msgs.action import Pick
@@ -73,6 +74,8 @@ class PickServer(Node):
         self._rot_acc_deg_s2 = float(motion.get("rot_acc_deg_s2", 20.0))
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
+        self._posx_client = self.create_client(
+            GetCurrentPosx, dsr_motion.GET_CURRENT_POSX_SERVICE, callback_group=callbacks)
         self._gripper_cmd_client = self.create_client(
             SetCommand, dsr_motion.GRIPPER_COMMAND_SERVICE, callback_group=callbacks)
         self._gripper_pose_client = self.create_client(
@@ -173,18 +176,33 @@ class PickServer(Node):
         target_posx = dsr_motion.pose_mm_to_posx(goal.grasp_pose)
         approach_posx = list(target_posx)
         approach_posx[2] += self._approach_height_mm
+        target_xyz = target_posx[:3]
+        approach_xyz = approach_posx[:3]
 
         def move(pos):
             return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
                                           self._linear_vel_mm_s, self._linear_acc_mm_s2,
                                           self._rot_vel_deg_s, self._rot_acc_deg_s2)
 
+        def posx_at(xyz):
+            """`xyz`로 위치만 바꾸고 회전은 방금 도달한 실제 자세를 그대로 쓴다 —
+            연속 이동에서 계산값을 재사용하면 안 되는 이유는 dsr_motion.py 모듈
+            docstring(ZYZ 특이점) 참조."""
+            current = dsr_motion.get_current_posx(self._posx_client)
+            if current is None:
+                return None
+            return [xyz[0], xyz[1], xyz[2], current[3], current[4], current[5]]
+
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_APPROACHING)
         if not move(approach_posx):
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("접근 위치로 이동 실패")
-        if not move(target_posx):
+
+        descend_posx = posx_at(target_xyz)
+        if descend_posx is None:
+            raise RuntimeError("현재 자세를 읽지 못했다")
+        if not move(descend_posx):
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("파지 위치로 이동 실패")
@@ -202,7 +220,10 @@ class PickServer(Node):
             raise RuntimeError("그리퍼가 닫히는 동안 응답이 없다")
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_LIFTING)
-        if not move(approach_posx):
+        lift_posx = posx_at(approach_xyz)
+        if lift_posx is None:
+            raise RuntimeError("현재 자세를 읽지 못했다")
+        if not move(lift_posx):
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("들어올리기 실패")

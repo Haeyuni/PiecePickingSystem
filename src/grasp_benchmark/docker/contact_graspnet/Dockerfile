@@ -1,4 +1,4 @@
-FROM tensorflow/tensorflow:2.2.0-gpu-py3
+FROM tensorflow/tensorflow:2.2.0-gpu
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends git build-essential && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir numpy==1.19.2 scipy==1.4.1 opencv-python==4.4.0.46 trimesh==3.8.12 gdown==4.7.1

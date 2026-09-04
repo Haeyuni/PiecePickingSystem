@@ -16,6 +16,16 @@ ReentrantCallbackGroup을 액션 서버와 이 모듈이 만드는 ActionClient�
 제공하는 `/onrobot/sendCommand`(문자 명령, 그 서버가 자기 그리퍼 타입에 맞는 변환을
 알아서 한다)를 쓴다 — 단, 이 서비스는 명령만 보내고 완료를 기다리지 않으므로
 `/onrobot_joint_states`를 직접 폴링해 안정될 때까지 기다린다.
+
+**연속된 movel은 회전을 매번 다시 계산하지 않고 방금 도달한 실제 자세에서 이어간다.**
+그리퍼가 위에서 수직으로 접근할 때 `ry`가 180° 근처(ZYZ 오일러각의 특이점)라, 우리가
+계산한 (rx,rz)와 컨트롤러가 실제로 도달한 (rx,rz)가 **물리적으로는 같은 방향인데
+파라미터값이 다를 수 있다**(실물로 확인: `rx=-39.8`을 보냈는데 로봇은 `rx=35.2,
+rz=-91.1`로 도달했다 — 둘 다 유효한 표현이다). 이 상태에서 원래 계산값(rx=-39.8)을
+그대로 다시 보내면 컨트롤러가 그걸 큰 회전으로 오인해 응답 없이 멈추는 것을 실물로
+재현했다. 그래서 pick_server.py/place_server.py는 첫 이동(접근)에만 계산된 회전을
+쓰고, 그다음 이동들(하강·들어올리기/삽입·물러나기)은 `get_current_posx`로 방금
+도달한 회전을 읽어 그대로 유지한 채 위치만 바꾼다.
 """
 import threading
 import time
@@ -24,8 +34,33 @@ from perception_common.geometry import matrix_to_zyz_deg, quaternion_to_matrix
 
 MOVEJ_ACTION = "/dsr01/motion/movej_h2r"
 MOVEL_ACTION = "/dsr01/motion/movel_h2r"
+GET_CURRENT_POSX_SERVICE = "/dsr01/dsr_controller2/aux_control/get_current_posx"
 GRIPPER_COMMAND_SERVICE = "/onrobot/sendCommand"
 GRIPPER_JOINT_STATES_TOPIC = "/onrobot_joint_states"
+
+
+def get_current_posx(client, timeout_s: float = 3.0) -> list[float] | None:
+    """get_current_posx를 한 번 동기 호출한다 — [x,y,z,rx,ry,rz](mm, deg).
+
+    perception_common.robot_pose.RobotPoseClient(주기 캐싱, 검출 프레임마다 필요)와
+    달리 여기서는 movel 사이사이 딱 한 번씩만 필요해 별도 캐시 없이 그때그때 묻는다.
+    """
+    from dsr_msgs2.srv import GetCurrentPosx
+
+    if not client.wait_for_service(timeout_sec=2.0):
+        return None
+    request = GetCurrentPosx.Request()
+    request.ref = 0  # DR_BASE
+
+    done = threading.Event()
+    future = client.call_async(request)
+    future.add_done_callback(lambda _f: done.set())
+    done.wait(timeout=timeout_s)
+    result = future.result()
+    if result is None or not result.success or not result.task_pos_info:
+        return None
+    data = list(result.task_pos_info[0].data)
+    return [float(v) for v in data[:6]] if len(data) >= 6 else None
 
 
 def bin_pose_to_posx(pose: dict) -> list[float]:

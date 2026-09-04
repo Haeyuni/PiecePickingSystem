@@ -6,6 +6,7 @@
   <buildtool_depend>ament_python</buildtool_depend>
   <exec_depend>ament_index_python</exec_depend><exec_depend>launch</exec_depend><exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend><exec_depend>sensor_msgs</exec_depend><exec_depend>dsr_msgs2</exec_depend>
+  <exec_depend>onrobot_rg_msgs</exec_depend><exec_depend>perception_common</exec_depend>
   <exec_depend>grasp_benchmark</exec_depend>
   <export><build_type>ament_python</build_type></export>
 </package>

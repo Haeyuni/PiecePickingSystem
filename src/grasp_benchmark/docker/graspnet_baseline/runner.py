@@ -24,12 +24,21 @@ def checkpoint():
     files = list(root.rglob('checkpoint.tar'))
     if not files:
         archive = root / 'checkpoint-rs.tar'
-        gdown.download(id=CHECKPOINT_ID, output=str(archive), quiet=False)
-        with tarfile.open(archive) as opened:
-            opened.extractall(root)
+        try:
+            downloaded = gdown.download(id=CHECKPOINT_ID, output=str(archive), quiet=False)
+            if downloaded is None or not archive.is_file() or archive.stat().st_size == 0:
+                raise RuntimeError('gdown이 파일을 내려받지 못했습니다 (권한/쿼터 초과 가능성)')
+            with tarfile.open(archive) as opened:
+                opened.extractall(root)
+        except Exception as exc:
+            archive.unlink(missing_ok=True)  # drop any partial file so the next run retries cleanly
+            print(f'ERROR: GraspNet_baseline checkpoint download failed (gdown id={CHECKPOINT_ID}): {exc}', file=sys.stderr)
+            raise
         files = list(root.rglob('checkpoint.tar'))
     if not files:
-        raise FileNotFoundError('GraspNet checkpoint.tar를 찾지 못했습니다.')
+        message = 'GraspNet checkpoint.tar를 찾지 못했습니다.'
+        print(f'ERROR: {message}', file=sys.stderr)
+        raise FileNotFoundError(message)
     return files[0]
 
 

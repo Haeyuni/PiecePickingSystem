@@ -17,10 +17,16 @@ def checkpoint_dir():
     root.mkdir(parents=True, exist_ok=True)
     configs = list(root.rglob('config.yaml'))
     if not configs:
-        gdown.download_folder(url=MODEL_FOLDER, output=str(root), quiet=False, remaining_ok=True)
+        try:
+            gdown.download_folder(url=MODEL_FOLDER, output=str(root), quiet=False, remaining_ok=True)
+        except Exception as exc:
+            print(f'ERROR: Contact_GraspNet checkpoint download failed ({MODEL_FOLDER}): {exc}', file=sys.stderr)
+            raise
         configs = list(root.rglob('config.yaml'))
     if not configs:
-        raise FileNotFoundError('Contact-GraspNet 공개 체크포인트를 찾지 못했습니다.')
+        message = 'Contact-GraspNet 공개 체크포인트를 찾지 못했습니다.'
+        print(f'ERROR: {message}', file=sys.stderr)
+        raise FileNotFoundError(message)
     preferred = [path.parent for path in configs if 'scene_test_2048_bs3_hor_sigma_001' in str(path.parent)]
     return preferred[0] if preferred else configs[0].parent
 

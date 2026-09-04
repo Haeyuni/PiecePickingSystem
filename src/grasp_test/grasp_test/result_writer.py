@@ -7,6 +7,10 @@ FIELDS = ('scene_id', 'round_id', 'trial_id', 'method', 'status', 'candidate_cou
           'transform_ok', 'ik_ok', 'rg2_grip_state', 'reobservation_ok', 'pick_success', 'failure_code', 'note')
 
 
+def cell_value(value):
+    return json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
+
+
 class ResultWriter:
     def __init__(self, directory):
         self.directory = Path(directory)
@@ -19,15 +23,19 @@ class ResultWriter:
         (self.directory / f"{row['trial_id']}.json").write_text(json.dumps(row, ensure_ascii=False, indent=2))
 
     def save(self):
+        # candidate_pose_camera/candidate_pose_robot carry nested dicts; CSV/XLSX cells can't
+        # hold those directly (openpyxl raises), so flatten them to JSON text for those formats.
+        # The per-trial JSON files written by add() keep the real nested dict.
+        scalar_rows = [{field: cell_value(row[field]) for field in FIELDS} for row in self.rows]
         csv_path = self.directory / 'live_physical_comparison.csv'
         with csv_path.open('w', newline='', encoding='utf-8') as stream:
             writer = csv.DictWriter(stream, fieldnames=FIELDS)
-            writer.writeheader(); writer.writerows(self.rows)
+            writer.writeheader(); writer.writerows(scalar_rows)
         try:
             import openpyxl
             workbook = openpyxl.Workbook(); sheet = workbook.active; sheet.title = 'trials'
             sheet.append(FIELDS)
-            for row in self.rows:
+            for row in scalar_rows:
                 sheet.append([row[field] for field in FIELDS])
             summary = workbook.create_sheet('summary')
             summary.append(['method', 'trials', 'success_count', 'success_rate', 'avg_inference_ms', 'avg_total_ms', 'failure_codes'])
