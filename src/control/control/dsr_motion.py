@@ -92,7 +92,8 @@ def pose_mm_to_posx(pose) -> list[float]:
 
 
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,
-                         cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0):
+                         cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0,
+                         on_timeout_verify=None):
     """액션을 보내고 결과를 기다린다(현재 스레드를 막는다). goal_handle이 취소 요청을
     받으면(웹의 정지 버튼) 원격 목표도 함께 취소한다 — 안 그러면 화면엔 "취소됨"으로
     보이는데 로봇은 계속 움직이는 상태가 된다.
@@ -102,6 +103,14 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     상한이 없어 사람이 수동으로 취소하기 전까지 그대로 대기했다. 넘으면 우리가
     먼저 취소를 보내고 실패로 처리한다 — pick/place 전체가 무한정 멈추는 대신
     유한 시간 안에 실패로 끝나야 재계획(FR-16)이 돌 수 있다.
+
+    **`on_timeout_verify`**: 상한을 넘겼을 때(취소가 아니라 진짜 타임아웃일 때만)
+    부르는 콜러블 — True면 실패로 단정하지 않고 성공으로 처리한다. 실물로 확인한
+    사고: movel_h2r이 목표 지점에 실제로 정확히 도달했는데도 result 콜백이 끝내
+    안 와서 타임아웃으로 실패 처리된 적이 있다(get_current_posx로 도달을 직접
+    확인함 — DDS로 결과 통지가 유실되는 것으로 보인다, 이 환경의 네트워크 신뢰성
+    문제라 근본 해결은 못 한다). `move_linear`가 이 자리에 실제 도달 여부 확인을
+    넣는다.
 
     반환: (성공 여부, 원격 액션의 result 객체 또는 None).
     """
@@ -127,7 +136,13 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
 
     deadline = time.monotonic() + overall_timeout_s
     while not finished.wait(timeout=0.1):
-        if goal_handle.is_cancel_requested or time.monotonic() > deadline:
+        if goal_handle.is_cancel_requested:
+            remote_handle.cancel_goal_async()
+            finished.wait(timeout=cancel_timeout_s)
+            return False, None
+        if time.monotonic() > deadline:
+            if on_timeout_verify is not None and on_timeout_verify():
+                return True, None
             remote_handle.cancel_goal_async()
             finished.wait(timeout=cancel_timeout_s)
             return False, None
@@ -138,15 +153,30 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
 
 def move_linear(client, target_pos: list[float], goal_handle,
                 vel_mm_s: float, acc_mm_s2: float,
-                vel_deg_s: float, acc_deg_s2: float) -> bool:
-    """MovelH2r 하나를 블로킹으로 실행. `target_pos`는 [x,y,z,rx,ry,rz](mm, deg)."""
+                vel_deg_s: float, acc_deg_s2: float,
+                posx_client=None, position_tolerance_mm: float = 3.0) -> bool:
+    """MovelH2r 하나를 블로킹으로 실행. `target_pos`는 [x,y,z,rx,ry,rz](mm, deg).
+
+    `posx_client`를 넘기면 타임아웃 시 get_current_posx로 실제 위치를 한 번 더
+    확인해서, `position_tolerance_mm` 안에 들어와 있으면 성공으로 처리한다 —
+    call_action_blocking의 on_timeout_verify 참조(결과 통지 유실 대응).
+    """
     from dsr_msgs2.action import MovelH2r
 
     goal = MovelH2r.Goal()
     goal.target_pos = [float(v) for v in target_pos]
     goal.target_vel = [float(vel_mm_s), float(vel_deg_s)]
     goal.target_acc = [float(acc_mm_s2), float(acc_deg_s2)]
-    success, _ = call_action_blocking(client, goal, goal_handle)
+
+    def verify_arrived():
+        if posx_client is None:
+            return False
+        current = get_current_posx(posx_client, goal_handle, timeout_s=3.0, retries=1)
+        if current is None:
+            return False
+        return all(abs(a - b) <= position_tolerance_mm for a, b in zip(current[:3], target_pos[:3]))
+
+    success, _ = call_action_blocking(client, goal, goal_handle, on_timeout_verify=verify_arrived)
     return success
 
 

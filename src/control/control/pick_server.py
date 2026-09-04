@@ -182,7 +182,8 @@ class PickServer(Node):
         def move(pos):
             return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
                                           self._linear_vel_mm_s, self._linear_acc_mm_s2,
-                                          self._rot_vel_deg_s, self._rot_acc_deg_s2)
+                                          self._rot_vel_deg_s, self._rot_acc_deg_s2,
+                                          posx_client=self._posx_client)
 
         def posx_at(xyz):
             """`xyz`로 위치만 바꾸고 회전은 방금 도달한 실제 자세를 그대로 쓴다 —
