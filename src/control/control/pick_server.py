@@ -37,6 +37,20 @@ from .robot_state_publisher import is_fake_robot, store
 SCHEMA_VERSION = "1.0.0"
 
 
+class _LiftFailedError(RuntimeError):
+    """그리퍼가 이미 물체를 문 뒤(닫기 완료) 들어올리기 단계에서 난 실패.
+
+    일반 RuntimeError와 구분하는 이유: 예전엔 이 경우도 다른 모든 예외와 똑같이
+    grasp_failed로 보고했다 — 파지는 성공했는데 "파지 실패"로 나와 헷갈리게 했다
+    (2026-09-04 실물로 확인). `width_mm`을 들고 있어 execute_callback이 실제로
+    뭔가를 물었는지 판단해 사유를 구분해 보고할 수 있게 한다.
+    """
+
+    def __init__(self, message: str, width_mm: float):
+        super().__init__(message)
+        self.width_mm = width_mm
+
+
 def load_skill_params(path: pathlib.Path | None = None) -> dict:
     path = path or skill_params_path()
     with path.open(encoding="utf-8") as f:
@@ -169,6 +183,16 @@ class PickServer(Node):
             goal_handle.succeed()
             return result
 
+        except _LiftFailedError as e:
+            # 그리퍼는 이미 뭔가를 물고 있다 — grasp_failed로 보고하면 "못 집었다"로
+            # 읽혀 planner가 같은 물체를 다시 집으려 들 수 있다(실제로는 물체가 붙잡힌
+            # 채 공중에 멈춰 있다). robot_state에도 실제 개폭을 반영해 둔다.
+            self.get_logger().error(
+                f"pick 실패(파지는 성공, 들어올리기부터 실패): {e} (width={e.width_mm:.1f}mm)")
+            store.set_gripper(width_mm=e.width_mm, closed=True)
+            store.set_error()
+            goal_handle.abort()
+            return self._result(False, Pick.Result.REASON_UNREACHABLE, started)
         except Exception as e:
             self.get_logger().error(f"pick 실패: {e}")
             store.set_error()
@@ -265,23 +289,27 @@ class PickServer(Node):
                 return None
             raise RuntimeError("그리퍼가 닫히는 동안 응답이 없다")
 
+        # 그리퍼가 실제로 닫힌 개폭 — 들어올리기가 이후에 실패해도 "물었는지 여부"는
+        # 이미 정해져 있다. 이 뒤의 실패는 grasp_failed가 아니라 별도로 구분해 보고한다.
+        width_mm = dsr_motion.gripper_width_mm(self._gripper_pose_client, final_angle)
+
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_LIFTING)
         lift_posx = next_target(approach_xyz, descend_pose)
         if lift_posx is None:
             if goal_handle.is_cancel_requested:
                 return None
-            raise RuntimeError("현재 자세를 읽지 못했다")
+            raise _LiftFailedError("현재 자세를 읽지 못했다", width_mm)
         lift_ok, _ = move(lift_posx)
         if not lift_ok:
             if goal_handle.is_cancel_requested:
                 return None
-            raise RuntimeError("들어올리기 실패")
+            raise _LiftFailedError("들어올리기 실패", width_mm)
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_VERIFYING)
         self.get_logger().warning(
             "위치제어만으로 pick 완료 — compliance/visual_verification 미구현이라 "
             "실제 파지 여부는 확인되지 않았다")
-        return dsr_motion.gripper_width_mm(self._gripper_pose_client, final_angle)
+        return width_mm
 
     @staticmethod
     def _injected_failure(object_id: str) -> bool:
