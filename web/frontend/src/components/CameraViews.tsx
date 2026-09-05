@@ -1,14 +1,15 @@
 import { useState } from 'react'
 
-/** 카메라·뎁스 뷰 (화면정의서.md 2.2.4절)
+/** 카메라·뎁스 뷰 (화면정의서.md 2.2.4절 개정)
  *
  * MJPEG(개발계획 D-5 1차 범위)를 <img>에 그대로 물린다 — 브라우저가
  * multipart/x-mixed-replace를 네이티브로 처리하므로 별도 스트리밍 클라이언트가
  * 필요 없다. mock 모드나 카메라 미연결 시 백엔드가 204를 돌려주는데, <img>는 204를
  * 에러로 보고 onError를 발화한다 — 그때만 안내 문구로 대체한다(깨진 아이콘 대신).
  *
- * 세그멘테이션 마스크는 오버레이하지 않는다 — 마스크는 grasp 내부 데이터다. 원본
- * 스트림만 보여준다.
+ * "카메라 뷰"는 원본이 아니라 grasp가 합성한 /grasp/debug_image다 — 검출 박스·마스크·
+ * 신뢰도(perception_test_live.py --show와 같은 그림)에 파지 후보점까지 얹혀 있다
+ * (web/ros_bridge.py 참조). 뎁스 뷰만 원본 그대로다.
  */
 function Stream({ src, label }: { src: string; label: string }) {
   const [failed, setFailed] = useState(false)
@@ -28,7 +29,7 @@ function Stream({ src, label }: { src: string; label: string }) {
 export default function CameraViews() {
   return (
     <div className="views">
-      <Stream src="/api/camera/color" label="카메라 뷰" />
+      <Stream src="/api/camera/color" label="카메라 뷰 (검출 + 파지 후보)" />
       <Stream src="/api/camera/depth" label="뎁스 뷰" />
     </div>
   )

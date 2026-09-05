@@ -32,7 +32,13 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = "1.0.0"
 
 
-# --- 카메라·뎁스 뷰 (화면정의서 2.2.4절: RGB 원본 스트림, 마스크 오버레이 없음) -----------
+# --- 카메라·뎁스 뷰 --------------------------------------------------------------
+#
+# 화면정의서 2.2.4절 원안은 "RGB 원본 스트림, 마스크 오버레이 없음"이었다. 이후 사용자
+# 요청으로 뒤집었다 — perception_test_live.py --show와 같은 검출 오버레이(박스/마스크/
+# conf) + 파지 후보점을 화면에서 바로 보고 싶다는 것. 그 그림은 grasp 노드가
+# /grasp/debug_image로 이미 합성해 발행하므로(grasp/node.py의 _publish_debug_image),
+# web은 원본 컬러 대신 그 토픽을 "카메라 뷰" 자리에 그대로 구독한다. 뎁스 뷰는 원본 그대로.
 #
 # perception_common.image_utils를 그대로 쓰지 않는 이유는 web이 ROS2 패키지가 아니라서다
 # (rclpy는 여기서만 import되는 순수 pip 의존성 — executor.py 주석 참조). 필요한 인코딩
@@ -149,12 +155,12 @@ class _BridgeNode(Node):
         self.create_subscription(RobotState, "/control/robot_state", self._on_robot_state, 10)
         self.create_subscription(SafetyEvent, "/control/safety_events", self._on_safety_event, 10)
 
-        # 카메라·뎁스 뷰. perception이 아니라 리얼센스 드라이버가 직접 내는 원본을 구독한다
-        # (화면정의서 2.2.4절 — 마스크 오버레이 없는 원본). 이미지 토픽은 대역폭이 커서
-        # BEST_EFFORT — 화면 프레임 하나 놓쳐도 다음 프레임이 금방 오므로 재전송을 기다릴
-        # 이유가 없다(grasp의 depth 구독과 같은 QoS 선택, grasp/node.py 참조).
+        # 카메라 뷰는 grasp의 검출+파지후보 오버레이(위 주석 참조), 뎁스 뷰는 리얼센스
+        # 드라이버가 직접 내는 원본이다. 이미지 토픽은 대역폭이 커서 BEST_EFFORT — 화면
+        # 프레임 하나 놓쳐도 다음 프레임이 금방 오므로 재전송을 기다릴 이유가 없다
+        # (grasp의 depth 구독과 같은 QoS 선택, grasp/node.py 참조).
         image_qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
-        self.create_subscription(Image, "/camera/color/image_raw", self._on_color_image,
+        self.create_subscription(Image, "/grasp/debug_image", self._on_color_image,
                                  image_qos)
         self.create_subscription(Image, "/camera/aligned_depth_to_color/image_raw",
                                  self._on_depth_image, image_qos)

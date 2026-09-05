@@ -29,6 +29,18 @@ def backproject(mask_bool: np.ndarray, depth_mm: np.ndarray,
     return np.stack([x, y, z], axis=1)
 
 
+def project(points_cam: np.ndarray, intrinsics: dict) -> np.ndarray:
+    """카메라 좌표계 점(mm) Nx3 → 픽셀 좌표 Nx2. `backproject`의 역방향.
+
+    z<=0인 점(카메라 뒤쪽)은 결과가 무의미하므로 호출자가 걸러야 한다 — 여기서는
+    나눗셈만 하고 필터링하지 않는다(호출부가 이미 유효성 판단 정보를 갖고 있다).
+    """
+    x, y, z = points_cam[:, 0], points_cam[:, 1], points_cam[:, 2]
+    u = x * intrinsics["fx"] / z + intrinsics["cx"]
+    v = y * intrinsics["fy"] / z + intrinsics["cy"]
+    return np.stack([u, v], axis=1)
+
+
 def transform(points: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     """Nx3 점들에 4x4 동차변환을 적용한다."""
     if points.size == 0:

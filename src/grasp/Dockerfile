@@ -25,10 +25,16 @@ WORKDIR /ros2_ws
 # message_filters: package.xml 의존이지만 이 이미지 베이스에는 기본으로 없다.
 # rmw_cyclonedds_cpp: 워크스테이션이 CycloneDDS라 기본 RMW(FastDDS)와 서로 안 보인다
 # (src/control/Dockerfile과 같은 이유 — 실제로 겪고 고친 문제라 매 ROS2 이미지에 반복해 넣는다).
+# opencv-python-headless: /grasp/debug_image 오버레이(node.py의 검출 박스·마스크·파지 후보
+# 그리기)에 쓴다. web/requirements.txt와 같은 headless 빌드 선택 이유 — GUI 없는 컨테이너에
+# libGL이 필요한 비headless판을 넣을 이유가 없다. --ignore-installed는 apt python3-numpy를
+# pip이 RECORD 없이 못 지우는 문제를 web과 같은 방식으로 피한다.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        python3-numpy python3-yaml ros-jazzy-message-filters ros-jazzy-rmw-cyclonedds-cpp \
-    && rm -rf /var/lib/apt/lists/*
+        python3-numpy python3-yaml python3-pip \
+        ros-jazzy-message-filters ros-jazzy-rmw-cyclonedds-cpp \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --no-cache-dir --break-system-packages --ignore-installed opencv-python-headless
 
 COPY --from=msgs /ros2_ws/install /ros2_ws/install
 COPY src/perception_common/ src/perception_common/
