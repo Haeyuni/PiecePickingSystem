@@ -196,7 +196,12 @@ def move_linear(client, target_pos: list[float], goal_handle,
     def verify_arrived():
         if posx_client is None:
             return False
-        current = get_current_posx(posx_client, goal_handle, timeout_s=3.0, retries=1)
+        # retries=1(재시도 없음)이던 시절엔 perception/grasp의 get_current_posx 트래픽에
+        # 한 번 밀리면 그 5초 폴링 주기를 그냥 날렸다(2026-09-05 실물로 확인 — 로봇은
+        # 3.6초 만에 도착했는데 이 확인이 60초 내내 실패해 타임아웃으로 처리됨). 짧게
+        # 두 번 더 시도해서 한 번의 경합으로 폴링 주기 전체를 잃지 않게 한다.
+        current = get_current_posx(posx_client, goal_handle, timeout_s=1.5, retries=3,
+                                   retry_delay_s=0.5)
         if current is None:
             return False
         return all(abs(a - b) <= position_tolerance_mm for a, b in zip(current[:3], target_pos[:3]))

@@ -20,7 +20,7 @@ DR_BASE = 0
 class RobotPoseClient:
     """최근 TCP 자세를 들고 있는다. `posx`는 [x, y, z, rx, ry, rz] (mm, ZYZ 도)."""
 
-    def __init__(self, node, service_name: str = SERVICE_NAME, period_s: float = 0.2,
+    def __init__(self, node, service_name: str = SERVICE_NAME, period_s: float = 0.5,
                  callback_group=None, pending_timeout_s: float = 3.0):
         self._node = node
         self._lock = threading.Lock()
@@ -31,6 +31,11 @@ class RobotPoseClient:
         self._pending_timeout_s = pending_timeout_s
         self._client = node.create_client(GetCurrentPosx, service_name,
                                           callback_group=callback_group)
+        # perception·grasp가 각자 이 클래스를 쓰므로 0.2s(5Hz)였을 때 둘이 합쳐 10Hz로
+        # 같은 서비스를 두드렸다 — control이 movel 도착 확인차 이 서비스를 부르는 순간
+        # (2026-09-05 실물로 확인: place_into가 이미 도착했는데도 응답을 못 받아 60초
+        # 타임아웃으로 실패) 이 트래픽에 밀려 응답을 못 받았다. 검출이 1~2Hz라 0.5s로
+        # 늦춰도(posx max_age_s=1.0 대비 여유 2배) 신선도는 그대로 유지된다.
         self._timer = node.create_timer(period_s, self._request,
                                         callback_group=callback_group)
 
