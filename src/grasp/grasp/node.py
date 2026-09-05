@@ -58,6 +58,7 @@ from perception_common.robot_pose import RobotPoseClient
 
 from . import pointcloud_utils, strategies
 from .config_utils import asset_path
+from .strategies.exceptions import InferenceBusy
 
 SCHEMA_VERSION = "1.0.0"
 DEPTH_BUFFER_SIZE = 60          # 30fps 기준 2초. 관측 stamp가 조금 뒤처져도 같은 프레임을 찾는다
@@ -281,7 +282,15 @@ class GraspNode(Node):
             image = mask_by_id.get(obj.object_id)
             if image is None:
                 continue
-            candidates = self._candidates_for(image, depth, depth_frame_id, T_base_camera_mm)
+            try:
+                candidates = self._candidates_for(image, depth, depth_frame_id, T_base_camera_mm)
+            except InferenceBusy:
+                # busy는 파지 실패가 아니다. 빈 후보 WorldState를 내보내 planner가 정상 물체를
+                # 거부하지 않게 하고, web은 마지막으로 완성된 관측을 계속 보여준다.
+                self.get_logger().info(
+                    "GraspNet 추론 진행 중: 이번 관측 publish 보류",
+                    throttle_duration_sec=2.0)
+                return
             obj.grasp_candidates = candidates
             filled += bool(candidates)
 

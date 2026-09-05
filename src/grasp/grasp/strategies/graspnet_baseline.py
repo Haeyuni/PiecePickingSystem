@@ -16,6 +16,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .exceptions import InferenceBusy
+
 STRATEGY = "graspnet_baseline"
 _CHECKPOINT_MOUNT = "/checkpoint.tar"
 
@@ -146,9 +148,11 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
     # 콜드 스타트(컨테이너 기동 + PyTorch/CUDA import + checkpoint 로드)를 포함하면 한 번의
     # 추론이 관측 주기(perception 0.5~2Hz)보다 오래 걸리기 쉽다 — 그 사이 들어온 새 관측은
     # 큐에 쌓지 않고 그냥 건너뛴다. 여기서 건너뛰지 않으면 매 관측마다 컨테이너가 새로 뜨고
-    # 겹쳐 쌓여 GPU 메모리를 다 먹는다(모듈 docstring의 사고 기록 참조).
+    # 겹쳐 쌓여 GPU 메모리를 다 먹는다(모듈 docstring의 사고 기록 참조). 빈 후보는
+    # planner가 실제 파지 불가로 해석하므로, node가 이번 관측 publish를 보류할 수 있게
+    # 일반 RuntimeError와 구분되는 상태로 알린다.
     if not _INFERENCE_LOCK.acquire(blocking=False):
-        return []
+        raise InferenceBusy("이전 GraspNet 추론이 진행 중입니다")
     try:
         container_name = f"graspnet-baseline-{uuid.uuid4().hex[:12]}"
         with tempfile.TemporaryDirectory(prefix="graspnet_baseline_") as temp_dir:

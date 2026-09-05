@@ -3,6 +3,7 @@ import pytest
 
 from grasp import strategies
 from grasp.strategies import graspnet_baseline
+from grasp.strategies.exceptions import InferenceBusy
 
 
 def test_registry_exposes_graspnet_baseline():
@@ -45,3 +46,22 @@ def test_missing_checkpoint_is_not_replaced_by_pca():
             },
             context={'points_cam_mm': np.ones((80, 3)), 'T_base_camera_mm': np.eye(4)},
         )
+
+
+def test_busy_inference_does_not_become_empty_candidates(monkeypatch, tmp_path):
+    checkpoint = tmp_path / 'checkpoint.tar'
+    checkpoint.touch()
+    monkeypatch.setattr(graspnet_baseline, '_require_image', lambda image: None)
+    assert graspnet_baseline._INFERENCE_LOCK.acquire(blocking=False)
+    try:
+        with pytest.raises(InferenceBusy):
+            graspnet_baseline.plan(
+                np.empty((0, 3)),
+                {
+                    'checkpoint_path': str(checkpoint),
+                    'T_graspnet_tcp_mm': np.eye(4).tolist(),
+                },
+                context={'points_cam_mm': np.ones((80, 3)), 'T_base_camera_mm': np.eye(4)},
+            )
+    finally:
+        graspnet_baseline._INFERENCE_LOCK.release()
