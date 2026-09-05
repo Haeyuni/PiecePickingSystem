@@ -39,11 +39,24 @@ graspnet_baseline:
   num_points: 20000
   min_points: 80
   max_candidates: 5
-  timeout_s: 60.0
+  timeout_s: 180.0  # TODO: 진단용으로 늘림(60s가 두 번 연속 초과됨, 2026-09-05) — 실제 소요시간 확인 후 되돌릴 것
   image: "piece-picking-graspnet-baseline:0.1.0"
   # T_graspnet_tcp_mm: TCP frame 좌표를 GraspNet predicted-gripper frame으로 바꾸는 mm 변환.
   # 테스트 셀의 RG2 TCP 정의와 GraspNet 축을 측정해 채운다. 빈 값은 의도적으로 후보 생성을 실패시킨다.
-  T_graspnet_tcp_mm: []
+  #
+  # 2026-09-05: 순수 이동이 아니라 회전이 필요하다 — GraspNet(graspnetAPI utils.py의
+  # plot_gripper_pro_max 확인: X=접근, Y=닫힘, Z=나머지)과 이 프로젝트의 grasp_pose/TCP
+  # 컨벤션(heuristic_pca._pose_from_closing_axis: Z=접근, X=닫힘)이 서로 다른 축을 쓴다.
+  # 아래는 그 축만 맞바꾼 회전(TCP의 X(닫힘)→GraspNet Y, TCP의 Z(접근)→GraspNet X, 행렬식
+  # +1)에 208mm 오프셋을 GraspNet 접근축(X)에 얹은 것 — **출발점일 뿐이며 검증 전이다**.
+  # 208mm의 부호·정확한 값(TCP가 GraspNet 접촉점보다 얼마나 뒤에 있는지)은 실측이 필요하고,
+  # 로봇을 움직이기 전에 /grasp/debug_image에 이 변환으로 나온 후보를 투영해 접근 방향이
+  # 실제로 물체를 향하는지 먼저 눈으로 확인해야 한다.
+  T_graspnet_tcp_mm:
+    - [0.0, 0.0, 1.0, -208.0]
+    - [1.0, 0.0, 0.0, 0.0]
+    - [0.0, 1.0, 0.0, 0.0]
+    - [0.0, 0.0, 0.0, 1.0]
 
 pointcloud:
   z_percentile: 2.0           # 마스크가 배경으로 새어 나온 깊이 양끝을 자른다
