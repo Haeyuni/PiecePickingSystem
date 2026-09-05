@@ -78,7 +78,12 @@ async def run_command(trace_id: str, command_text: str, executor) -> None:
     previous_failure = None
 
     for attempt in range(MAX_REPLANS + 1):
-        if attempt > 0:
+        # place_into가 실패했을 때는 건너뛴다 — 그리퍼가 이미 물체를 쥔 채라 validator가
+        # 다음 스텝으로 pick을 허용하지 않으므로(같은 물체를 다시 집을 수 없다), 재계획해도
+        # 결과는 어차피 같은 물체를 다시 place_into하는 것뿐이다. place_into의 목적지는
+        # world_state가 아니라 bins.yaml에서 그라운딩되므로 다시 봐야 할 것이 없다 —
+        # home 왕복만 로봇을 쥔 채로 더 움직이는 시간 낭비다.
+        if attempt > 0 and (previous_failure or {}).get("skill") != "place_into":
             # 재계획 전에 home으로 돌아가 시야를 비우고 새로 스캔한다 — 실패한 스텝이
             # 파지 중 물체를 건드렸거나 팔이 카메라 시야에 그대로 남아있으면, 그 상태의
             # 관측으로 재계획해봤자 물체가 "안 보이는" 것으로 나와 매번 그라운딩이
@@ -214,6 +219,7 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
                 "request_id": step["request_id"],
                 "object_id": step["object_id"],
                 "failure_reason": result.failure_reason,
+                "skill": step["skill"],
             }
 
     return None
