@@ -4,14 +4,18 @@
 
 bins:
   left_box:
-    # 2026-09-04 실측: get_current_posx()로 읽은 로봇의 실제 TCP 자세(base 좌표계).
-    # 변환 방식은 right_box와 동일(아래 주석 참조).
+    # 2026-09-05 재실측: 이전 값(326.014, -461.490, 294.360)의 접근 위치(+release_clearance
+    # +approach_height, skill_params.yaml)가 NOT REACHABLE로 확인돼(dsr_controller2
+    # OnLogAlarm) 다시 잡았다. get_current_posx()로 읽은 실제 TCP 자세(base 좌표계).
+    # ZYZ 오일러(rx=22.8094, ry=-179.8743, rz=23.1649 deg) → 변환 방식은 right_box와 동일(아래 주석 참조).
+    # 접근/삽입 높이(z+110mm, z+30mm)는 /dsr01/dsr_controller2/motion/ikin으로 도달 가능함을 확인했다.
     name_ko: 왼쪽 박스
-    pose: { x: -446.884, y: -379.274, z: 206.037, qx: 0.000355, qy: 1.000000, qz: 0.000059, qw: 0.000047 }
+    pose: { x: 334.684, y: -479.249, z: 183.820, qx: 0.003103, qy: 0.999995, qz: -0.000428, qw: -0.001010 }
   right_box:
-    # 2026-09-04 실측: get_current_posx()로 읽은 로봇의 실제 TCP 자세(base 좌표계).
-    # ZYZ 오일러(rx=27.3077, ry=179.2408, rz=27.9209 deg) → 쿼터니언은
+    # 2026-09-05 재실측: get_current_posx()로 읽은 로봇의 실제 TCP 자세(base 좌표계).
+    # ZYZ 오일러(rx=26.6632, ry=-179.7805, rz=27.2262 deg) → 쿼터니언은
     # perception_common.geometry.posx_to_matrix + Shepperd 변환(grasp의
     # heuristic_pca._quaternion_from_matrix)으로 캘리브레이션과 같은 해석으로 구했다.
+    # 접근/삽입 높이(z+110mm, z+30mm)는 /dsr01/dsr_controller2/motion/ikin으로 도달 가능함을 확인했다.
     name_ko: 오른쪽 박스
-    pose: { x: -437.909, y: 137.065, z: 193.047, qx: 0.005352, qy: 0.999964, qz: 0.003071, qw: 0.005871 }
+    pose: { x: 19.381, y: -495.934, z: 173.369, qx: 0.004913, qy: 0.999986, qz: -0.000868, qw: -0.001707 }
