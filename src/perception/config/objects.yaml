@@ -7,45 +7,76 @@ profiles:
   normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
   fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
   deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
-# 현재 클래스 3종은 전부 normal이라 fragile/deformable은 직접 매핑되는 물체가 없다.
-# 지우지 않는 이유: fragile은 미확인 신규 클래스의 강제 프로파일이라 계속 쓰이고(FR-05b),
-# deformable은 클래스가 늘어날 때 되살아난다. control의 skill_params와도 짝이 맞아야 한다.
 
 # 검출 모델의 클래스명 → 이 파일의 class_name 매핑 (개발계획.md D-7).
 #
-# 학습된 모델(models/best.pt, yolo11n-seg)의 라벨은 suncream/tape/nail_product인데,
-# 세 번째의 정식 이름은 nail이다. perception이 모델 출력을 DetectedObject.class_name으로
-# 옮길 때 **반드시 이 표를 지난다** — 안 그러면 속성 조회가 어긋나 네일이 매번 미확인
-# 신규품목으로 떨어지고, FR-05b에 따라 fragile 프로파일이 강제된다(조용히 느려질 뿐
-# 오류로는 보이지 않는다). 이름이 같은 둘도 적어 둔 이유는 모델 어휘 전체가 한눈에
-# 보여야 다음 재학습 때 빠진 것을 알아채기 때문이다.
+# 2026-09-05 클래스 전면 교체: 이전 모델(suncream/tape/nail_product 등 6클래스)이 폐기되고
+# 신규 7클래스 모델로 바뀌었다. 이전 모델 라벨과의 매핑은 이 모델에서 더 이상 나오지 않으므로
+# 함께 제거한다 — 남겨두면 다음 사람이 지금도 나오는 라벨인 줄 헷갈린다. perception이 모델
+# 출력을 DetectedObject.class_name으로 옮길 때 **반드시 이 표를 지난다** — 안 지나면 전부
+# 미확인 신규품목으로 떨어지고 FR-05b에 따라 fragile 프로파일이 강제된다(조용히 느려질 뿐
+# 오류로는 보이지 않는다). DB 시드(seed.py)와 평가셋(eval/test_set.jsonl)은 여전히 옛
+# 3클래스를 참조하므로 별도로 갱신해야 한다(아직 미반영, 개발계획.md에 등록).
 model_labels:
-  suncream: suncream
-  tape: tape
-  nail_product: nail
+  ringring_gel_nail_twinkle_silver: gel_nail
+  ecla_moist_wet_wipes: wet_wipes
+  editb_bare_bunny_tone_filter_sunscreen: sunscreen
+  jjanggu_rabbit_doll: doll
+  pigeon_blue_bianca_spray: fabric_spray
+  dentimate_new_total_care_toothpaste: toothpaste
+  navy_folding_umbrella: umbrella
 
-# 클래스 목록은 트랙 A에서 확정됨 (2026-09-03). 속성은 사용자 확인값이다.
+# 클래스 목록 갱신 (2026-09-05, 모델 전면 교체). 아래 속성은 실측이 아닌 초기 추정값이다 —
+# FR-05b에 따라 실제 승인 이력이 쌓이는 대로 user_confirmed로 덮어써야 한다.
 objects:
-  suncream:
-    name_ko: 선크림
+  gel_nail:
+    name_ko: 젤네일
+    mass_g: 15
+    fragile: true       # 유리병 — 강하게 쥐면 깨질 수 있다
+    deformable: false
+    transparent: false
+    profile: fragile
+  wet_wipes:
+    name_ko: 물티슈
+    mass_g: 300
+    fragile: false
+    deformable: true    # 비닐 포장 — 쥐는 힘에 눌린다
+    transparent: false
+    profile: deformable
+  sunscreen:
+    name_ko: 썬크림
     mass_g: 50
     fragile: false
     deformable: false
     transparent: false
     profile: normal
-  nail:
-    name_ko: 네일
-    mass_g: 150
+  doll:
+    name_ko: 인형
+    mass_g: 120
+    fragile: false
+    deformable: true    # 봉제 인형 — 눌려도 손상 아님
+    transparent: false
+    profile: deformable
+  fabric_spray:
+    name_ko: 섬유탈취제
+    mass_g: 350
     fragile: false
     deformable: false
     transparent: false
     profile: normal
-  tape:
-    name_ko: 테이프
-    mass_g: 80
+  toothpaste:
+    name_ko: 치약
+    mass_g: 100
+    fragile: false
+    deformable: true    # 튜브 — 쥐는 힘에 눌린다
+    transparent: false
+    profile: deformable
+  umbrella:
+    name_ko: 우산
+    mass_g: 300
     fragile: false
     deformable: false
-    transparent: true      # 롤 몸체가 비쳐 보인다 — depth가 표면을 놓칠 수 있다
+    transparent: false
     profile: normal
 
 fallback:            # DB에 없는 신규 클래스에 적용하는 보수적 기본값 (FR-05)

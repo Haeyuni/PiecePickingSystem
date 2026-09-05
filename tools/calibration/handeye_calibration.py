@@ -24,7 +24,7 @@ def find_checkerboard_pose(
 ):
     objp = np.zeros((board_size[0] * board_size[1], 3), np.float32)
     objp[:, :2] = (
-        np.mgrid[0 : board_size[0], 0 : board_size[1]].T.reshape(-1, 2) * 25
+        np.mgrid[0 : board_size[0], 0 : board_size[1]].T.reshape(-1, 2) * square_size
     )
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
