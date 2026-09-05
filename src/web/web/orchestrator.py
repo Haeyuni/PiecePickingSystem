@@ -54,12 +54,44 @@ async def _feedback(request_id: str, phase: str, trace: dict) -> None:
             return
 
 
+async def _wait_for_fresh_observation(executor, timeout_s: float = 5.0) -> None:
+    """스탬프가 바뀐 새 /world_state가 들어올 때까지 기다린다(최선을 다해서, 실패해도 넘어간다).
+
+    home 이동 직후 곧바로 `get_latest_world_state()`를 부르면 팔이 아직 시야를 가리고
+    있거나 이동 전에 찍힌 오래된 스냅샷을 돌려줄 수 있다 — 재계획이 그 상태를 근거로
+    LLM에 다시 물으면 방금 건드린 물체가 아직도 "안 보이는" 것으로 나온다.
+    """
+    before = executor.get_latest_world_state()
+    before_stamp = (before or {}).get("stamp")
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while asyncio.get_event_loop().time() < deadline:
+        current = executor.get_latest_world_state()
+        stamp = (current or {}).get("stamp")
+        if stamp and stamp != before_stamp:
+            return
+        await asyncio.sleep(0.2)
+
+
 async def run_command(trace_id: str, command_text: str, executor) -> None:
     """명령 하나를 끝까지 처리한다. 백그라운드 태스크로 실행된다."""
     trace = _new_trace(trace_id, command_text)
     previous_failure = None
 
     for attempt in range(MAX_REPLANS + 1):
+        if attempt > 0:
+            # 재계획 전에 home으로 돌아가 시야를 비우고 새로 스캔한다 — 실패한 스텝이
+            # 파지 중 물체를 건드렸거나 팔이 카메라 시야에 그대로 남아있으면, 그 상태의
+            # 관측으로 재계획해봤자 물체가 "안 보이는" 것으로 나와 매번 그라운딩이
+            # 거부된다(2026-09-04 실물로 확인 — 네일 pick 실패 후 재계획이 항상
+            # "무엇을 가리키는지 알 수 없습니다"로 거부됐다).
+            logger.info("재계획 전 home 복귀 (trace=%s)", trace_id)
+            try:
+                await executor.home()
+            except Exception:
+                logger.exception("재계획 전 home 이동 실패 (trace=%s) — 그래도 재계획은 시도한다",
+                                 trace_id)
+            await _wait_for_fresh_observation(executor)
+
         world_state = executor.get_latest_world_state()
         if world_state is None:
             trace["validation_status"] = "rejected"
