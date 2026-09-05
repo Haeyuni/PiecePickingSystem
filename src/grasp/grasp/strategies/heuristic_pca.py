@@ -83,7 +83,7 @@ def _width_score(width_mm: float, max_opening_mm: float, min_width_mm: float) ->
     return float(np.clip(1.0 - abs(ratio - 0.5) * 1.4, 0.1, 1.0))
 
 
-def plan(points_base: np.ndarray, params: dict) -> list[dict]:
+def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> list[dict]:
     """물체 하나의 점들(base 좌표계 mm)로 파지 후보 목록을 만든다.
 
     반환: [{"pose": {...}, "score": float, "strategy": "heuristic_pca"}], 점수 내림차순.

@@ -1,5 +1,6 @@
 import os
 from glob import glob
+from pathlib import Path
 
 from setuptools import find_packages, setup
 
@@ -15,6 +16,8 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'docker', 'graspnet_baseline'),
+         [str(path) for path in Path('docker/graspnet_baseline').iterdir() if path.is_file()]),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

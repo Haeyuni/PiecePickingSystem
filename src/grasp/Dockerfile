@@ -1,9 +1,8 @@
 # grasp: world_state_raw + instance_masks → 파지 후보를 채워 /world_state 최종 발행.
 #
-# **지금은 heuristic_pca 전략만 뜬다.** strategies/contact_graspnet.py·graspnet_baseline.py는
-# 파일만 있고 미구현이라(strategies/__init__.py 레지스트리에 미등록) Open3D/PyTorch/CUDA를
-# 이 이미지에 아직 넣지 않는다 — 두 전략이 실제로 구현되는 시점에 이 Dockerfile로 돌아와
-# 추가한다. 지금 필요한 건 numpy뿐이다(pointcloud_utils.py, strategies/heuristic_pca.py).
+# GraspNet-baseline은 이 ROS 이미지에 PyTorch/CUDA를 섞지 않는다. host에서 실행한 grasp
+# strategy가 준비된 `grasp/docker/graspnet_baseline` Docker runtime을 호출한다. 이 compose
+# 컨테이너에는 Docker socket/CLI를 넣지 않으므로 heuristic_pca 용도로만 사용한다.
 #
 # perception_common(공용 패키지, 개발계획.md 2026-09-04)에 있는 dsr_msgs2 의존성은 이미지가
 # 아니라 런타임에 호스트 워크스페이스를 마운트해 해결한다 — docker-entrypoint.sh 참조.

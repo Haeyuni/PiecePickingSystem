@@ -237,7 +237,9 @@ rosbag2_*/
 *.onnx
 *.engine
 *.ckpt
+*.tar
 weights/
+assets/
 
 # data/ 실제 데이터 (경로만 git 관리, 원본 파일은 볼륨 마운트 — 시스템명세서 2.4절)
 data/samples/*

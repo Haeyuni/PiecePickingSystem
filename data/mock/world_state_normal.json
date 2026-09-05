@@ -43,6 +43,7 @@
             }
           },
           "score": 0.91,
+          "gripper_width_mm": 40.0,
           "strategy": "heuristic_pca"
         }
       ]
@@ -83,6 +84,7 @@
             }
           },
           "score": 0.95,
+          "gripper_width_mm": 40.0,
           "strategy": "heuristic_pca"
         }
       ]
@@ -123,6 +125,7 @@
             }
           },
           "score": 0.83,
+          "gripper_width_mm": 40.0,
           "strategy": "heuristic_pca"
         }
       ]

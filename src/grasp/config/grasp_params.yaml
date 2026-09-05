@@ -9,6 +9,16 @@ gripper:
   # 이보다 얇으면 손가락이 물체를 스치고 지나가기 쉽다 — 후보에서 빼지 않고 점수만 낮춘다.
   min_width_mm: 5.0
 
+# 로컬/공용 자산은 Git 밖의 assets_dir에 둔다. 개발 PC에서는 환경변수를 설정하지 않아도 PCA 빌드·검증이 가능하다.
+# grasp는 checkpoint/calibration만 소비한다. yolo/results 경로는 동일 assets 계약을 다른
+# 노드·도구에서 사용할 수 있도록 함께 기록한다.
+assets:
+  assets_dir: "${PIECE_PICKING_ASSETS_DIR}"
+  graspnet_checkpoint_path: models/graspnet/checkpoint.tar
+  yolo_weights_path: ""
+  calibration_path: ""
+  results_dir: ""
+
 strategy:
   # sort_msgs/GraspCandidate.msg의 STRATEGY_* 중 하나.
   # 학습 기반 전략은 가중치·CUDA 환경이 붙어야 등록된다 (strategies/__init__.py).
@@ -18,6 +28,22 @@ heuristic_pca:
   min_points: 80              # 이보다 적으면 축이 잡음에 흔들린다 — 후보를 내지 않는다
   top_surface_band_mm: 15.0   # 윗면으로 볼 두께. depth 잡음 한 점이 파지 높이가 되지 않게 한다
   grasp_depth_mm: 8.0         # 윗면보다 이만큼 내려가서 잡는다 (스치지 않도록)
+
+# HW_UNVERIFIED: 개발 PC에서는 Docker image/GPU/checkpoint를 준비하거나 실행하지 않는다.
+# GraspNet은 테스트 PC에서 setup_graspnet_runtime.sh를 최초 1회 실행한 뒤에만 선택한다.
+# 별도 Docker CUDA runtime에서 camera-frame/m point cloud로 추론한다.
+# checkpoint_path는 assets.graspnet_checkpoint_path가 비어 있을 때만 직접 쓴다.
+graspnet_baseline:
+  checkpoint_path: ""
+  device: "cuda:0"
+  num_points: 20000
+  min_points: 80
+  max_candidates: 5
+  timeout_s: 60.0
+  image: "piece-picking-graspnet-baseline:0.1.0"
+  # T_graspnet_tcp_mm: TCP frame 좌표를 GraspNet predicted-gripper frame으로 바꾸는 mm 변환.
+  # 테스트 셀의 RG2 TCP 정의와 GraspNet 축을 측정해 채운다. 빈 값은 의도적으로 후보 생성을 실패시킨다.
+  T_graspnet_tcp_mm: []
 
 pointcloud:
   z_percentile: 2.0           # 마스크가 배경으로 새어 나온 깊이 양끝을 자른다

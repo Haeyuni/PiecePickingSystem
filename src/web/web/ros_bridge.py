@@ -122,6 +122,7 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                                             "z": c.pose.orientation.z, "w": c.pose.orientation.w},
                         },
                         "score": c.score,
+                        "gripper_width_mm": c.gripper_width_mm,
                         "strategy": c.strategy,
                     }
                     for c in o.grasp_candidates

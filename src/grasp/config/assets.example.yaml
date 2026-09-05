@@ -1,0 +1,7 @@
+# Git에 넣지 않는 공용/로컬 자산의 경로 예시. 이 내용을 grasp_params.local.yaml에 합쳐 쓴다.
+assets:
+  assets_dir: ${PIECE_PICKING_ASSETS_DIR}
+  graspnet_checkpoint_path: models/graspnet/checkpoint.tar
+  yolo_weights_path: yolo/best.pt
+  calibration_path: calibration/T_gripper2camera.npy
+  results_dir: results
