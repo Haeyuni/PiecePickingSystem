@@ -291,7 +291,7 @@ class GraspNode(Node):
             f"({self._strategy_name})", throttle_duration_sec=2.0)
 
         if self._publish_debug:
-            self._publish_debug_image(world, mask_by_id, base2camera)
+            self._publish_debug_image(world, mask_by_id, T_base_camera_mm)
 
     def _blockers(self, world: WorldState, masks: InstanceMasks) -> list[str]:
         blockers = []

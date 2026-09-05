@@ -10,12 +10,22 @@ import json
 import shutil
 import subprocess
 import tempfile
+import threading
+import uuid
 from pathlib import Path
 
 import numpy as np
 
 STRATEGY = "graspnet_baseline"
 _CHECKPOINT_MOUNT = "/checkpoint.tar"
+
+# grasp_node는 ReentrantCallbackGroup을 쓴다 — 한 추론(수십 초, 콜드 스타트 포함 컨테이너
+# 하나)이 끝나기 전에 새 관측이 들어오면 그 스레드가 별도로 또 docker run을 쏜다. 실물로
+# 확인한 사고(2026-09-05): 관측 주기(~2s)가 추론 시간보다 짧아 컨테이너가 수십 개까지
+# 동시에 쌓였고, GPU 메모리가 바닥나 perception까지 OOM으로 죽었다. 전략 함수 자체가
+# per-call 상태를 못 갖는 순수 함수 계약이라(heuristic_pca와 동일 시그니처) 락은 모듈
+# 전역에 둔다 — 이 프로세스 안에서 도는 grasp_node는 하나뿐이므로 충분하다.
+_INFERENCE_LOCK = threading.Lock()
 
 
 def _quaternion_from_matrix(matrix: np.ndarray) -> tuple[float, float, float, float]:
@@ -133,31 +143,48 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
     min_width_m = float(params.get("min_width_mm", 5.0)) / 1000.0
     max_width_m = float(params.get("max_opening_mm", 110.0)) / 1000.0
 
-    with tempfile.TemporaryDirectory(prefix="graspnet_baseline_") as temp_dir:
-        temp = Path(temp_dir)
-        np.savez_compressed(temp / "input.npz", points_cam_m=points_cam_mm.astype(np.float32) / 1000.0)
-        command = [
-            "docker", "run", "--rm", "--gpus", "all",
-            "-v", f"{temp}:/io",
-            "-v", f"{checkpoint.resolve()}:{_CHECKPOINT_MOUNT}:ro",
-            image, "/io/input.npz", "/io/output.json", _CHECKPOINT_MOUNT, device,
-            str(num_points), str(min_width_m), str(max_width_m), str(max_candidates),
-        ]
-        try:
-            run = subprocess.run(command, text=True, capture_output=True, timeout=timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(f"GraspNet 추론 timeout ({timeout_s:.0f}s)") from exc
-        output = temp / "output.json"
-        if run.returncode or not output.is_file():
-            detail = (run.stderr or run.stdout).strip().splitlines()
-            raise RuntimeError(f"GraspNet container 실행 실패: {detail[-1] if detail else run.returncode}")
-        try:
-            result = json.loads(output.read_text(encoding="utf-8"))
-            if result.get("input_frame") != "camera" or result.get("input_unit") != "m":
-                raise RuntimeError("GraspNet 결과의 camera/m 입력 계약이 다릅니다")
-            raw_candidates = result["candidates"]
-        except (OSError, ValueError, KeyError) as exc:
-            raise RuntimeError("GraspNet 결과 형식이 올바르지 않습니다") from exc
+    # 콜드 스타트(컨테이너 기동 + PyTorch/CUDA import + checkpoint 로드)를 포함하면 한 번의
+    # 추론이 관측 주기(perception 0.5~2Hz)보다 오래 걸리기 쉽다 — 그 사이 들어온 새 관측은
+    # 큐에 쌓지 않고 그냥 건너뛴다. 여기서 건너뛰지 않으면 매 관측마다 컨테이너가 새로 뜨고
+    # 겹쳐 쌓여 GPU 메모리를 다 먹는다(모듈 docstring의 사고 기록 참조).
+    if not _INFERENCE_LOCK.acquire(blocking=False):
+        return []
+    try:
+        container_name = f"graspnet-baseline-{uuid.uuid4().hex[:12]}"
+        with tempfile.TemporaryDirectory(prefix="graspnet_baseline_") as temp_dir:
+            temp = Path(temp_dir)
+            np.savez_compressed(temp / "input.npz",
+                               points_cam_m=points_cam_mm.astype(np.float32) / 1000.0)
+            command = [
+                "docker", "run", "--rm", "--gpus", "all", "--name", container_name,
+                "-v", f"{temp}:/io",
+                "-v", f"{checkpoint.resolve()}:{_CHECKPOINT_MOUNT}:ro",
+                image, "/io/input.npz", "/io/output.json", _CHECKPOINT_MOUNT, device,
+                str(num_points), str(min_width_m), str(max_width_m), str(max_candidates),
+            ]
+            try:
+                run = subprocess.run(command, text=True, capture_output=True, timeout=timeout_s)
+            except subprocess.TimeoutExpired as exc:
+                # subprocess timeout은 `docker` CLI(클라이언트) 프로세스만 죽인다 — 컨테이너
+                # 본체는 데몬에서 계속 돌며 GPU 메모리를 쥔 채 고아로 남는다(2026-09-05 실물
+                # 확인: 컨테이너 20개 넘게 쌓여 GPU를 다 먹고 perception까지 OOM으로 죽음).
+                # --name으로 명시적으로 죽여야 실제로 회수된다.
+                subprocess.run(["docker", "kill", container_name],
+                              capture_output=True, timeout=10.0)
+                raise RuntimeError(f"GraspNet 추론 timeout ({timeout_s:.0f}s)") from exc
+            output = temp / "output.json"
+            if run.returncode or not output.is_file():
+                detail = (run.stderr or run.stdout).strip().splitlines()
+                raise RuntimeError(f"GraspNet container 실행 실패: {detail[-1] if detail else run.returncode}")
+            try:
+                result = json.loads(output.read_text(encoding="utf-8"))
+                if result.get("input_frame") != "camera" or result.get("input_unit") != "m":
+                    raise RuntimeError("GraspNet 결과의 camera/m 입력 계약이 다릅니다")
+                raw_candidates = result["candidates"]
+            except (OSError, ValueError, KeyError) as exc:
+                raise RuntimeError("GraspNet 결과 형식이 올바르지 않습니다") from exc
+    finally:
+        _INFERENCE_LOCK.release()
 
     return [candidate for raw in raw_candidates
             if (candidate := _base_candidate(raw, T_base_camera_mm, T_graspnet_tcp_mm)) is not None]
