@@ -115,6 +115,7 @@ def validate(llm_steps: list, world_state: dict, bins: dict,
                 object_id=step.object_id,
                 profile=profile,
                 grasp_pose=Pose(**grasp["pose"]),
+                grasp_width_mm=grasp.get("width_mm") or None,
             ))
 
         else:  # place_into

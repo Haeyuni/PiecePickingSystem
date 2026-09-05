@@ -59,6 +59,7 @@ class PlanStep(BaseModel):
     object_id: str
     profile: Profile
     grasp_pose: Pose | None = None   # pick일 때만
+    grasp_width_mm: float | None = None  # pick일 때만. 고른 후보의 물체 폭(mm) — 없으면 미상
     bin_id: str | None = None        # place_into일 때만
 
 

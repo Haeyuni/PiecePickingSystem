@@ -431,6 +431,7 @@ class GraspNode(Node):
         msg.pose = pose
         msg.score = float(candidate["score"])
         msg.strategy = candidate["strategy"]
+        msg.width_mm = float(candidate.get("width_mm") or 0.0)
         return msg
 
 

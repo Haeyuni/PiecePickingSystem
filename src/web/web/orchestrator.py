@@ -137,6 +137,7 @@ async def run_command(trace_id: str, command_text: str, executor) -> None:
                 "bin_id": s.get("bin_id"),
                 "profile": s["profile"],
                 "grasp_pose": s.get("grasp_pose"),
+                "grasp_width_mm": s.get("grasp_width_mm"),
                 "status": "pending",
                 "phase": None,
             }
@@ -166,6 +167,7 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             object_id=step["object_id"],
             profile=step["profile"],
             grasp_pose=step.get("grasp_pose"),
+            grasp_width_mm=step.get("grasp_width_mm"),
             bin_id=step.get("bin_id"),
         )
 

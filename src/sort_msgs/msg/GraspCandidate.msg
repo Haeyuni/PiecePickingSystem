@@ -2,6 +2,8 @@
 
 geometry_msgs/Pose pose        # base 좌표계 기준 파지 자세
 float32 score                  # 신뢰도 0.0~1.0
+float32 width_mm                # 닫는 축 방향 물체 폭(mm). control이 그리퍼 개폭을 정할 때 쓴다.
+                                 # 0이면 미상(폭을 못 낸 전략) — control은 기본 개폭으로 대체한다.
 
 string STRATEGY_HEURISTIC_PCA=heuristic_pca
 string STRATEGY_CONTACT_GRASPNET=contact_graspnet

@@ -44,6 +44,11 @@ gripper:
   # robot_executor.py가 쓰는 것과 같은 기본값(RG2 개폭 기준 손가락이 완전히 맞닿는
   # 지점 근처, 5.0mm).
   min_grip_width_mm: 5.0
+  # pick 전 그리퍼를 GraspCandidate.width_mm + 이 값만큼만 연다(pick_server._open_width_m).
+  # width_mm을 모르면(0) 대신 motion.gripper_open_m(최대)까지 연다.
+  # TODO: 값 확정 — 30mm는 접근 중 손가락이 물체를 스치지 않을 정도로 보수적으로 잡은
+  # 시작값이다. 실물로 확인해 튜닝 필요.
+  width_margin_mm: 30.0
 
 visual_verification:
   wrist_camera_offset_mm: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정). 단위 mm
