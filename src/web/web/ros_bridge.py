@@ -129,7 +129,7 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                         },
                         "score": c.score,
                         "strategy": c.strategy,
-                        "width_mm": c.width_mm,
+                        "gripper_width_mm": c.gripper_width_mm,
                     }
                     for c in o.grasp_candidates
                 ],
@@ -326,7 +326,7 @@ class RosExecutor:
         msg.object_id = goal.object_id
         msg.profile = goal.profile
         msg.grasp_pose = _pose_to_msg(goal.grasp_pose)
-        msg.grasp_width_mm = float(goal.grasp_width_mm or 0.0)
+        msg.gripper_width_mm = float(goal.gripper_width_mm or 0.0)
         msg.max_retries = goal.max_retries
         return await self._send(self._node.pick_client, msg, goal.request_id, on_feedback)
 

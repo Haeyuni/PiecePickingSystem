@@ -2,18 +2,18 @@
 
 전략은 전부 같은 시그니처를 갖는다:
 
-    plan(points_base: np.ndarray, params: dict) -> list[dict]
+    plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> list[dict]
 
 `node.py`는 어떤 전략이 도는지 모른 채 이름으로만 고른다. 3단계 비교 실험(BR 4.1절)에서
 전략을 바꾸는 것이 노드 수정이 아니라 파라미터 변경이어야 하기 때문이다.
 """
-from . import heuristic_pca
+from . import graspnet_baseline, heuristic_pca
 
-# 학습 기반 전략(contact_graspnet, graspnet_baseline)은 가중치와 별도 CUDA 환경이 필요해
-# 여기에 아직 등록하지 않는다. 등록되지 않은 이름을 고르면 아래에서 분명한 오류가 난다 —
-# 조용히 heuristic으로 대체하면 비교 실험 결과가 통째로 잘못 읽힌다.
+# Contact-GraspNet은 가중치·별도 CUDA 환경이 준비되기 전까지 등록하지 않는다. GraspNet은
+# Docker adapter가 그 환경을 분리하므로 등록한다. 설정 오류를 PCA로 대체하지 않는다.
 _STRATEGIES = {
     heuristic_pca.STRATEGY: heuristic_pca.plan,
+    graspnet_baseline.STRATEGY: graspnet_baseline.plan,
 }
 
 

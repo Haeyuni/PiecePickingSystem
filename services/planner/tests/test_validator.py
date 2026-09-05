@@ -68,14 +68,14 @@ class TestHappyPath(unittest.TestCase):
 
     def test_grasp_width_is_carried_into_plan_step(self):
         obj = make_object()
-        obj["grasp_candidates"][0]["width_mm"] = 42.5
+        obj["grasp_candidates"][0]["gripper_width_mm"] = 42.5
         steps = validate(pick_place(), world(obj), BINS)
-        self.assertEqual(steps[0].grasp_width_mm, 42.5)
+        self.assertEqual(steps[0].gripper_width_mm, 42.5)
 
     def test_missing_grasp_width_is_none(self):
-        """width_mm을 못 낸 전략(레거시 후보)이면 None — control이 기본 개폭으로 대체한다."""
+        """gripper_width_mm을 못 낸 전략(레거시 후보)이면 None — control이 기본 개폭으로 대체한다."""
         steps = validate(pick_place(), world(make_object()), BINS)
-        self.assertIsNone(steps[0].grasp_width_mm)
+        self.assertIsNone(steps[0].gripper_width_mm)
 
 
 class TestGrounding(unittest.TestCase):

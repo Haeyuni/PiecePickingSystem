@@ -95,9 +95,9 @@ class PickServer(Node):
         # 아직 없어 이게 유일한 파지 확인 수단이다 — grasp_test/robot_executor.py의
         # 같은 판정(min_grip_width_mm)과 같은 기본값을 쓴다.
         self._min_grip_width_mm = float(gripper.get("min_grip_width_mm", 5.0))
-        # grasp_candidate.width_mm(닫는 축 방향 물체 폭)에 더하는 여유 — 이만큼만 더 열면
-        # 접근 중 손가락이 물체를 스치지 않으면서도 다 열 때보다 빨리 닫히고, 클러터에서
-        # 옆 물체를 안 건드린다. width_mm을 모르면(0 이하) 기존처럼 최대로 연다.
+        # GraspCandidate.gripper_width_mm(전략이 예측한 필요 개폭)에 더하는 여유 — 이만큼만
+        # 더 열면 접근 중 손가락이 물체를 스치지 않으면서도 다 열 때보다 빨리 닫히고,
+        # 클러터에서 옆 물체를 안 건드린다. 모르면(0 이하) 기존처럼 최대로 연다.
         self._gripper_width_margin_mm = float(gripper.get("width_margin_mm", 15.0))
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
@@ -212,14 +212,14 @@ class PickServer(Node):
         feedback.phase = phase
         goal_handle.publish_feedback(feedback)
 
-    def _open_width_m(self, grasp_width_mm: float) -> float:
-        """파지 전 그리퍼를 열 목표 개폭(m). grasp_width_mm(GraspCandidate.width_mm)에
-        여유(width_margin_mm)만 더해서 연다 — 물체 폭을 모르면(전략이 못 낸 경우, 0
-        이하) 예전처럼 최대로 열어서 안전한 쪽으로 대체한다."""
-        if grasp_width_mm <= 0.0:
+    def _open_width_m(self, gripper_width_mm: float) -> float:
+        """파지 전 그리퍼를 열 목표 개폭(m). GraspCandidate.gripper_width_mm에
+        여유(width_margin_mm)만 더해서 연다 — 전략이 폭을 못 냈으면(0 이하)
+        예전처럼 최대로 열어서 안전한 쪽으로 대체한다."""
+        if gripper_width_mm <= 0.0:
             return self._gripper_open_m
         max_open_mm = self._gripper_open_m * 1000.0
-        target_mm = min(grasp_width_mm + self._gripper_width_margin_mm, max_open_mm)
+        target_mm = min(gripper_width_mm + self._gripper_width_margin_mm, max_open_mm)
         return target_mm / 1000.0
 
     def _pick_real(self, goal_handle, goal) -> float | None:
@@ -263,7 +263,7 @@ class PickServer(Node):
         # 그리퍼를 먼저 연다. 예전엔 여기서 열지 않고 바로 닫기만 했다 — 이전 사이클에서
         # 그리퍼가 닫힌 채 남아 있으면(파지 실패 후, 또는 place_into가 도중에 멈춘 경우)
         # 다음 pick이 이미 닫힌 그리퍼로 "닫기"만 반복해 애초에 아무것도 못 무는 문제가 있었다.
-        open_command = dsr_motion.gripper_width_command(self._open_width_m(goal.grasp_width_mm))
+        open_command = dsr_motion.gripper_width_command(self._open_width_m(goal.gripper_width_mm))
         if not dsr_motion.send_gripper_command(self._gripper_cmd_client, open_command):
             if goal_handle.is_cancel_requested:
                 return None

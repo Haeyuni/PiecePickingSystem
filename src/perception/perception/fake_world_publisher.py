@@ -76,6 +76,7 @@ def to_msg(fixture: dict) -> WorldState:
             candidate = GraspCandidate()
             candidate.pose = _pose(cand["pose"])
             candidate.score = float(cand.get("score", 0.0))
+            candidate.gripper_width_mm = float(cand.get("gripper_width_mm", 0.0))
             candidate.strategy = cand.get("strategy", GraspCandidate.STRATEGY_HEURISTIC_PCA)
             obj.grasp_candidates.append(candidate)
 

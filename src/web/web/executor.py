@@ -25,7 +25,7 @@ class SkillGoal:
     object_id: str
     profile: str
     grasp_pose: dict | None = None   # pick
-    grasp_width_mm: float | None = None  # pick — 골라둔 후보의 width_mm (없으면 기본 개폭)
+    gripper_width_mm: float | None = None  # pick — 골라둔 후보의 GraspCandidate.gripper_width_mm
     bin_id: str | None = None        # place_into
     max_retries: int = 1
 

@@ -57,6 +57,7 @@ from perception_common.paths import find_repo_path
 from perception_common.robot_pose import RobotPoseClient
 
 from . import pointcloud_utils, strategies
+from .config_utils import asset_path
 
 SCHEMA_VERSION = "1.0.0"
 DEPTH_BUFFER_SIZE = 60          # 30fps 기준 2초. 관측 stamp가 조금 뒤처져도 같은 프레임을 찾는다
@@ -119,6 +120,7 @@ class GraspNode(Node):
         with path.open(encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
         self._config = config
+        self._assets = config.get("assets") or {}
         self._strategy_name = (self.get_parameter("strategy").value
                                or (config.get("strategy") or {}).get("name")
                                or "heuristic_pca")
@@ -127,11 +129,15 @@ class GraspNode(Node):
             **(config.get("gripper") or {}),
             **(config.get(self._strategy_name) or {}),
         }
+        checkpoint = asset_path(self._assets, "graspnet_checkpoint_path")
+        if checkpoint is not None:
+            self._strategy_params["checkpoint_path"] = str(checkpoint)
         self._pointcloud_params = config.get("pointcloud") or {}
         self._pose_max_age_s = float(self.get_parameter("pose_max_age_s").value)
         self._max_depth_age_s = float(self.get_parameter("max_depth_age_s").value)
 
-        self._gripper2camera = geometry.load_handeye()
+        calibration = asset_path(self._assets, "calibration_path")
+        self._gripper2camera = geometry.load_handeye(calibration)
         self._intrinsics = None
         self._depth_frames: list[tuple[float, np.ndarray, str]] = []
         self._color_frames: list[tuple[float, np.ndarray, str]] = []
@@ -267,7 +273,7 @@ class GraspNode(Node):
 
         depth, depth_frame_id = self._nearest_depth(stamp_seconds(world.stamp))
         base2gripper = geometry.posx_to_matrix(self._pose_client.posx(self._pose_max_age_s))
-        base2camera = base2gripper @ self._gripper2camera
+        T_base_camera_mm = base2gripper @ self._gripper2camera
         mask_by_id = {object_id: image for object_id, image in zip(masks.object_ids, masks.masks)}
 
         filled = 0
@@ -275,7 +281,7 @@ class GraspNode(Node):
             image = mask_by_id.get(obj.object_id)
             if image is None:
                 continue
-            candidates = self._candidates_for(image, depth, depth_frame_id, base2camera)
+            candidates = self._candidates_for(image, depth, depth_frame_id, T_base_camera_mm)
             obj.grasp_candidates = candidates
             filled += bool(candidates)
 
@@ -298,7 +304,7 @@ class GraspNode(Node):
         return blockers
 
     def _candidates_for(self, mask_image: Image, depth: np.ndarray, depth_frame_id: str,
-                        base2camera: np.ndarray) -> list[GraspCandidate]:
+                        T_base_camera_mm: np.ndarray) -> list[GraspCandidate]:
         mask = image_to_numpy(mask_image) > 0
         if mask.shape != depth.shape:
             self.get_logger().warning(
@@ -319,16 +325,24 @@ class GraspNode(Node):
             points_cam,
             z_percentile=float(self._pointcloud_params.get("z_percentile", 2.0)),
             max_radius_mm=float(self._pointcloud_params.get("max_radius_mm", 250.0)))
-        points_base = pointcloud_utils.transform(points_cam, base2camera)
+        points_base = pointcloud_utils.transform(points_cam, T_base_camera_mm)
 
         min_points = int(self._strategy_params.get("min_points", 0))
         if min_points and len(points_base) < min_points:
             self.get_logger().warning(
-                f"PCA 유효 point 부족: {len(points_base)} < {min_points}",
+                f"{self._strategy_name} 유효 point 부족: {len(points_base)} < {min_points}",
                 throttle_duration_sec=10.0)
             return []
 
-        return [self._to_msg(c) for c in self._plan(points_base, self._strategy_params)]
+        try:
+            candidates = self._plan(
+                points_base, self._strategy_params,
+                context={"points_cam_mm": points_cam, "T_base_camera_mm": T_base_camera_mm})
+        except RuntimeError as exc:
+            self.get_logger().error(f"{self._strategy_name} 추론 불가: {exc}",
+                                    throttle_duration_sec=10.0)
+            return []
+        return [self._to_msg(c) for c in candidates]
 
     # --- 디버그 오버레이 (perception_test_live.py --show와 같은 그림 + 파지 후보) ----------
     def _publish_debug_image(self, world: WorldState, mask_by_id: dict,
@@ -431,7 +445,7 @@ class GraspNode(Node):
         msg.pose = pose
         msg.score = float(candidate["score"])
         msg.strategy = candidate["strategy"]
-        msg.width_mm = float(candidate.get("width_mm") or 0.0)
+        msg.gripper_width_mm = float(candidate.get("width_mm") or 0.0)
         return msg
 
 

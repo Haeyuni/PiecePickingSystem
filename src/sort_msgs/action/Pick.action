@@ -5,7 +5,7 @@ string request_id
 string object_id
 string profile                 # DetectedObject.profile 값을 그대로 전달 (제어 파라미터 결정)
 geometry_msgs/Pose grasp_pose   # planner가 grasp_candidates 중 고른 것
-float32 grasp_width_mm          # 그 후보의 GraspCandidate.width_mm. 0이면 미상 —
+float32 gripper_width_mm        # 그 후보의 GraspCandidate.gripper_width_mm. 0이면 미상 —
                                  # control이 skill_params.yaml의 gripper_open_m으로 대체한다.
 int32 max_retries
 ---
