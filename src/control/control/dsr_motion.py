@@ -106,6 +106,53 @@ def pose_mm_to_posx(pose) -> list[float]:
     return [pose.position.x, pose.position.y, pose.position.z, rx, ry, rz]
 
 
+def _release_remote_goal(remote_handle, finished, logger, reason: str,
+                         timeout_s: float = 1.5) -> None:
+    """원격 액션 goal을 확실히 끝내고 온다(취소를 보내고 종료를 기다린다).
+
+    **결과를 안 기다리기로 했으면 반드시 여기를 지나야 한다.** dsr_controller2의
+    movej_h2r/movel_h2r 액션은 goal 하나마다 detached 스레드를 띄우는데, 그 스레드는
+    *취소되거나 목표에 도달할 때만* 빠져나온다. 우리가 `on_timeout_verify`로 도착을
+    직접 확인하고 취소 없이 그냥 다음 이동으로 넘어가면 그 goal은 둘 중 어느 것도
+    되지 않아 **스레드가 드라이버 프로세스가 죽을 때까지 100Hz로 남는다**(2026-09-06
+    실물 확인: 버려진 movel goal의 스레드가 11분 뒤에도 돌고 있었다).
+
+    남은 스레드 하나는 초당 200번씩 드라이버의 단일 DRFL 뮤텍스를 잡는다 — 그 뮤텍스를
+    100Hz RT 루프(read)와 get_current_posx가 함께 쓰기 때문에, 이동을 한 번 할 때마다
+    부하가 한 겹씩 영구히 쌓인다. 이게 "드라이버 재시작 후 사이클마다 규칙적으로
+    느려짐"(pick 14.9→22.6→31.3초), "get_current_posx 10~20초 무응답", 컨트롤러의
+    "heartbeat packet was not received for 5 seconds" 알람의 공통 원인이었다.
+    더구나 남은 스레드는 자기 **옛** 목표와 현재 위치를 계속 비교하다가, 팔이 나중에
+    그 근처를 지나가면 진행 중인 다른 모션 한가운데서 quick stop을 쏜다 — 단계와
+    무관하게 무작위로 movel이 멈칫하던 현상이 이것이다.
+
+    (드라이버 쪽에도 2026-09-06에 같은 문제를 막는 장치를 넣었다 — 새 H2R goal이
+    들어오면 이전 goal의 스레드를 선점해 정리한다. 여기 취소는 그와 별개로, 다음
+    goal을 보내기 **전에** 이미 정리해 두기 위한 것이다.)
+
+    **여기서 오래 기다리면 안 된다.** 이 함수는 "도착은 확인됐고 다음 이동으로 넘어가는"
+    정상 경로에서 매 이동마다 불린다 — 대기 시간이 그대로 사이클 시간에 더해진다.
+    중요한 것은 취소를 *보내는* 것이지 확인을 *받는* 것이 아니다. 확인이 안 와도
+    드라이버가 다음 goal에서 이전 goal을 선점해 정리하므로(위 참조) 안전하고, 새 모션이
+    이전 스레드가 빠져나간 뒤에야 시작되는 것도 드라이버가 보장한다. 그래서 짧게만
+    기다리고(`timeout_s`) 확인이 없으면 그냥 진행한다 — 실패로 돌리지 않는다.
+    """
+    if remote_handle is None:
+        return
+    try:
+        remote_handle.cancel_goal_async()
+    except Exception as exc:  # 드라이버가 이미 goal을 끝냈으면 여기서 예외가 날 수 있다
+        if logger:
+            logger.debug(f"_release_remote_goal: 취소 요청 실패(무시) — {exc}")
+        return
+    if finished.wait(timeout=timeout_s):
+        return
+    if logger:
+        logger.debug(
+            f"_release_remote_goal: {reason} — 취소 확인이 {timeout_s:.1f}초 안에 오지 "
+            "않았다. 드라이버가 다음 goal에서 정리하므로 그대로 진행한다")
+
+
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,
                          cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0,
                          on_timeout_verify=None, feedback_callback=None,
@@ -185,6 +232,15 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
                 if logger:
                     logger.warning("call_action_blocking: 수락 응답은 유실됐지만 로봇은 목표에 "
                                    "도착했다 — 성공 처리")
+                # 수락 응답이 늦게 도착해 handle이 생겼을 수 있다. 생겼다면 위와 같은
+                # 이유로(_release_remote_goal 참조) 반드시 취소해서 드라이버 쪽 실행
+                # 스레드를 정리하고 나간다.
+                late_handle = state.get("handle")
+                if late_handle is not None:
+                    done = threading.Event()
+                    late_handle.get_result_async().add_done_callback(lambda _f: done.set())
+                    _release_remote_goal(late_handle, done, logger,
+                                         "수락 응답이 늦게 온 goal을 정리한다")
                 return True, None
         if remote_handle is None:
             if logger:
@@ -212,6 +268,13 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
             if on_timeout_verify():
                 if logger:
                     logger.info("call_action_blocking: on_timeout_verify로 도착 확인, 성공 처리")
+                # **여기서 그냥 return하면 안 된다** — 결과를 안 기다리기로 한 것이지
+                # goal을 없앤 게 아니다. 이 경로가 이 시스템에서 거의 모든 이동의
+                # 정상 종료 경로라(결과 통지가 사실상 매번 유실된다) 예전에는 이동
+                # 한 번마다 드라이버에 100Hz 스레드가 하나씩 영구히 쌓였다. 자세한
+                # 배경과 증상은 _release_remote_goal 참조.
+                _release_remote_goal(remote_handle, finished, logger,
+                                     "도착을 직접 확인해 결과를 더 기다리지 않는다")
                 return True, None
             next_verify = now + verify_poll_s
         if now > deadline:
