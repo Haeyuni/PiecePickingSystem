@@ -222,7 +222,28 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
                     f"call_action_blocking: {overall_timeout_s:.0f}초 타임아웃 — 실제 결과를 "
                     "못 받아 강제 취소함 (로봇이 실패라고 응답한 게 아니라 우리가 포기한 것)")
             remote_handle.cancel_goal_async()
-            finished.wait(timeout=cancel_timeout_s)
+            # **취소가 실제로 끝났는지 확인해야 한다.** `finished`는 result_future의 완료
+            # 콜백이라, 이게 set되지 않았다는 건 이전 goal이 드라이버 쪽에서 여전히
+            # 활성 상태(CANCELING이거나 그냥 계속 실행 중)라는 뜻이다. 예전엔 여기서
+            # 5초만 기다리고 확인 없이 그냥 실패를 반환해서, 호출부(pick_server/
+            # place_server)가 "이 movel은 끝났다"고 착각한 채 곧바로 새 movel을 같은
+            # 액션 서버에 보냈다 — 이전 목표가 안 끝난 채 새 목표가 겹치면 액션 서버가
+            # 어떻게 반응할지 우리가 보장 못 하고, 실제로 그 뒤 모든 movel이 "접수는
+            #되는데 진행이 없는" 상태로 줄줄이 이어지는 걸 실물로 확인했다(2026-09-06).
+            # 취소가 진짜로 끝날 때까지 더 오래, 더 여러 번 확인한다 — 여기서 끝내
+            # 확인 안 되면 이 goal이 여전히 살아있을 수 있다는 걸 호출부에 분명히
+            # 알려야 하므로 일반 실패와 다르게 로그를 남긴다.
+            for _ in range(4):
+                if finished.wait(timeout=cancel_timeout_s):
+                    if logger:
+                        logger.warning("call_action_blocking: 취소 확인됨 (이전 목표 종료)")
+                    return False, None
+                remote_handle.cancel_goal_async()
+            if logger:
+                logger.error(
+                    "call_action_blocking: 취소가 끝내 확인되지 않았다 — 이전 목표가 "
+                    "드라이버 쪽에서 여전히 살아있을 수 있다. 이 상태에서 곧바로 새 "
+                    "movel을 보내면 액션 서버가 꼬일 위험이 있다 (수동 확인/재시작 권장)")
             return False, None
 
     result = result_future.result().result

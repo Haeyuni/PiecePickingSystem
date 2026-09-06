@@ -355,6 +355,14 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
                 logger.warning("place_into 재시도 %d/%d (trace=%s, 사유=%s)",
                                retry, MAX_PLACE_RETRIES, trace["trace_id"],
                                result.failure_reason)
+                # 직전 실패가 타임아웃이었다면 place_server가 이전 movel을 취소했지만
+                # 그 취소가 실제로 끝났다는 보장이 없다(dsr_motion.call_action_blocking
+                # 참조 — 취소 확인에 최대 25초까지 걸릴 수 있고, 그마저 실패하면 이전
+                # 목표가 드라이버 쪽에 여전히 살아있을 수 있다). 그 상태로 곧바로 새
+                # movel을 보내면 액션 서버에 두 목표가 겹쳐 그 뒤로 계속 "접수는 되는데
+                # 진행이 없는" 상태가 이어지는 걸 실물로 확인했다(2026-09-06). 재시도
+                # 전에 짧게 쉬어 이전 취소가 정리될 시간을 준다.
+                await asyncio.sleep(3.0)
                 result = await executor.call_place_into(goal, on_feedback)
 
         step["status"] = "success" if result.success else "failure"
