@@ -27,10 +27,25 @@ rz=-91.1`로 도달했다 — 둘 다 유효한 표현이다). 이 상태에서 
 쓰고, 그다음 이동들(하강·들어올리기/삽입·물러나기)은 `get_current_posx`로 방금
 도달한 회전을 읽어 그대로 유지한 채 위치만 바꾼다.
 """
+import math
 import threading
 import time
 
-from perception_common.geometry import matrix_to_zyz_deg, quaternion_to_matrix
+from perception_common.geometry import matrix_to_zyz_deg, posx_to_matrix, quaternion_to_matrix
+
+
+def _rotation_angle_diff_deg(a_zyz: list[float], b_zyz: list[float]) -> float:
+    """ZYZ 오일러각(도) 두 세트가 물리적으로 실제 몇 도 떨어져 있는지.
+
+    ry가 180도 근처면 서로 다른 (rx,rz) 조합이 같은 방향을 나타낼 수 있다(모듈 docstring
+    참조) — 그래서 성분별로 `abs(rx_a-rx_b)`를 더하는 식으로는 비교할 수 없다(같은 방향인데
+    rx만 180도 넘게 차이 나는 걸 "회전 많이 남음"으로 오판한다). 회전행렬로 바꿔 실제
+    각도차(내적 기반)를 잰다 — `posx_to_matrix`가 이미 이 ZYZ 관례로 행렬을 만든다."""
+    ra = posx_to_matrix([0.0, 0.0, 0.0, *a_zyz])[:3, :3]
+    rb = posx_to_matrix([0.0, 0.0, 0.0, *b_zyz])[:3, :3]
+    trace = float((ra.T @ rb).trace())
+    cos_angle = max(-1.0, min(1.0, (trace - 1.0) / 2.0))
+    return math.degrees(math.acos(cos_angle))
 
 MOVEJ_ACTION = "/dsr01/motion/movej_h2r"
 MOVEL_ACTION = "/dsr01/motion/movel_h2r"
@@ -94,7 +109,7 @@ def pose_mm_to_posx(pose) -> list[float]:
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,
                          cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0,
                          on_timeout_verify=None, feedback_callback=None,
-                         verify_poll_s: float = 5.0):
+                         verify_poll_s: float = 1.0, logger=None):
     """액션을 보내고 결과를 기다린다(현재 스레드를 막는다). goal_handle이 취소 요청을
     받으면(웹의 정지 버튼) 원격 목표도 함께 취소한다 — 안 그러면 화면엔 "취소됨"으로
     보이는데 로봇은 계속 움직이는 상태가 된다.
@@ -116,9 +131,24 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     결과 콜백이 오면 그쪽을 우선한다(추측이 아니라 실제 결과가 항상 더 정확하다).
     `move_linear`가 이 자리에 실제 도달 여부 확인을 넣는다.
 
+    `verify_poll_s`는 이 환경에서 **거의 모든 이동의 실제 소요시간을 결정한다**. 결과
+    통지가 사실상 매번 유실돼(로그상 성공은 전부 on_timeout_verify 경로로 났다) 이 주기가
+    곧 "도착했는데도 더 기다리는 시간"이기 때문이다. 5초로 뒀을 때 이동 8~10번짜리
+    pick+place 한 사이클에서만 40초 안팎이 순수 대기로 날아갔다(2026-09-06 실물 로그).
+    get_current_posx는 한가할 때 10ms 안에 답하므로 1초 주기로 확인해도 서비스에 부담이 없다.
+
     반환: (성공 여부, 원격 액션의 result 객체 또는 None).
     """
+    # 이 함수는 pick_server.py/place_server.py의 매 move() 호출마다 도니, 여기가
+    # "새 모션을 실제로 로봇에 보내기 직전" 지점이다. 예전엔 여기서 확인 없이 바로
+    # send_goal_async를 불러서, Stop을 이미 눌렀는데도(이전 스텝 실패 직후처럼 활성
+    # goal이 없던 순간에) 다음 이동이 그대로 나가는 경우가 있었다(2026-09-05, Stop 이후
+    # 재실행 사고 조사에서 확인). 새 goal을 보내기 전에 취소 여부부터 본다.
+    if goal_handle.is_cancel_requested:
+        return False, None
     if not client.wait_for_server(timeout_sec=5.0):
+        if logger:
+            logger.error("call_action_blocking: 액션 서버 응답 없음 (wait_for_server 타임아웃)")
         return False, None
 
     sent = threading.Event()
@@ -132,14 +162,45 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
         goal, feedback_callback=feedback_callback).add_done_callback(on_send_done)
     sent.wait(timeout=send_timeout_s)
     remote_handle = state.get("handle")
-    if remote_handle is None or not remote_handle.accepted:
+    deadline = time.monotonic() + overall_timeout_s
+
+    if remote_handle is None:
+        # goal 수락 응답이 안 왔다. **거부가 아니라 응답 유실일 수 있다** — 실물로 확인:
+        # 여기서 곧바로 실패 처리했는데 로봇은 그 목표까지 실제로 이동을 끝냈다
+        # (2026-09-06, 카메라 스트림이 loopback DDS를 포화시켜 액션 응답이 유실된 구간.
+        # 실패 직후 get_current_posx로 읽은 위치가 목표와 소수점까지 일치했다).
+        # 결과 통지 유실을 도착 확인으로 구제하는 것(on_timeout_verify)과 같은 논리로,
+        # 수락 응답 유실도 실제 도착 여부로 판정한다 — 응답이 늦게라도 오면 정상 경로로 돌아간다.
+        if logger:
+            logger.warning(
+                f"call_action_blocking: goal 수락 응답이 {send_timeout_s:.0f}초 안에 오지 않았다 "
+                "— 응답 유실일 수 있어 실제 도착 여부를 확인하며 기다린다")
+        while time.monotonic() < deadline:
+            if goal_handle.is_cancel_requested:
+                return False, None
+            if sent.wait(timeout=0.1):
+                remote_handle = state.get("handle")
+                break
+            if on_timeout_verify is not None and on_timeout_verify():
+                if logger:
+                    logger.warning("call_action_blocking: 수락 응답은 유실됐지만 로봇은 목표에 "
+                                   "도착했다 — 성공 처리")
+                return True, None
+        if remote_handle is None:
+            if logger:
+                logger.error("call_action_blocking: 수락 응답도 없고 도착도 확인되지 않았다 "
+                             "— 목표가 실제로 거부됐거나 드라이버가 응답하지 않는다")
+            return False, None
+
+    if not remote_handle.accepted:
+        if logger:
+            logger.error("call_action_blocking: 드라이버가 목표를 거부했다 (accepted=False)")
         return False, None
 
     finished = threading.Event()
     result_future = remote_handle.get_result_async()
     result_future.add_done_callback(lambda _f: finished.set())
 
-    deadline = time.monotonic() + overall_timeout_s
     next_verify = time.monotonic() + verify_poll_s if on_timeout_verify is not None else None
     while not finished.wait(timeout=0.1):
         if goal_handle.is_cancel_requested:
@@ -149,27 +210,54 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
         now = time.monotonic()
         if next_verify is not None and now >= next_verify:
             if on_timeout_verify():
+                if logger:
+                    logger.info("call_action_blocking: on_timeout_verify로 도착 확인, 성공 처리")
                 return True, None
             next_verify = now + verify_poll_s
         if now > deadline:
+            # 실제 액션 결과는 끝내 안 왔다 — 우리가 먼저 포기하고 취소한 것이다.
+            # 즉 "로봇/컨트롤러가 실패라고 답했다"가 아니라 "우리가 응답을 못 받아 시간초과시켰다".
+            if logger:
+                logger.error(
+                    f"call_action_blocking: {overall_timeout_s:.0f}초 타임아웃 — 실제 결과를 "
+                    "못 받아 강제 취소함 (로봇이 실패라고 응답한 게 아니라 우리가 포기한 것)")
             remote_handle.cancel_goal_async()
             finished.wait(timeout=cancel_timeout_s)
             return False, None
 
     result = result_future.result().result
-    return bool(getattr(result, "success", False)), result
+    success = bool(getattr(result, "success", False))
+    if logger and not success:
+        # deadline을 넘기지 않고 실제 result 콜백이 왔는데도 실패다 — 이번엔 우리 쪽
+        # 타임아웃이 아니라 컨트롤러/드라이버 자신이 "실패"라고 응답한 것이다. 원인이
+        # 다르므로(클라이언트 타임아웃 vs 컨트롤러 자체 실패) 반드시 구분해서 남긴다.
+        logger.error("call_action_blocking: 액션 결과가 실제로 도착했고 success=False "
+                    "(우리 타임아웃이 아니라 컨트롤러/드라이버 자체가 실패로 응답함)")
+    return success, result
 
 
 def move_linear(client, target_pos: list[float], goal_handle,
                 vel_mm_s: float, acc_mm_s2: float,
                 vel_deg_s: float, acc_deg_s2: float,
                 posx_client=None,
-                position_tolerance_mm: float = 3.0) -> tuple[bool, list[float] | None]:
+                position_tolerance_mm: float = 3.0, rotation_tolerance_deg: float = 3.0,
+                logger=None) -> tuple[bool, list[float] | None]:
     """MovelH2r 하나를 블로킹으로 실행. `target_pos`는 [x,y,z,rx,ry,rz](mm, deg).
 
     `posx_client`를 넘기면 타임아웃 시 get_current_posx로 실제 위치를 한 번 더
-    확인해서, `position_tolerance_mm` 안에 들어와 있으면 성공으로 처리한다 —
-    call_action_blocking의 on_timeout_verify 참조(결과 통지 유실 대응).
+    확인해서, `position_tolerance_mm`/`rotation_tolerance_deg` 안에 들어와 있으면
+    성공으로 처리한다 — call_action_blocking의 on_timeout_verify 참조(결과 통지 유실 대응).
+
+    **위치만이 아니라 회전도 확인해야 한다.** 제자리 회전(위치는 그대로, 회전만 바뀌는
+    이동 — place_server의 "바구니 배치 자세로 회전" 등)에서 위치만 보면, 회전이 아직
+    끝나지 않았어도 위치는 시작부터 이미 허용오차 안이라 **즉시 "도착"으로 오판**한다.
+    그러면 호출부가 회전이 실제로 끝나기 전에 다음 이동(수평 이동)을 계산·전송하게
+    되고, 그 다음 이동이 (완료 안 된) 회전 중간값 + 큰 위치 변화를 동시에 요구하는
+    처지가 되어 로봇이 아예 안 움직이는 걸 실물로 확인했다(2026-09-06 — 회전행렬로
+    비교해보니 그때 보낸 회전 목표가 직전 회전의 시작·끝 어느 쪽과도 42도 떨어진,
+    회전 도중의 값이었다). ZYZ는 ry가 180도 근처면 다른 (rx,rz) 조합이 같은 방향을
+    나타낼 수 있어(모듈 docstring) 성분별 차이가 아니라 회전행렬 각도차로 비교한다
+    (`_rotation_angle_diff_deg`).
 
     반환: (성공 여부, 도착 시점의 실제 pose 또는 None). 이 pose는 액션 feedback
     (`MovelH2r.Feedback.pos`, 드라이버가 100Hz로 채워 보낸다)에서 그대로 가져온
@@ -194,33 +282,83 @@ def move_linear(client, target_pos: list[float], goal_handle,
         last_pose = list(feedback_msg.feedback.pos)
 
     def verify_arrived():
+        # 먼저 액션 feedback(`last_pose`, 드라이버가 100Hz로 직접 채워 보낸다)을 본다 —
+        # get_current_posx(aux_control 서비스)를 안 거치므로 perception/grasp의 posx
+        # 폴링(robot_pose.py, 2Hz)과 자원을 다투지 않는다. 실물로 확인한 사고: pick의
+        # 들어올리기 이동이 실제로는 몇 초 만에 끝났는데(사람 눈으로 확인), 이동 직후
+        # aux_control이 계속 응답이 없어(문서 상단 참조) get_current_posx만 썼던 예전
+        # 코드는 verify_arrived가 60초 내내 실패해 결국 "들어올리기 실패"로 오판했다
+        # (2026-09-05, control_watch5.log — width=64.5mm으로 이미 뭔가를 문 채 88초
+        # 만에 실패 처리됨). feedback이 허용오차 안이면 그것만으로 충분한 근거로 본다 —
+        # 액션 자체가 이 target_pos로 보낸 이동이므로, feedback이 그 근처에 와 있다는
+        # 것 자체가 "그 이동이 물리적으로 끝났다"는 직접 증거다.
+        def matches(pose6) -> bool:
+            pos_ok = all(abs(a - b) <= position_tolerance_mm
+                        for a, b in zip(pose6[:3], target_pos[:3]))
+            rot_diff = _rotation_angle_diff_deg(pose6[3:6], target_pos[3:6])
+            return pos_ok and rot_diff <= rotation_tolerance_deg
+
+        if last_pose is not None:
+            if matches(last_pose):
+                return True
+            if logger:
+                # feedback은 받고 있지만 아직 허용오차 밖 — 진짜로 아직 이동 중일 수도,
+                # 도착은 했는데 feedback이 마지막 값을 못 갱신했을 수도 있다. 둘을
+                # 구분하려고 오차값 자체를 남긴다.
+                pos_deltas = [round(abs(a - b), 1) for a, b in zip(last_pose[:3], target_pos[:3])]
+                rot_diff = round(_rotation_angle_diff_deg(last_pose[3:6], target_pos[3:6]), 1)
+                logger.info(
+                    f"verify_arrived: feedback 있음, 허용오차 밖 (위치오차={pos_deltas}mm, "
+                    f"회전오차={rot_diff}deg, 허용={position_tolerance_mm}mm/"
+                    f"{rotation_tolerance_deg}deg)", throttle_duration_sec=5.0)
+        elif logger:
+            # aux_control 무응답 구간과 겹치는 게 보통이라(모듈 docstring 참조), 이 경로로
+            # 자주 빠지는 것 자체는 정상이다 — 문제는 posx_client 폴백까지 실패하는 경우다.
+            logger.info("verify_arrived: 아직 feedback을 못 받음(last_pose=None)",
+                        throttle_duration_sec=5.0)
         if posx_client is None:
             return False
-        # retries=1(재시도 없음)이던 시절엔 perception/grasp의 get_current_posx 트래픽에
-        # 한 번 밀리면 그 5초 폴링 주기를 그냥 날렸다(2026-09-05 실물로 확인 — 로봇은
-        # 3.6초 만에 도착했는데 이 확인이 60초 내내 실패해 타임아웃으로 처리됨). 짧게
-        # 두 번 더 시도해서 한 번의 경합으로 폴링 주기 전체를 잃지 않게 한다.
-        current = get_current_posx(posx_client, goal_handle, timeout_s=1.5, retries=3,
-                                   retry_delay_s=0.5)
+        # 이 호출이 블로킹이라 그대로 verify 주기를 늘린다 — 1초 주기로 자주 부르는 만큼
+        # 한 번에 오래 붙잡지 않게 짧게 끊는다(한가하면 10ms, 밀리면 다음 주기에 다시 본다).
+        current = get_current_posx(posx_client, goal_handle, timeout_s=1.0, retries=1)
         if current is None:
+            if logger:
+                logger.info("verify_arrived: get_current_posx 폴백도 무응답",
+                            throttle_duration_sec=5.0)
             return False
-        return all(abs(a - b) <= position_tolerance_mm for a, b in zip(current[:3], target_pos[:3]))
+        ok = matches(current)
+        if logger:
+            logger.info(f"verify_arrived: get_current_posx 폴백으로 확인 → "
+                        f"{'도착' if ok else '미도착'} (실제={[round(v, 1) for v in current[:3]]}, "
+                        f"목표={[round(v, 1) for v in target_pos[:3]]}, "
+                        f"회전오차={round(_rotation_angle_diff_deg(current[3:6], target_pos[3:6]), 1)}deg)",
+                        throttle_duration_sec=5.0)
+        return ok
 
     success, _ = call_action_blocking(client, goal, goal_handle, on_timeout_verify=verify_arrived,
-                                      feedback_callback=on_feedback)
+                                      feedback_callback=on_feedback, logger=logger)
+    if logger and not success:
+        logger.error(
+            f"move_linear 실패: feedback 마지막값={last_pose}, 목표={list(target_pos)} "
+            f"(둘 다 있는데 실패면 허용오차 초과, feedback이 None이면 콜백이 아예 안 옴)")
     return success, (last_pose if success else None)
 
 
 def move_joint(client, target_deg: list[float], goal_handle,
-              vel_deg_s: float, acc_deg_s2: float) -> bool:
-    """MovejH2r 하나를 블로킹으로 실행. `target_deg`는 j1~j6(도)."""
+              vel_deg_s: float, acc_deg_s2: float, logger=None) -> bool:
+    """MovejH2r 하나를 블로킹으로 실행. `target_deg`는 j1~j6(도).
+
+    movel과 달리 도착 확인(on_timeout_verify)을 못 넘긴다 — 목표가 관절각이라
+    get_current_posx(TCP 좌표)로는 도달 여부를 판정할 수 없기 때문이다. 그래서 이쪽은
+    결과 통지가 유실되면 그대로 타임아웃 실패다. logger만이라도 넘겨 실패 원인
+    (수락 응답 유실 / 컨트롤러 실패 응답 / 우리 타임아웃)을 구분할 수 있게 한다."""
     from dsr_msgs2.action import MovejH2r
 
     goal = MovejH2r.Goal()
     goal.target_pos = [float(v) for v in target_deg]
     goal.target_vel = [float(vel_deg_s)] * 6
     goal.target_acc = [float(acc_deg_s2)] * 6
-    success, _ = call_action_blocking(client, goal, goal_handle)
+    success, _ = call_action_blocking(client, goal, goal_handle, logger=logger)
     return success
 
 
@@ -253,16 +391,21 @@ def gripper_width_command(width_m: float) -> str:
     return str(int(round(width_m * 10000)))
 
 
-def gripper_width_mm(pose_client, joint_angle: float, timeout_s: float = 1.5) -> float:
+def gripper_width_mm(pose_client, joint_angle: float, timeout_s: float = 1.5) -> float | None:
     """관절각(rad) → 개폭(mm). `/onrobot/pose`(GripperPose)에 `known.theta`로 물어보면
     서버가 자기 그리퍼 타입(RG2/RG6)에 맞는 기하 상수로 변환해 준다 — 그 상수를 여기서
     하드코딩하면 그리퍼 모델을 잘못 가정할 위험이 있다(RG6로 착각했던 사고를 이미 겪었다).
-    실패하면 0.0(정보성 값이라 실패해도 pick/place 자체를 막지 않는다).
+
+    측정 실패(서비스 미기동·타임아웃)하면 **None**을 돌려준다 — 예전엔 0.0으로
+    대체했는데, 호출부(pick_server._pick_real)가 "빈 채로 닫힘" 판정에 이 값을 그대로
+    쓰는 바람에 이 서비스가 일시적으로 응답이 없었을 뿐인데도 "확실히 안 물었다"로
+    오판할 수 있었다(2026-09-05, 들어올리기 오판 조사 중 함께 확인). 실제로 0.0mm으로
+    측정된 것과 "몰라서" 0.0을 내려준 것은 호출부가 반드시 구분해야 한다.
     """
     from onrobot_rg_msgs.srv import GripperPose
 
     if not pose_client.wait_for_service(timeout_sec=1.0):
-        return 0.0
+        return None
     request = GripperPose.Request()
     request.known.theta = float(joint_angle)
 
@@ -271,7 +414,7 @@ def gripper_width_mm(pose_client, joint_angle: float, timeout_s: float = 1.5) ->
     future.add_done_callback(lambda _f: done.set())
     done.wait(timeout=timeout_s)
     result = future.result()
-    return float(result.pose.x) * 1000.0 if result is not None else 0.0
+    return float(result.pose.x) * 1000.0 if result is not None else None
 
 
 def wait_gripper_settled(get_joint_angle, goal_handle, timeout_s: float = 8.0,

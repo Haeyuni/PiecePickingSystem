@@ -17,6 +17,7 @@ from typing import Awaitable, Callable
 import cv2
 import numpy as np
 import rclpy
+from action_msgs.msg import GoalStatus
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -148,8 +149,16 @@ class _BridgeNode(Node):
         self.latest_world_state: dict | None = None
         self.latest_robot_state: dict = {"schema_version": SCHEMA_VERSION, "mode": "idle",
                                          "current_skill": "none", "gripper_width_mm": 0.0}
-        self.latest_color_jpeg: bytes | None = None
-        self.latest_depth_jpeg: bytes | None = None
+        # 들어온 원본 메시지만 들고 있다가 **요청이 올 때 JPEG로 만든다**. 예전엔 구독
+        # 콜백에서 곧바로 컬러맵 변환 + JPEG 인코딩까지 했는데, 뎁스가 30Hz라 아무도
+        # 화면을 안 보고 있어도 초당 30번을 인코딩했다 — 실측으로 web 프로세스가 CPU
+        # 73%를 계속 쓰고 있었고(2026-09-06), 그 부하가 같은 호스트의 로봇 드라이버·
+        # DDS와 자원을 다퉜다. 스트림 라우터는 10FPS로만 당겨가고(routers/camera.py),
+        # 아무도 안 볼 땐 아예 안 당겨간다 — 그만큼만 일하면 된다.
+        self._latest_color_msg: Image | None = None
+        self._latest_depth_msg: Image | None = None
+        self._color_jpeg_cache: tuple[Image, bytes | None] | None = None
+        self._depth_jpeg_cache: tuple[Image, bytes | None] | None = None
         self.on_event: Callable[[dict], None] | None = None
 
         self.create_subscription(WorldState, "/world_state", self._on_world_state, 10)
@@ -211,14 +220,35 @@ class _BridgeNode(Node):
             self.get_logger().warning(f"카메라 뷰: 지원하지 않는 인코딩 {msg.encoding}",
                                       throttle_duration_sec=10.0)
             return
-        self.latest_color_jpeg = _encode_jpeg(_color_to_bgr(msg))
+        self._latest_color_msg = msg
 
     def _on_depth_image(self, msg: Image) -> None:
         if msg.encoding not in ("16UC1", "mono16"):
             self.get_logger().warning(f"뎁스 뷰: 지원하지 않는 인코딩 {msg.encoding}",
                                       throttle_duration_sec=10.0)
             return
-        self.latest_depth_jpeg = _encode_jpeg(_depth_to_colormap(msg))
+        self._latest_depth_msg = msg
+
+    @staticmethod
+    def _jpeg_of(msg, cache, to_bgr):
+        """`msg`의 JPEG. 같은 메시지를 다시 물으면 캐시를 준다 (여러 클라이언트가 같은
+        프레임을 가져가도 인코딩은 한 번). 반환: (jpeg, 새 캐시)."""
+        if msg is None:
+            return None, cache
+        if cache is not None and cache[0] is msg:
+            return cache[1], cache
+        jpeg = _encode_jpeg(to_bgr(msg))
+        return jpeg, (msg, jpeg)
+
+    def color_jpeg(self) -> bytes | None:
+        jpeg, self._color_jpeg_cache = self._jpeg_of(
+            self._latest_color_msg, self._color_jpeg_cache, _color_to_bgr)
+        return jpeg
+
+    def depth_jpeg(self) -> bytes | None:
+        jpeg, self._depth_jpeg_cache = self._jpeg_of(
+            self._latest_depth_msg, self._depth_jpeg_cache, _depth_to_colormap)
+        return jpeg
 
     def _on_safety_event(self, msg: SafetyEvent) -> None:
         # 안전 이벤트는 지연 없이 즉시 올린다(4절)
@@ -264,10 +294,10 @@ class RosExecutor:
         return self._node.latest_robot_state if self._node else {"mode": "error"}
 
     def latest_color_jpeg(self) -> bytes | None:
-        return self._node.latest_color_jpeg if self._node else None
+        return self._node.color_jpeg() if self._node else None
 
     def latest_depth_jpeg(self) -> bytes | None:
-        return self._node.latest_depth_jpeg if self._node else None
+        return self._node.depth_jpeg() if self._node else None
 
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
         loop = self._loop
@@ -302,10 +332,16 @@ class RosExecutor:
         self._active_goal_handle = goal_handle
         self._active_request_id = request_id
         try:
-            result = (await _await_ros_future(goal_handle.get_result_async())).result
+            response = await _await_ros_future(goal_handle.get_result_async())
         finally:
             self._active_goal_handle = None
             self._active_request_id = None
+        result = response.result
+
+        # goal.status(GoalStatus)를 봐야 "정말 취소됐는지"를 안다 — result.success만 보면
+        # 취소도 일반 실패(success=False)와 구분이 안 돼서, orchestrator가 Stop 이후에도
+        # 같은 물체를 다시 계획해 재시도하는 사고가 있었다(2026-09-05 실물 확인).
+        cancelled = response.status == GoalStatus.STATUS_CANCELED
 
         # 액션마다 Result 필드가 다르다 (Home에는 재시도·토크 개념이 없다).
         # 공통 필드만 직접 읽고 나머지는 getattr로 낮춘다.
@@ -316,6 +352,7 @@ class RosExecutor:
             cycle_time_ms=result.cycle_time_ms or (time.monotonic() - started) * 1000,
             visual_verification_passed=getattr(result, "visual_verification_passed", None),
             torque_trace=list(getattr(result, "torque_trace_summary", []) or []),
+            cancelled=cancelled,
         )
 
     async def call_pick(self, goal: SkillGoal, on_feedback) -> SkillResult:

@@ -20,6 +20,13 @@ motion:
   linear_acc_mm_s2: 30.0
   rot_vel_deg_s: 20.0
   rot_acc_deg_s2: 20.0
+  # place_into만 위 공용값의 2배로 움직인다(2026-09-06 요청) — place_server.py가 이
+  # place_* 키를 먼저 보고, 없으면 위 공용값으로 떨어진다. pick은 이 키를 보지 않으므로
+  # 그대로 30/30/20/20을 쓴다.
+  place_linear_vel_mm_s: 60.0
+  place_linear_acc_mm_s2: 60.0
+  place_rot_vel_deg_s: 40.0
+  place_rot_acc_deg_s2: 40.0
   # RG2 최대 개폭. grasp/config/grasp_params.yaml의 gripper.max_opening_mm(110.0)과 같은 값 —
   # 그쪽은 파지 후보 계산용(mm), 여기는 GripperCommand 액션 호출용(m)이라 단위만 다르다.
   gripper_open_m: 0.110
@@ -30,6 +37,21 @@ motion:
   # TODO: 값 확정 — 30mm는 안전 쪽으로 보수적으로 잡은 시작값이다. 실물로 다시 확인해
   # 목적지 안에서 확실히 놓이는지(너무 높으면 떨어뜨리는 모양이 된다) 튜닝이 필요하다.
   release_clearance_mm: 30.0
+  # place_into 접근 이동을 "현재 위치 → 안전고도 → 바구니 상공 → 하강" 3단계로 할 때,
+  # 안전고도 = max(현재 z, 바구니 접근 z) + 이 값. 픽 직후 위치와 바구니 접근 높이
+  # 둘 중 더 높은 곳보다도 이만큼 더 올라가야 그 사이(작업대·다른 물체·바구니 테두리)를
+  # 확실히 넘어간다는 뜻이다 — 둘 중 큰 값 자체를 그대로 쓰면(2026-09-05 이전 코드)
+  # 안전 여유가 전혀 없었다. place_server가 이 높이에서 ikin으로 실제 도달 가능한지
+  # 확인해 안 되면 단계적으로 낮추므로, 여기 값은 "이상적으로 원하는" 여유이지
+  # 그대로 강행하는 값이 아니다.
+  # TODO: 값 확정 — 100mm는 지금까지 확인된 물체 높이(장난감·화장품 등, 대략 수 cm~15cm)와
+  # 바구니 테두리를 함께 넘길 정도로 잡은 시작값이다. 실물로 재확인 필요.
+  place_safe_clearance_mm: 100.0
+  # place_into 완료 뒤 orchestrator가 곧바로 home(관절이동)을 부른다(web/orchestrator.py
+  # _execute_steps). place_server가 물러나는 높이(bin 접근 높이)에서 바로 관절이동을
+  # 시작하면 바구니 테두리 바로 위라 여유가 적어, place_into 마지막에 이만큼 더
+  # 올라간 뒤 결과를 반환한다.
+  home_rise_mm: 200.0
   # pick이 grasp_pose.z까지만 내려가면 실물에서 접근이 부족해(파지 실패 진단 참조,
   # 2026-09-04) 그리퍼가 물체 위 허공에서 닫히는 경우가 있었다. 하강 목표 z를 이만큼
   # 더 낮춰서 여유를 둔다 — approach_posx는 이 낮아진 목표 기준으로 계산되므로

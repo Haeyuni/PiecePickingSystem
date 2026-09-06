@@ -96,7 +96,8 @@ class MockExecutor:
                 if goal.request_id in self._cancelled:
                     self._cancelled.discard(goal.request_id)
                     return SkillResult(success=False, failure_reason="no_contact",
-                                       cycle_time_ms=(time.monotonic() - started) * 1000)
+                                       cycle_time_ms=(time.monotonic() - started) * 1000,
+                                       cancelled=True)
                 await on_feedback(goal.request_id, phase)
                 await asyncio.sleep(PHASE_DELAY_S)
 

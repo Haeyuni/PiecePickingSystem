@@ -121,7 +121,8 @@ class HomeServer(Node):
     def _move_home_real(self, goal_handle) -> bool:
         """MovejH2r로 실제 관절 이동 (블로킹 대기·취소 전파는 dsr_motion.move_joint 참조)."""
         return dsr_motion.move_joint(self._movej_client, self._joint_deg, goal_handle,
-                                     self._vel_deg_s, self._acc_deg_s2)
+                                     self._vel_deg_s, self._acc_deg_s2,
+                                     logger=self.get_logger())
 
     def _result(self, success, reason, started):
         result = Home.Result()

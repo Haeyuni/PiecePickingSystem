@@ -10,7 +10,7 @@ import logging
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from .. import store
+from .. import orchestrator, store
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -23,13 +23,27 @@ async def stop(request: Request):
     2.1절의 차단 규칙이 적용되지 않는 유일한 엔드포인트다.
     """
     executor = request.app.state.executor
+    # orchestrator.cancel_running()은 asyncio Task.cancel()을 부를 뿐이고, 실제
+    # CancelledError는 이 함수가 다음으로 이벤트 루프에 제어를 넘길 때(바로 다음 줄
+    # `await executor.stop()` 내부에서 rclpy Future를 기다리며 처음 suspend할 때)
+    # 전달된다 — 그 전까지는 지금 활성 goal 정보(`_active_goal_handle`)가 그대로
+    # 남아 있으므로, 아래 executor.stop()이 먼저 읽어 실제 로봇에 취소를 보낼 수 있다.
+    # 이 순서를 지켜야 두 메커니즘이 서로를 방해하지 않는다: 활성 ROS goal이 있으면
+    # executor.stop()이 로봇에 취소를 보내고, goal이 없는 대기 구간(재계획 sleep,
+    # planner HTTP 호출 등)이면 cancel_running()의 Task.cancel()이 그 지점에서 태스크를
+    # 끊는다. 순서를 바꿔 태스크를 먼저 실행 재개시키면 `_active_goal_handle`이 이미
+    # None으로 정리된 뒤 executor.stop()이 실행돼, 활성 goal이 있었는데도 취소 명령이
+    # 로봇에 전달되지 않을 수 있다(2026-09-05, Stop 안전성 점검에서 확인).
+    cancelled_traces = orchestrator.cancel_running()
     cancelled = await executor.stop()
-    logger.warning("정지 요청 (취소된 request_id=%s)", cancelled)
+    logger.warning("정지 요청 (취소된 request_id=%s, 취소된 trace=%s)",
+                    cancelled, cancelled_traces)
 
     store.insert_execution_log(
         skill_name="stop", result="success", request_id=cancelled,
     )
-    return {"schema_version": "1.0.0", "stopped": True, "cancelled_request_id": cancelled}
+    return {"schema_version": "1.0.0", "stopped": True, "cancelled_request_id": cancelled,
+            "cancelled_trace_ids": cancelled_traces}
 
 
 async def _run_home(executor) -> None:

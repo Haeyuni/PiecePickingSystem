@@ -38,6 +38,11 @@ class SkillResult:
     cycle_time_ms: float = 0.0
     visual_verification_passed: bool | None = None
     torque_trace: list = field(default_factory=list)
+    # 사용자가 Stop을 눌러 취소된 결과인지 — orchestrator가 이걸로 "재계획할 실패"와
+    # "그만둬야 할 취소"를 구분한다. success=False만 보고는 구분이 안 된다(2026-09-05,
+    # Stop 이후 재실행 사고 조사에서 확인 — 취소도 실패와 같은 failure_reason으로
+    # 나가서 재계획 로직이 취소를 그냥 실패로 오인해 다시 시도했다).
+    cancelled: bool = False
 
 
 class Executor(Protocol):

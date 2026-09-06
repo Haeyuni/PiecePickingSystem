@@ -63,7 +63,12 @@ from .strategies.exceptions import InferenceBusy
 SCHEMA_VERSION = "1.0.0"
 DEPTH_BUFFER_SIZE = 60          # 30fps 기준 2초. 관측 stamp가 조금 뒤처져도 같은 프레임을 찾는다
 DEPTH_ENCODINGS = ("16UC1", "mono16")
-COLOR_BUFFER_SIZE = 60          # 디버그 오버레이용. depth 버퍼와 같은 크기로 맞춘다
+# 디버그 오버레이용. heuristic_pca는 거의 즉시 처리해 depth와 같은 2초 버퍼로 충분했지만,
+# graspnet_baseline은 컨테이너 콜드 스타트 포함 관측당 5~8초가 걸린다(2026-09-05 실물 확인) —
+# 그만큼 오래된 컬러 프레임도 버퍼에 남아 있어야 디버그 이미지를 낼 수 있다. 30fps 기준
+# 15초치. 프레임당 컬러 이미지 하나를 통째로 들고 있어 depth 버퍼보다 메모리를 더 쓰지만,
+# 디버그 뷰 용도라 감수한다.
+COLOR_BUFFER_SIZE = 450
 COLOR_ENCODINGS = ("bgr8", "rgb8")
 
 # perception_test_live.py --show / ultralytics res.plot()과 눈에 익도록 비슷한 팔레트를 쓴다.
@@ -116,6 +121,10 @@ class GraspNode(Node):
         # 관측 stamp와 depth 프레임 stamp가 이보다 벌어지면 그 관측은 버린다.
         # 다른 순간의 depth로 만든 포인트클라우드는 물체가 그때 있던 자리를 가리킨다.
         self.declare_parameter("max_depth_age_s", 0.5)
+        # 디버그 이미지용 컬러 프레임 허용 오차. depth와 달리 3D 재구성 정확도와 무관한
+        # 시각화 용도라 훨씬 느슨하다 — graspnet_baseline의 관측당 수 초짜리 지연을
+        # 감안한 값이다(COLOR_BUFFER_SIZE 주석 참조).
+        self.declare_parameter("debug_color_max_age_s", 15.0)
 
         path = pathlib.Path(self.get_parameter("config_path").value or config_path())
         with path.open(encoding="utf-8") as f:
@@ -136,6 +145,7 @@ class GraspNode(Node):
         self._pointcloud_params = config.get("pointcloud") or {}
         self._pose_max_age_s = float(self.get_parameter("pose_max_age_s").value)
         self._max_depth_age_s = float(self.get_parameter("max_depth_age_s").value)
+        self._debug_color_max_age_s = float(self.get_parameter("debug_color_max_age_s").value)
 
         calibration = asset_path(self._assets, "calibration_path")
         self._gripper2camera = geometry.load_handeye(calibration)
@@ -203,8 +213,9 @@ class GraspNode(Node):
             self._color_frames.pop(0)
 
     def _nearest_color(self, when: float) -> tuple[np.ndarray, str] | None:
-        """`when`에 가장 가까운 컬러 프레임. `_nearest_depth`와 같은 탐색이다 — 디버그
-        오버레이용이라 별도 파라미터를 늘리지 않고 depth와 같은 허용 오차를 공유한다."""
+        """`when`에 가장 가까운 컬러 프레임. `_nearest_depth`와 같은 탐색 방식이지만
+        허용 오차는 별도다 — 디버그 이미지는 3D 재구성이 아니라 시각화라 depth만큼
+        엄격할 필요가 없다(debug_color_max_age_s 선언부 참조)."""
         if not self._color_frames:
             return None
         times = [item[0] for item in self._color_frames]
@@ -215,7 +226,7 @@ class GraspNode(Node):
                 gap = abs(times[candidate] - when)
                 if gap < best_gap:
                     best, best_gap = candidate, gap
-        if best is None or best_gap > self._max_depth_age_s:
+        if best is None or best_gap > self._debug_color_max_age_s:
             return None
         _, frame, frame_id = self._color_frames[best]
         return frame, frame_id
@@ -347,6 +358,10 @@ class GraspNode(Node):
             candidates = self._plan(
                 points_base, self._strategy_params,
                 context={"points_cam_mm": points_cam, "T_base_camera_mm": T_base_camera_mm})
+        except InferenceBusy:
+            # busy는 `_process`가 따로 처리한다(publish 보류) — 여기서 삼키면 RuntimeError의
+            # 서브클래스라 아래 handler에 잡혀 "추론 불가" 에러로 오인되고 빈 후보가 나간다.
+            raise
         except RuntimeError as exc:
             self.get_logger().error(f"{self._strategy_name} 추론 불가: {exc}",
                                     throttle_duration_sec=10.0)
@@ -381,8 +396,17 @@ class GraspNode(Node):
 
         self._publish_image(vis, world.stamp, frame_id)
 
+    # 손끝이 물체를 물기 전 대략 이만큼 뒤에서 다가온다고 보고 그린다 — 실제 손가락
+    # 길이 데이터는 없어서(GraspCandidate에 안 실림) 순수 시각화 상수다. graspnetAPI의
+    # plot_gripper_pro_max가 그리는 "ㄷ"자 그리퍼 스케치와 같은 구조(손끝 두 점 + 그
+    # 뒤 몸통)를 우리 좌표계로 다시 그린다.
+    _FINGER_LENGTH_MM = 40.0
+    _DEFAULT_WIDTH_MM = 60.0
+
     def _draw_grasp_candidates(self, vis: np.ndarray, candidates, camera2base: np.ndarray) -> None:
-        """파지 후보를 base→camera 역변환·투영해 점(닫는 축 = 선분)으로 찍는다.
+        """파지 후보를 base→camera 역변환·투영해 실제 개폭·접근축을 반영한 그리퍼
+        스케치로 그린다 — "닫는 축 선 하나"만 그리면 개폭·접근 방향이 안 보여
+        PCA 결과와 구분이 안 됐다(2026-09-05, 사용자 피드백).
 
         전략이 점수 내림차순으로 돌려주므로(heuristic_pca.py) 상위 3개만 그린다 — 많이 그리면
         가려지고, 어차피 planner/pick_server가 실제로 시도하는 건 1순위다.
@@ -398,25 +422,53 @@ class GraspNode(Node):
                 continue
 
             q = candidate.pose.orientation
-            closing_axis = geometry.quaternion_to_matrix(q.x, q.y, q.z, q.w)[:, 0]
+            rotation = geometry.quaternion_to_matrix(q.x, q.y, q.z, q.w)
+            closing_axis, approach_axis = rotation[:, 0], rotation[:, 2]
+            half_width = 0.5 * float(candidate.gripper_width_mm or self._DEFAULT_WIDTH_MM)
             base_point = np.array([p.x, p.y, p.z])
-            endpoints_px = []
-            for endpoint in (base_point + 25.0 * closing_axis, base_point - 25.0 * closing_axis):
-                endpoint_cam = camera2base @ np.append(endpoint, 1.0)
-                if endpoint_cam[2] <= 0:
-                    endpoints_px = None
-                    break
-                endpoints_px.append(pointcloud_utils.project(
-                    endpoint_cam[np.newaxis, :3], self._intrinsics)[0])
+
+            # 접근축(approach_axis)은 그리퍼가 물체를 향해 다가가는 방향이라, 그리퍼 몸통은
+            # 그 반대(-approach_axis)에 있다 — 손끝(contact)에서 몸통(base)으로 선을 긋는다.
+            tip_left = base_point + half_width * closing_axis
+            tip_right = base_point - half_width * closing_axis
+            body_left = tip_left - self._FINGER_LENGTH_MM * approach_axis
+            body_right = tip_right - self._FINGER_LENGTH_MM * approach_axis
+
+            pixels = self._project_points(
+                [tip_left, tip_right, body_left, body_right], camera2base)
+            if pixels is None:
+                continue
+            (tlx, tly), (trx, try_), (blx, bly), (brx, bry) = pixels
 
             marker_color = (0, 220, 0) if rank == 0 else (0, 180, 255)
-            cv2.circle(vis, (cx, cy), 10 if rank == 0 else 6, marker_color, 2)
-            if endpoints_px is not None:
-                (x1, y1), (x2, y2) = endpoints_px
-                cv2.line(vis, (int(x1), int(y1)), (int(x2), int(y2)), marker_color, 2)
+            # 손가락 두 개(손끝→몸통) + 몸통을 잇는 선(팜) = graspnetAPI 그리퍼 스케치의
+            # "ㄷ"자와 같은 형태. 손끝에 작은 원을 찍어 실제로 물체를 무는 지점을 강조한다.
+            cv2.line(vis, (blx, bly), (brx, bry), marker_color, 2)          # 팜(base)
+            cv2.line(vis, (tlx, tly), (blx, bly), marker_color, 2)         # 왼손가락
+            cv2.line(vis, (trx, try_), (brx, bry), marker_color, 2)        # 오른손가락
+            cv2.circle(vis, (tlx, tly), 4, marker_color, -1)
+            cv2.circle(vis, (trx, try_), 4, marker_color, -1)
             if rank == 0:
-                cv2.putText(vis, f"grasp {candidate.score:.2f}", (cx + 12, cy - 12),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, marker_color, 2, cv2.LINE_AA)
+                # strategy를 라벨에 그대로 찍는다 — heuristic_pca 결과가 GraspNet처럼
+                # 보이면 안 된다(2026-09-05, 데이터 출처 오인 방지 요구사항).
+                cv2.putText(vis, f"[{candidate.strategy}] {candidate.score:.2f} "
+                           f"w={candidate.gripper_width_mm:.0f}mm",
+                           (cx + 12, cy - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                           marker_color, 2, cv2.LINE_AA)
+
+    def _project_points(self, points_base: list[np.ndarray],
+                        camera2base: np.ndarray) -> list[tuple[int, int]] | None:
+        """base 좌표계 점들을 한꺼번에 카메라 픽셀로 투영한다. 하나라도 카메라 뒤쪽
+        (point_cam[2]<=0)이면 그리퍼 스케치 전체를 그리지 않는다 — 절반만 그리면
+        방향을 오해하기 쉽다."""
+        pixels = []
+        for point in points_base:
+            point_cam = camera2base @ np.append(point, 1.0)
+            if point_cam[2] <= 0:
+                return None
+            u, v = pointcloud_utils.project(point_cam[np.newaxis, :3], self._intrinsics)[0]
+            pixels.append((int(round(u)), int(round(v))))
+        return pixels
 
     @staticmethod
     def _draw_label(vis: np.ndarray, origin: tuple[int, int], text: str,

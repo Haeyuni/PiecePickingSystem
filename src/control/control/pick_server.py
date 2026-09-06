@@ -46,7 +46,7 @@ class _LiftFailedError(RuntimeError):
     뭔가를 물었는지 판단해 사유를 구분해 보고할 수 있게 한다.
     """
 
-    def __init__(self, message: str, width_mm: float):
+    def __init__(self, message: str, width_mm: float | None):
         super().__init__(message)
         self.width_mm = width_mm
 
@@ -191,9 +191,13 @@ class PickServer(Node):
             # 그리퍼는 이미 뭔가를 물고 있다 — grasp_failed로 보고하면 "못 집었다"로
             # 읽혀 planner가 같은 물체를 다시 집으려 들 수 있다(실제로는 물체가 붙잡힌
             # 채 공중에 멈춰 있다). robot_state에도 실제 개폭을 반영해 둔다.
+            width_display = f"{e.width_mm:.1f}mm" if e.width_mm is not None else "측정 실패"
             self.get_logger().error(
-                f"pick 실패(파지는 성공, 들어올리기부터 실패): {e} (width={e.width_mm:.1f}mm)")
-            store.set_gripper(width_mm=e.width_mm, closed=True)
+                f"pick 실패(파지는 성공, 들어올리기부터 실패): {e} (width={width_display})")
+            # width_mm이 None(측정 실패)이면 0.0은 순전히 화면 표시용 대체값이다 — 아래
+            # goal_handle.abort()가 REASON_UNREACHABLE로 보고하는 판정 자체는 width 값과
+            # 무관하다(그리퍼 상태를 "불확실"로 다루는 쪽은 orchestrator, 이 값이 아니다).
+            store.set_gripper(width_mm=e.width_mm if e.width_mm is not None else 0.0, closed=True)
             store.set_error()
             goal_handle.abort()
             return self._result(False, Pick.Result.REASON_UNREACHABLE, started)
@@ -244,20 +248,31 @@ class PickServer(Node):
             return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
                                           self._linear_vel_mm_s, self._linear_acc_mm_s2,
                                           self._rot_vel_deg_s, self._rot_acc_deg_s2,
-                                          posx_client=self._posx_client)
+                                          posx_client=self._posx_client, logger=self.get_logger())
 
         def next_target(xyz, last_pose):
-            """`xyz`로 위치만 바꾸고 회전은 방금 도달한 실제 자세를 그대로 쓴다 —
-            연속 이동에서 계산값을 재사용하면 안 되는 이유는 dsr_motion.py 모듈
-            docstring(ZYZ 특이점) 참조. `last_pose`는 바로 앞 move()가 돌려준 액션
-            feedback 기반 pose — get_current_posx(aux_control)를 다시 부르지 않는다,
-            movel 직후 그 서비스가 10~20초 이상 무응답인 구간이 있어서다
-            (dsr_motion.get_current_posx 참조). feedback을 못 받았을 때만(드묾)
-            그쪽으로 폴백한다."""
+            """`xyz`로 위치만 바꾸고 회전은 유지한다 — 연속 이동에서 계산값을 재사용하면
+            안 되는 이유는 dsr_motion.py 모듈 docstring(ZYZ 특이점) 참조.
+
+            회전값은 가능하면 get_current_posx로 정지 후 새로 읽은 값을 쓴다. action
+            feedback의 마지막 샘플(`last_pose`)은 스트리밍 도중 값이라, 컨트롤러가 정지
+            후 재정규화하는 ZYZ 표현과 파라미터가 다를 수 있다(같은 문서, "물리적으로는
+            같은 방향인데 파라미터값이 다를 수 있다" 참조). 그 값을 다음 이동에 그대로
+            쓰면 "제자리에서 수직으로" 대신 두 자세 사이를 새로 보간해 대각선/최단거리로
+            움직이는 문제가 있었다(2026-09-05 실물 확인).
+
+            movel 직후 aux_control이 10~20초씩 무응답일 수 있다는 걸 이미 알고 있으므로
+            (get_current_posx 참조), 여기서 재시도까지 하며 오래 기다리는 건 거의 항상
+            헛수고다 — next_target은 정의상 매번 move() 직후, 즉 그 무응답 구간 한복판에서
+            불린다. 그래서 짧게 한 번만 찔러보고(재시도 없음), 안 되면 바로 feedback 값으로
+            대체한다(2026-09-06, 스텝 전환 지연 조사 — 재시도 포함 최대 2.5초였던 걸
+            0.5초로 줄임. pick+place 한 사이클에 이 호출이 6~7번 있어 누적 효과가 크다)."""
+            settled = dsr_motion.get_current_posx(self._posx_client, goal_handle,
+                                                  timeout_s=0.5, retries=1)
+            if settled is not None:
+                return [xyz[0], xyz[1], xyz[2], settled[3], settled[4], settled[5]]
             if last_pose is None:
-                last_pose = dsr_motion.get_current_posx(self._posx_client, goal_handle)
-                if last_pose is None:
-                    return None
+                return None
             return [xyz[0], xyz[1], xyz[2], last_pose[3], last_pose[4], last_pose[5]]
 
         # 그리퍼를 먼저 연다. 예전엔 여기서 열지 않고 바로 닫기만 했다 — 이전 사이클에서
@@ -306,6 +321,18 @@ class PickServer(Node):
         # 그리퍼가 실제로 닫힌 개폭 — 들어올리기가 이후에 실패해도 "물었는지 여부"는
         # 이미 정해져 있다. 이 뒤의 실패는 grasp_failed가 아니라 별도로 구분해 보고한다.
         width_mm = dsr_motion.gripper_width_mm(self._gripper_pose_client, final_angle)
+        if width_mm is None:
+            # /onrobot/pose가 응답하지 않았다 — 그리퍼는 이미 닫혔는데(wait_gripper_settled
+            # 통과) 실제로 얼마나 닫혔는지를 몰라 "확실히 빈 채로 닫혔다"와 구분할 수
+            # 없다. 여기서 0.0으로 대체하면 곧바로 execute_callback의 min_grip_width_mm
+            # 비교가 무조건 "빈 그리퍼"로 떨어져, 실제로는 뭔가를 물고 있을 수도 있는
+            # 상황을 확정적 실패로 오판한다(2026-09-05, gripper_width_mm 조사에서 확인).
+            # 이미 그리퍼를 문 뒤의 실패이므로 _LiftFailedError로 올려 "불확실" 취급이
+            # 되게 한다(REASON_UNREACHABLE — orchestrator가 이 경우 자동 재계획 안 함).
+            if goal_handle.is_cancel_requested:
+                return None
+            raise _LiftFailedError("그리퍼 개폭 측정 실패 — 닫기는 완료됐으나 파지 여부 불확실",
+                                   width_mm)
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_LIFTING)
         lift_posx = next_target(approach_xyz, descend_pose)
