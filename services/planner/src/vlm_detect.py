@@ -40,10 +40,8 @@ MARKS_PROMPT_VERSION = "vlm-marks-v1"   # label_marks(): SAM이 만든 번호에
 DEFAULT_MODEL = "gpt-4o"
 
 OBJECTS_YAML = pathlib.Path(
-    os.environ.get(
-        "OBJECTS_YAML",
-        pathlib.Path(__file__).resolve().parents[3] / "src" / "perception" / "config" / "objects.yaml",
-    )
+    os.environ.get("OBJECTS_YAML")
+    or pathlib.Path(__file__).resolve().parents[3] / "src" / "perception" / "config" / "objects.yaml"
 )
 
 
