@@ -8,6 +8,12 @@ string bin_id                    # bins.yaml에 등록된 목적지 중 하나. 
 bool use_pose_override
 geometry_msgs/Pose pose_override  # use_pose_override=false면 무시. 1차 범위에서는 사용하지 않으며,
                                    # 확장 단계(정렬 배치 등)에서 bin_pose 기준 정밀 자세 조정이 필요할 때 사용
+# 잡고 있는 물체가 TCP보다 얼마나 아래로 내려와 있는지(mm) = 파지 z - 물체 지지면 z.
+# web/orchestrator가 DetectedObject.height_mm과 고른 파지 후보의 z로 계산해 넣는다.
+# place_server는 놓는 z를 bin_pose.z + 이 값 + release_clearance_mm로 잡는다 — 즉
+# release_clearance_mm이 "물체 높이 짐작"이 아니라 순수한 안전 여유가 된다.
+# 0이면 미상 — place_server가 예전처럼 release_clearance_mm만 쓴다(하위호환).
+float32 object_bottom_offset_mm
 int32 max_retries
 ---
 # --- Result ---

@@ -76,3 +76,48 @@ def crop_bgr(bgr: np.ndarray, mask_bool: np.ndarray, margin_px: int = 12) -> np.
     y0 = max(int(ys.min()) - margin_px, 0)
     y1 = min(int(ys.max()) + margin_px + 1, height)
     return bgr[y0:y1, x0:x1].copy()
+
+
+def support_3d(mask_bool: np.ndarray, depth_mm: np.ndarray, intrinsics: dict,
+               dilate_px: int = 15, percentile: float = 70.0
+               ) -> tuple[float, float, float] | None:
+    """물체가 **얹혀 있는 면**(작업대 등)의 카메라 좌표 3D 점(mm)을 낸다.
+
+    마스크를 조금 부풀려 만든 바깥 링에서 depth를 읽는다. 링은 물체 바로 옆이라 그 물체를
+    받치고 있는 면일 가능성이 높다.
+
+    **xy는 물체 마스크의 중심을 그대로 쓰고 depth만 링에서 가져온다** — `mask_3d`와 같은
+    (u, v)를 쓰므로 두 점의 차이가 순수하게 "물체 윗면과 지지면의 높이차"가 된다. 링의
+    무게중심을 쓰면 물체 옆으로 밀린 지점이 되어 그 차이에 xy 성분이 섞인다.
+
+    depth는 median이 아니라 **높은 백분위수**(기본 70%)를 쓴다. depth는 카메라에서 먼
+    쪽이 큰 값이라, 링에 옆 물체가 걸쳐 들어와도 더 먼(=더 낮은) 면 쪽으로 치우친다.
+    물체가 다른 물체 위에 얹힌 경우에는 지지면을 작업대로 잡아 물체 높이를 **크게**
+    보게 되는데, 그 방향의 오차는 place에서 "더 높은 데서 놓는다"가 되므로 안전한 쪽이다.
+
+    링에 유효 depth가 없으면 None.
+    """
+    if mask_bool.shape != depth_mm.shape:
+        return None
+    ys, xs = np.nonzero(mask_bool)
+    if xs.size == 0:
+        return None
+    z_obj = depth_mm[ys, xs].astype(np.float32)
+    valid_obj = z_obj > 0
+    if not valid_obj.any():
+        return None
+    uc, vc = float(xs[valid_obj].mean()), float(ys[valid_obj].mean())
+
+    import cv2
+
+    kernel = np.ones((2 * int(dilate_px) + 1,) * 2, np.uint8)
+    dilated = cv2.dilate(mask_bool.astype(np.uint8), kernel, iterations=1).astype(bool)
+    ring = dilated & ~mask_bool
+    ring_z = depth_mm[ring].astype(np.float32)
+    ring_z = ring_z[ring_z > 0]
+    if ring_z.size == 0:
+        return None
+    zs = float(np.percentile(ring_z, percentile))
+    x = (uc - intrinsics["cx"]) * zs / intrinsics["fx"]
+    y = (vc - intrinsics["cy"]) * zs / intrinsics["fy"]
+    return (x, y, zs)
