@@ -27,6 +27,9 @@ class SkillGoal:
     grasp_pose: dict | None = None   # pick
     gripper_width_mm: float | None = None  # pick — 골라둔 후보의 GraspCandidate.gripper_width_mm
     bin_id: str | None = None        # place_into
+    # place_into — 든 물체가 TCP보다 얼마나 아래로 내려와 있는지(mm).
+    # orchestrator가 물체 높이와 파지 z로 계산한다. None/0이면 control이 고정 여유만 쓴다.
+    object_bottom_offset_mm: float | None = None
     max_retries: int = 1
 
 

@@ -7,25 +7,93 @@ profiles:
   normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
   fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
   deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
-# 현재 클래스 3종은 전부 normal이라 fragile/deformable은 직접 매핑되는 물체가 없다.
-# 지우지 않는 이유: fragile은 미확인 신규 클래스의 강제 프로파일이라 계속 쓰이고(FR-05b),
-# deformable은 클래스가 늘어날 때 되살아난다. control의 skill_params와도 짝이 맞아야 한다.
+# deformable은 치약·물티슈·인형이 쓴다(2026-09-07 7클래스 추가). fragile은 직접 매핑되는
+# 물체가 없지만 지우지 않는다 — 미확인 신규 클래스에 강제되는 프로파일이다(FR-05b).
+# control의 skill_params와도 짝이 맞아야 한다.
 
 # 검출 모델의 클래스명 → 이 파일의 class_name 매핑 (개발계획.md D-7).
 #
-# 학습된 모델(models/best.pt, yolo11n-seg)의 라벨은 suncream/tape/nail_product인데,
-# 세 번째의 정식 이름은 nail이다. perception이 모델 출력을 DetectedObject.class_name으로
-# 옮길 때 **반드시 이 표를 지난다** — 안 그러면 속성 조회가 어긋나 네일이 매번 미확인
-# 신규품목으로 떨어지고, FR-05b에 따라 fragile 프로파일이 강제된다(조용히 느려질 뿐
-# 오류로는 보이지 않는다). 이름이 같은 둘도 적어 둔 이유는 모델 어휘 전체가 한눈에
-# 보여야 다음 재학습 때 빠진 것을 알아채기 때문이다.
+# perception이 모델 출력을 DetectedObject.class_name으로 옮길 때 **반드시 이 표를 지난다.**
+# 표에 없는 라벨은 그대로 통과해 속성 조회에서 미확인 신규품목이 되고, FR-05b에 따라
+# fragile 프로파일이 강제된다 — 조용히 느려질 뿐 오류로는 보이지 않는다. 그래서 모델
+# 어휘를 전부 적어 둔다(이름이 그대로인 것도 포함).
 model_labels:
+  # 현행 models/best.pt (yolo11n-seg, 7클래스, 2026-09-07 배치)
+  dentimate_new_total_care_toothpaste: toothpaste
+  ecla_moist_wet_wipes: wet_wipes
+  editb_bare_bunny_tone_filter_sunscreen: sunscreen
+  jjanggu_rabbit_doll: rabbit_doll
+  navy_folding_umbrella: umbrella
+  pigeon_blue_bianca_spray: fabric_spray
+  ringring_gel_nail_twinkle_silver: gel_nail
+  # 이전 가중치(models/best_v1.pt, 6클래스)의 어휘. 롤백해도 신규품목으로 떨어지지 않게
+  # 남겨 둔다. 라벨 이름만 바뀌고 물체는 같은 둘은 현행 class_name으로 보낸다.
+  ecla_wet_tissue: wet_wipes
+  pigeon_spray_blue_bianca: fabric_spray
   suncream: suncream
   tape: tape
   nail_product: nail
+  # denmark_probiotics(v1 전용)는 실물 속성을 확인하지 못해 일부러 비워 뒀다.
 
-# 클래스 목록은 트랙 A에서 확정됨 (2026-09-03). 속성은 사용자 확인값이다.
+# 2026-09-07: 7클래스 재학습에 맞춰 아래 7종을 추가했다.
+#
+# **무게는 저울로 잰 값이 아니라 제품 규격에서 잡은 추정치다.** attribute_db는 이 파일의
+# 값을 needs_confirmation=false로 내보내므로 확인된 값처럼 보인다 — 실측하면 고칠 것.
+# 다만 무게가 쓰이는 곳은 planner의 가반하중 검사(5000g, 전부 한참 아래)와 LLM 프롬프트
+# 표시뿐이다. 파지력을 정하는 것은 profile이고, 그쪽은 물체 형태로 판단했다.
 objects:
+  toothpaste:
+    name_ko: 치약
+    mass_g: 150            # 추정
+    fragile: false
+    deformable: true       # 튜브라 눌린다
+    transparent: false
+    profile: deformable
+  wet_wipes:
+    name_ko: 물티슈
+    mass_g: 120            # 추정
+    fragile: false
+    deformable: true       # 비닐 팩이라 잡으면 모양이 바뀐다
+    transparent: false
+    profile: deformable
+  sunscreen:
+    name_ko: 선크림
+    mass_g: 70             # 추정
+    fragile: false
+    deformable: false
+    transparent: false
+    profile: normal
+  rabbit_doll:
+    name_ko: 토끼 인형
+    mass_g: 100            # 추정
+    fragile: false
+    deformable: true       # 봉제 인형 — 잡는 위치마다 두께가 달라진다
+    transparent: false
+    profile: deformable
+  umbrella:
+    name_ko: 접이 우산
+    mass_g: 350            # 추정 — 이 목록에서 가장 무겁다
+    fragile: false
+    deformable: false
+    transparent: false
+    profile: normal
+  fabric_spray:
+    name_ko: 섬유탈취제
+    mass_g: 300            # 추정 (내용물 포함)
+    fragile: false
+    deformable: false
+    transparent: false     # 반투명 용기라 depth가 새면 true로 바꿀 것
+    profile: normal
+  gel_nail:
+    name_ko: 젤네일
+    mass_g: 30             # 추정
+    fragile: false
+    deformable: false
+    transparent: false
+    profile: normal
+
+  # 아래 3종은 best_v1.pt 어휘다. 현행 모델에는 없지만 롤백 대비로 남겨 둔다.
+  # (2026-09-03 트랙 A에서 확정된 사용자 확인값)
   suncream:
     name_ko: 선크림
     mass_g: 50

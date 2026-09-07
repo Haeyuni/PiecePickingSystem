@@ -111,6 +111,8 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                     "z": o.position_base_mm.z,
                 },
                 "depth_valid_ratio": o.depth_valid_ratio,
+                # place_into가 놓는 z를 정할 때 쓴다(orchestrator._object_bottom_offset_mm)
+                "height_mm": o.height_mm,
                 "graspable": o.graspable,
                 "not_graspable_reason": o.not_graspable_reason,
                 "mass_g": o.mass_g,
@@ -376,6 +378,7 @@ class RosExecutor:
         msg.profile = goal.profile
         msg.bin_id = goal.bin_id or ""
         msg.use_pose_override = False
+        msg.object_bottom_offset_mm = float(goal.object_bottom_offset_mm or 0.0)
         msg.max_retries = goal.max_retries
         return await self._send(self._node.place_client, msg, goal.request_id, on_feedback)
 

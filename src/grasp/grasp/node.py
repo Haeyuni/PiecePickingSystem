@@ -59,6 +59,7 @@ from perception_common.robot_pose import RobotPoseClient
 from . import pointcloud_utils, strategies
 from .config_utils import asset_path
 from .strategies.exceptions import InferenceBusy
+from .strategies.graspnet_baseline import _NoUprightCandidate
 
 SCHEMA_VERSION = "1.0.0"
 DEPTH_BUFFER_SIZE = 60          # 30fps 기준 2초. 관측 stamp가 조금 뒤처져도 같은 프레임을 찾는다
@@ -152,6 +153,9 @@ class GraspNode(Node):
         self._intrinsics = None
         self._depth_frames: list[tuple[float, np.ndarray, str]] = []
         self._color_frames: list[tuple[float, np.ndarray, str]] = []
+        # object_id → 그 물체 1순위 후보의 좌표 변환 중간값(graspnet_baseline만 채운다).
+        # 좌표 오차를 쫓을 때 어느 단계에서 틀어졌는지 보려면 최종값만으로는 부족하다.
+        self._chain_debug: dict[str, dict] = {}
         self._pending_masks: dict[tuple[int, int], InstanceMasks] = {}
         self._pending_worlds: dict[tuple[int, int], WorldState] = {}
         self._publish_debug = bool(self.get_parameter("publish_debug_image").value)
@@ -294,7 +298,7 @@ class GraspNode(Node):
             if image is None:
                 continue
             try:
-                candidates = self._candidates_for(image, depth, depth_frame_id, T_base_camera_mm)
+                candidates = self._candidates_for(obj, image, depth, depth_frame_id, T_base_camera_mm)
             except InferenceBusy:
                 # busy는 파지 실패가 아니다. 빈 후보 WorldState를 내보내 planner가 정상 물체를
                 # 거부하지 않게 하고, web은 마지막으로 완성된 관측을 계속 보여준다.
@@ -303,6 +307,24 @@ class GraspNode(Node):
                     throttle_duration_sec=2.0)
                 return
             obj.grasp_candidates = candidates
+            if candidates:
+                d = self._chain_debug.get(obj.object_id)
+                if d:
+                    self.get_logger().info(
+                        f"[좌표체인] {obj.object_id} "
+                        f"GraspNet translation(camera,mm)={d['graspnet_translation_cam_mm']} "
+                        f"접근축(camera)={d['graspnet_approach_cam']} "
+                        f"depth={d.get('graspnet_depth_mm')}mm(접근축 전진 반영) "
+                        f"→ base 파지점={d['graspnet_point_base_mm']} "
+                        f"| offset={d['T_graspnet_tcp_translation_mm']} ({d['offset_frame']}) "
+                        f"→ TCP 목표(base,mm)={d['tcp_target_base_mm']} "
+                        f"접근축(base)={d['tcp_approach_axis_base']} "
+                        f"| 클라우드 되잡기 {d.get('refined_shift_mm')}mm "
+                        f"(폭 {d.get('graspnet_width_mm')}→실측) "
+                        f"| 기울기 {d.get('chosen_angle_deg')}deg "
+                        f"(후보 {d.get('angles_deg')} 중 임계 {d.get('used_threshold_deg')}deg로 "
+                        f"{d.get('passed_count')}개 통과)",
+                        throttle_duration_sec=5.0)
             filled += bool(candidates)
 
         self._pub.publish(world)
@@ -323,8 +345,9 @@ class GraspNode(Node):
             blockers.append("최신 TCP 자세 없음")
         return blockers
 
-    def _candidates_for(self, mask_image: Image, depth: np.ndarray, depth_frame_id: str,
+    def _candidates_for(self, obj, mask_image: Image, depth: np.ndarray, depth_frame_id: str,
                         T_base_camera_mm: np.ndarray) -> list[GraspCandidate]:
+        object_id = obj.object_id
         mask = image_to_numpy(mask_image) > 0
         if mask.shape != depth.shape:
             self.get_logger().warning(
@@ -362,11 +385,97 @@ class GraspNode(Node):
             # busy는 `_process`가 따로 처리한다(publish 보류) — 여기서 삼키면 RuntimeError의
             # 서브클래스라 아래 handler에 잡혀 "추론 불가" 에러로 오인되고 빈 후보가 나간다.
             raise
+        except _NoUprightCandidate as exc:
+            # 추론은 됐고 후보도 나왔는데 전부 너무 기울어 실행 불가였던 경우.
+            # "추론 불가"와 구분해야 원인 추적이 된다(전자는 GPU/서버 문제, 이건 자세 문제).
+            self.get_logger().warning(f"{self._strategy_name} 쓸 만한 자세 없음: {exc}",
+                                      throttle_duration_sec=5.0)
+            return []
         except RuntimeError as exc:
             self.get_logger().error(f"{self._strategy_name} 추론 불가: {exc}",
                                     throttle_duration_sec=10.0)
             return []
+        # 전략이 중간 변환값을 실어 보냈으면(graspnet_baseline) 물체별로 보관한다 —
+        # 아래 _process가 로그로 찍는다. GraspCandidate.msg에는 이 필드가 없으므로
+        # 메시지로 변환하기 전에 여기서 빼둬야 한다.
+        if candidates and isinstance(candidates[0], dict) and candidates[0].get("debug"):
+            self._chain_debug[object_id] = candidates[0]["debug"]
+        candidates = [self._fit_grasp_depth(c, obj) for c in candidates]
         return [self._to_msg(c) for c in candidates]
+
+    # 손끝이 지지면(작업대) 아래로 내려가지 않게 남겨두는 여유(mm). 0이면 지지면에
+    # 정확히 닿는 높이까지 허용한다 — 얇은 물체는 실제로 그 높이에서 물어야 한다.
+    _SUPPORT_CLEARANCE_MM = 1.0
+    # 물체 높이의 몇 %를 목표 파지 높이로 삼는가. 0.5 = 중간 높이.
+    # 평행 그리퍼로 물건을 집을 때의 표준 선택이고, 위로 치우치면 미끄러지고 아래로
+    # 치우치면 작업대를 건드린다.
+    _GRASP_HEIGHT_FRACTION = 0.5
+
+    def _fit_grasp_depth(self, candidate: dict, obj) -> dict:
+        """파지 깊이를 **실측 물체 높이**에 맞춘다 — 너무 얕으면 내리고, 지지면 아래는 막는다.
+
+        **왜 필요한가 (얕은 쪽).** 전략은 깊이를 "보이는 표면에서 몇 mm"로 정한다
+        (refine_grasp_depth_mm / grasp_depth_mm, 둘 다 8mm). 그 8mm는 **접근축을 따라**
+        재므로, 기울어진 파지에서는 수직 침투가 `8 x cos(기울기)`로 줄어든다. 2026-09-07
+        실측: 높이 19.1mm 물체를 30도로 접근하면 손끝이 윗면 아래로 1.8mm밖에 안 들어간다 —
+        모서리만 스쳐 물어 들어올리다 놓친다. (예전에는 pick_depth_extra_mm=40이 이걸
+        우연히 메우고 있었는데, 그 값의 진짜 정체는 TCP↔손끝 오프셋이라 지금은 0이다.)
+
+        **왜 필요한가 (깊은 쪽).** 반대로 물체가 얇으면 그 8mm가 물체를 지나쳐 작업대
+        속이 된다. 실측: 높이 7.0mm 물체의 윗면 z=327.8, 지지면 z=320.8 → 윗면-8mm는
+        319.8로 작업대보다 1.0mm 아래다. 그대로 명령하면 손가락이 작업대를 눌러 충돌·
+        안전모드로 들어간다. 지금까지 안 드러난 건 TCP↔손끝 오프셋 때문에 손끝이 어차피
+        18mm 위에서 닫히고 있었기 때문이다 — **그 오프셋을 바로잡는 순간 드러난다.**
+
+        규칙(모두 실측값에서 나온다. 튜닝 상수는 위 둘뿐이다):
+          목표    = 물체 중간 높이 (지지면 + 높이 x _GRASP_HEIGHT_FRACTION)
+          더 깊게만 내린다 — 전략이 이미 중간보다 깊게 잡았으면 그 판단을 존중한다
+          바닥    = 지지면 + _SUPPORT_CLEARANCE_MM, 절대 그 아래로는 안 간다
+
+        지지면은 perception이 마스크 바깥 링에서 실측한 값이다
+        (`position_base_mm.z - height_mm`, mask_utils.support_3d). `height_mm=0`은
+        "미상"이므로(DetectedObject.msg) 그때는 아무것도 하지 않는다 — 모르는 값으로
+        추정해 옮기면 멀쩡한 파지를 망친다.
+
+        움직이는 방향은 **그 후보 자신의 접근축**이다. base Z로 옮기면 기울어진 파지에서
+        옆으로 밀린다(pick_server._pick_real의 같은 논리).
+        """
+        height_mm = float(getattr(obj, "height_mm", 0.0) or 0.0)
+        if height_mm <= 0.0 or not isinstance(candidate, dict):
+            return candidate
+        pose = candidate.get("pose") or {}
+        position, orientation = pose.get("position"), pose.get("orientation")
+        if not position or not orientation:
+            return candidate
+
+        support_z = float(obj.position_base_mm.z) - height_mm
+        floor_z = support_z + self._SUPPORT_CLEARANCE_MM
+        current_z = float(position["z"])
+        # 중간 높이까지만 내린다(이미 더 깊으면 그대로), 그리고 바닥 위로 올린다.
+        target_z = max(min(current_z, support_z + height_mm * self._GRASP_HEIGHT_FRACTION),
+                       floor_z)
+        if abs(target_z - current_z) < 0.5:
+            return candidate
+
+        approach = geometry.quaternion_to_matrix(
+            orientation["x"], orientation["y"], orientation["z"], orientation["w"])[:, 2]
+        if abs(float(approach[2])) < 1e-6:
+            # 접근축이 수평이면 이 축으로는 높이를 바꿀 수 없다.
+            return candidate
+        moved = np.array([position["x"], position["y"], current_z]) + (
+            (target_z - current_z) / float(approach[2])) * approach
+        self.get_logger().info(
+            f"[파지깊이] {obj.object_id} 물체높이 {height_mm:.1f}mm "
+            f"(지지면 {support_z:.1f} ~ 윗면 {float(obj.position_base_mm.z):.1f}) "
+            f"| 후보 z={current_z:.1f} → {target_z:.1f} "
+            f"({'더 깊게' if target_z < current_z else '지지면 보호'}, "
+            f"접근축 따라 {float(np.linalg.norm(moved - np.array([position['x'], position['y'], current_z]))):.1f}mm)",
+            throttle_duration_sec=5.0)
+        candidate = dict(candidate)
+        candidate["pose"] = {**pose, "position": {"x": float(moved[0]),
+                                                  "y": float(moved[1]),
+                                                  "z": float(moved[2])}}
+        return candidate
 
     # --- 디버그 오버레이 (perception_test_live.py --show와 같은 그림 + 파지 후보) ----------
     def _publish_debug_image(self, world: WorldState, mask_by_id: dict,

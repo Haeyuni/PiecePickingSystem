@@ -58,13 +58,66 @@ services:
           devices:
             - capabilities: [gpu]
 
+  # GraspNet-baseline 추론 서버 (grasp 노드의 graspnet_baseline 전략이 쓴다).
+  #
+  # **왜 상주 서비스인가.** 원래는 grasp 전략이 추론 때마다 `docker run`으로 이 이미지를
+  # 1회용으로 띄웠다. 그러면 호출 한 번마다 컨테이너 기동 + torch/CUDA import + 모델 생성
+  # + checkpoint 로드를 전부 다시 해서 추론 1회가 수십~수백 초가 됐다(실물에서 60초
+  # 타임아웃이 연속 초과돼 180초로 올려야 했다 — grasp_params.yaml의 timeout_s 참조).
+  # 게다가 그 방식은 grasp 노드에 Docker socket/CLI가 있어야 해서 compose 컨테이너로는
+  # 못 돌리고 호스트 네이티브 실행이 강제됐다(src/grasp/Dockerfile 주석).
+  # 여기서 모델을 기동 시 한 번만 올리고 HTTP로 받으면 그 둘이 동시에 없어진다.
+  #
+  # 네트워크: grasp가 network_mode: host라 서비스 이름 DNS를 못 쓴다 — planner/db와 같은
+  # 이유로 포트를 게시하고 localhost로 부른다(grasp_params.yaml의 endpoint).
+  graspnet:
+    build:
+      context: src/grasp/docker/graspnet_baseline
+    # setup_graspnet_runtime.sh와 같은 태그를 쓴다(그 스크립트는 이미지가 있으면 빌드를
+    # 건너뛰므로, runner.py가 바뀌면 태그를 같이 올려야 옛 이미지를 재사용하지 않는다).
+    image: piece-picking-graspnet-baseline:0.2.0
+    command: ["--serve", "/checkpoint.tar", "cuda:0", "8200"]
+    volumes:
+      # checkpoint는 Git 밖의 assets에 둔다(src/grasp/config/assets.example.yaml).
+      - ${PIECE_PICKING_ASSETS_DIR:-${HOME}/piece_picking_assets}/models/graspnet/checkpoint.tar:/checkpoint.tar:ro
+    ports:
+      - "8200:8200"
+    healthcheck:
+      # /health는 **모델을 다 올린 뒤에** 열린다 — 200이면 곧바로 추론을 받을 수 있다는 뜻.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8200/health').status==200 else 1)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      # 모델 로드(checkpoint.tar + CUDA 초기화)에 걸리는 시간. 넉넉히 준다.
+      start_period: 180s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]
+
   grasp:
     build:
       # 컨텍스트가 저장소 루트인 이유는 src/grasp/Dockerfile 주석 참조 (sort_msgs·perception_common을 함께 빌드)
       context: .
       dockerfile: src/grasp/Dockerfile
+    # graspnet에 depends_on을 걸지 않는 이유: 어떤 전략을 쓸지는 grasp가 런타임에
+    # grasp_params.yaml에서 고른다(heuristic_pca면 graspnet이 아예 필요 없다). 하드
+    # 의존을 걸면 PCA로 돌 때도 매 기동마다 모델 로드를 기다려야 한다. graspnet 전략인데
+    # 서버가 아직 안 떴으면 그 관측만 후보 없이 건너뛰고 로그를 남긴 뒤, 서버가 뜨면
+    # 그냥 이어서 동작한다.
     depends_on: [perception]
     network_mode: host   # perception의 world_state_raw/instance_masks + get_current_posx를 host DDS에서 봐야 한다
+    # 파지 전략. grasp_launch.py의 strategy 인자가 node.py에서 grasp_params.yaml의
+    # strategy.name보다 우선하므로, 이미지 재빌드 없이 여기서 바꾼다.
+    #
+    # 2026-09-07: 기본값을 graspnet_baseline으로 올렸다(요청). 되돌리려면:
+    #   GRASP_STRATEGY=heuristic_pca docker compose up -d grasp
+    # 빈 문자열은 쓸 수 없다 — ros2 launch가 'strategy:='를 malformed로 거부한다.
+    #
+    # graspnet_baseline은 위 graspnet 서비스(상주 추론 서버)가 떠 있어야 동작한다.
+    # 서버가 없으면 그 관측만 후보 없이 건너뛰고 로그를 남긴다(연쇄 실패는 없다).
+    command: ["ros2", "launch", "grasp", "grasp_launch.py", "strategy:=${GRASP_STRATEGY:-graspnet_baseline}"]
     environment:
       ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
       CYCLONEDDS_URI: file:///cyclonedds/cyclonedds.xml
@@ -75,6 +128,19 @@ services:
       # dsr_msgs2(get_current_posx 서비스 타입)의 출처. src/grasp/docker-entrypoint.sh 참조.
       - ${DOOSAN_WS_DIR:-${HOME}/cobot2_ws}/install/dsr_msgs2:/doosan_ws:ro
       - ./data:/data:ro
+      # 파지 파라미터는 **튜닝 대상**이라 이미지에 굽지 않고 마운트한다. 안 그러면 값 하나
+      # 바꿀 때마다 이미지 재빌드가 필요해서 실물 앞에서 값을 좁혀 나가는 게 사실상 불가능하다.
+      # (2026-09-07) 이제 파일을 고치고 `docker compose restart grasp`만 하면 반영된다.
+      - ./src/grasp/config/grasp_params.yaml:/ros2_ws/install/grasp/share/grasp/config/grasp_params.yaml:ro
+      # 캘리브레이션·진단 스크립트. grasp 컨테이너는 rclpy + sort_msgs + dsr_msgs2 +
+      # perception_common을 모두 갖춘 유일한 곳이라 이 도구들이 그대로 돈다.
+      # 마운트하는 이유는 컨테이너를 다시 만들 때마다 docker cp를 반복하지 않기 위해서다
+      # (예전에는 /tmp에 복사해 썼는데 재기동하면 사라졌다):
+      #   docker exec ros2_ws-grasp-1 bash -c 'source /opt/ros/jazzy/setup.bash &&
+      #     source /ros2_ws/install/setup.bash &&
+      #     source /doosan_ws/share/dsr_msgs2/local_setup.bash &&
+      #     python3 /tools/measure_tcp_offset.py'
+      - ./tools/calibration:/tools:ro
     deploy:
       resources:
         reservations:
@@ -128,6 +194,10 @@ services:
       # 패키지 하나만 마운트한다(cobot2_ws 전체를 마운트하면 안 되는 이유는
       # src/control/docker-entrypoint.sh 참조).
       - ${DOOSAN_WS_DIR:-${HOME}/cobot2_ws}/install/onrobot_rg_msgs:/onrobot_ws:ro
+      # 모션/목적지 파라미터도 튜닝 대상이라 마운트한다(grasp_params.yaml과 같은 이유).
+      # 고치고 `docker compose restart control`이면 반영된다 — 재빌드 불필요.
+      - ./src/control/config/skill_params.yaml:/ros2_ws/install/control/share/control/config/skill_params.yaml:ro
+      - ./src/control/config/bins.yaml:/ros2_ws/install/control/share/control/config/bins.yaml:ro
 
   # mock 모드 web (B2~B3). 브리지 네트워크에서 planner/db를 서비스 이름으로 부른다.
   web:

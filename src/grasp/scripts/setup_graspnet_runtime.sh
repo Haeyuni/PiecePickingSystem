@@ -2,7 +2,7 @@
 # Test-PC-only setup. It never moves the robot.
 set -euo pipefail
 
-image="${GRASPNET_IMAGE:-piece-picking-graspnet-baseline:0.1.0}"
+image="${GRASPNET_IMAGE:-piece-picking-graspnet-baseline:0.2.0}"
 assets_dir="${PIECE_PICKING_ASSETS_DIR:?Set PIECE_PICKING_ASSETS_DIR first.}"
 archive="${assets_dir}/models/graspnet/checkpoint-rs.tar"
 checkpoint="${assets_dir}/models/graspnet/checkpoint.tar"

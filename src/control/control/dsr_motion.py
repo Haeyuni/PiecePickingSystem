@@ -52,6 +52,9 @@ MOVEL_ACTION = "/dsr01/motion/movel_h2r"
 GET_CURRENT_POSX_SERVICE = "/dsr01/dsr_controller2/aux_control/get_current_posx"
 GRIPPER_COMMAND_SERVICE = "/onrobot/sendCommand"
 GRIPPER_JOINT_STATES_TOPIC = "/onrobot_joint_states"
+# RG2 컨트롤러 상태 비트필드(gsta 포함). onrobot_rg_control 드라이버가 발행한다 —
+# 2026-09-07에 추가한 토픽이라, 드라이버를 그 이후로 빌드/재기동하지 않았으면 없다.
+GRIPPER_STATUS_TOPIC = "/onrobot/status"
 
 
 def get_current_posx(client, goal_handle, timeout_s: float = 5.0, retries: int = 6,
@@ -106,6 +109,76 @@ def pose_mm_to_posx(pose) -> list[float]:
     return [pose.position.x, pose.position.y, pose.position.z, rx, ry, rz]
 
 
+# --- TCP 원점 ↔ 실제 파지점 -------------------------------------------------
+#
+# **로봇이 명령·보고하는 TCP 원점은 그리퍼가 실제로 무는 지점이 아니다.** 두 점의 차이는
+# 툴 좌표계에서 상수(그리퍼 기구가 고정이므로)지만, base 좌표계에서는 **자세에 따라
+# 방향이 돈다**. 이 상수를 어디에도 넣지 않으면 파이프라인이 "여기를 물어라"로 계산한
+# 점에 TCP 원점이 가고, 손가락은 그만큼 빗나간 곳에서 닫힌다.
+#
+# 실측(2026-09-07, TCP posx=[266.86, 26.13, 314.11, 117.68, -179.84, 117.64]에서 손끝을
+# 물체에 대고 잰 값): 툴 좌표계로 (+9.4, +24.2, **-18.3**)mm. z의 -18.3이 이 오프셋이다 —
+# 손가락 접촉면이 TCP 원점보다 접근 방향으로 18.3mm **앞**에 있다는 뜻이라, TCP를 파지점에
+# 보내면 손가락은 18.3mm 못 미친 허공에서 닫힌다.
+#
+# 이 값이 왜 예전 튜닝값들의 정체인지: 수직 파지에서는 순수한 base -Z 부족분이라
+# `pick_depth_extra_mm`(한때 40)이나 `camera_frame_offset_mm.z`(한때 45)로 덮으면
+# 그 자세에서는 맞아떨어졌다. 기울어진 파지에서는 그 두 축이 툴 z축과 갈라져 옆으로 샌다.
+# 여기서 툴 좌표계 상수로 다루면 모든 자세에서 한 번에 맞는다.
+#
+# **티치펜던트의 툴 오프셋을 고쳐 없애면 안 된다.** hand-eye 캘리브레이션이
+# `get_current_posx()`가 보고하는 바로 이 TCP 정의로 풀려 있고(perception_common/
+# geometry.py), bins.yaml의 목적지도 이 정의로 티칭돼 있다. 펜던트에서 TCP를 옮기면
+# 그 둘이 같은 양만큼 조용히 틀어진다 — 소프트웨어에서 다루는 편이 안전하고 되돌리기 쉽다.
+DEFAULT_GRASP_CENTER_OFFSET_MM = (0.0, 0.0, 0.0)
+
+
+def grasp_center_offset_mm(params: dict) -> list[float]:
+    """skill_params.yaml의 `tool.grasp_center_offset_mm` → 툴 좌표계 [x, y, z] (mm).
+
+    없으면 (0,0,0) — 예전과 완전히 같은 동작이라 설정을 안 만든 환경이 조용히 달라지지 않는다.
+    """
+    tool = (params or {}).get("tool") or {}
+    offset = tool.get("grasp_center_offset_mm")
+    if isinstance(offset, dict):
+        return [float(offset.get("x", 0.0)), float(offset.get("y", 0.0)),
+                float(offset.get("z", 0.0))]
+    if isinstance(offset, (list, tuple)) and len(offset) == 3:
+        return [float(v) for v in offset]
+    return list(DEFAULT_GRASP_CENTER_OFFSET_MM)
+
+
+def _rotation_from_pose(pose):
+    q = pose.orientation
+    return quaternion_to_matrix(q.x, q.y, q.z, q.w)
+
+
+def tcp_posx_for_grasp(pose, offset_mm) -> list[float]:
+    """**파지점**(손가락이 만나야 하는 지점) Pose → 거기에 손가락이 오도록 명령할 TCP posx.
+
+    파지점 P와 자세 R이 주어졌을 때 실제 파지점은 `TCP + R @ offset`이므로, 그것이 P가
+    되려면 `TCP = P - R @ offset`을 명령해야 한다. R을 함께 곱하기 때문에 수직 파지든
+    기울어진 파지든 같은 식 하나로 맞는다 — base 축에 상수를 더하는 방식과 다른 점이 이것이다.
+    """
+    rotation = _rotation_from_pose(pose)
+    rx, ry, rz = matrix_to_zyz_deg(rotation)
+    shift = rotation @ [float(v) for v in offset_mm]
+    return [float(pose.position.x - shift[0]),
+            float(pose.position.y - shift[1]),
+            float(pose.position.z - shift[2]), rx, ry, rz]
+
+
+def grasp_center_from_posx(posx, offset_mm) -> list[float]:
+    """TCP posx → 그 자세에서 손가락이 실제로 만나는 base 좌표(mm). `tcp_posx_for_grasp`의 역방향.
+
+    진단용이다 — "명령한 TCP"가 아니라 "손끝이 실제로 간 곳"을 로그에 남겨야 파지 오차를
+    물체 좌표와 직접 견줄 수 있다.
+    """
+    rotation = posx_to_matrix(posx)[:3, :3]
+    shift = rotation @ [float(v) for v in offset_mm]
+    return [float(posx[i] + shift[i]) for i in range(3)]
+
+
 def _release_remote_goal(remote_handle, finished, logger, reason: str,
                          timeout_s: float = 1.5) -> None:
     """원격 액션 goal을 확실히 끝내고 온다(취소를 보내고 종료를 기다린다).
@@ -151,6 +224,30 @@ def _release_remote_goal(remote_handle, finished, logger, reason: str,
         logger.debug(
             f"_release_remote_goal: {reason} — 취소 확인이 {timeout_s:.1f}초 안에 오지 "
             "않았다. 드라이버가 다음 goal에서 정리하므로 그대로 진행한다")
+
+
+def approach_axis_from_pose(pose) -> list[float]:
+    """파지 자세(geometry_msgs/Pose)의 **접근축**을 base 좌표 단위벡터로 낸다.
+
+    이 프로젝트의 TCP 규약에서 접근축은 **Z축**이다 — grasp의
+    `heuristic_pca._pose_from_closing_axis`가 `column_stack([x_axis, y_axis, z_axis])`로
+    자세를 만들면서 `z_axis = (0, 0, -1)`(아래 방향)을 접근축으로 넣는다. 따라서 회전행렬의
+    3번째 열이 base 기준 접근 방향이고, 값은 "그리퍼가 물체로 다가가는 쪽"을 가리킨다.
+
+    **왜 필요한가.** 접근 여유·하강 깊이 같은 오프셋을 base Z에 그냥 더하면, 기울어진
+    파지에서 그 오프셋이 접근축을 벗어나 수평 성분을 만든다(pick_server._pick_real의
+    주석에 실측값 있음). 수직 파지에서는 이 함수가 (0, 0, -1)을 돌려주므로 예전 식과
+    같은 결과가 되어, 기존 동작을 바꾸지 않는다.
+    """
+    from perception_common.geometry import quaternion_to_matrix
+
+    q = pose.orientation
+    rotation = quaternion_to_matrix(q.x, q.y, q.z, q.w)
+    axis = rotation[:, 2]
+    norm = float((axis ** 2).sum() ** 0.5)
+    if norm < 1e-9:
+        return [0.0, 0.0, -1.0]     # 회전이 깨진 경우: 예전 동작(수직 하강)으로 대체
+    return [float(v / norm) for v in axis]
 
 
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,
@@ -467,12 +564,25 @@ def send_gripper_command(client, command: str, timeout_s: float = 3.0) -> bool:
     return True  # 서비스 자체는 접수만 하고 바로 응답한다 — 물리적 완료는 별도로 기다린다
 
 
-def gripper_width_command(width_m: float) -> str:
+def gripper_width_command(width_m: float, force_n: float | None = None) -> str:
     """`send_gripper_command`에 넘길 문자열 — 정수 문자열은 목표 개폭(0.1mm 단위)으로
     해석된다(onrobot_rg_control.genCommand, sendCommandCallback 경로라 실물 pick/place에
     쓴 'c'와 같은 정확한 변환을 거친다). 'c'/'o'는 완전히 닫기/최대로 열기만 가능해서
-    place_into처럼 특정 개폭(gripper_open_m)을 원할 때는 이걸 쓴다."""
-    return str(int(round(width_m * 10000)))
+    place_into처럼 특정 개폭(gripper_open_m)을 원할 때는 이걸 쓴다.
+
+    `force_n`을 주면 `"<개폭>,<힘>"`으로 만들어 **파지력을 절대값으로** 지정한다
+    (2026-09-07에 드라이버 genCommand에 추가한 형식). 안 주면 드라이버가 들고 있는
+    직전 힘을 그대로 쓴다 — 예전과 같은 동작이다.
+
+    **왜 힘을 명시해야 하는가**: 드라이버는 기동 시 `rgfr = max_force`로 박아두고
+    'i'/'d'로 ±25씩 상대 조절만 지원했다. 그래서 skill_params.yaml의 프로필별
+    `max_grip_force_n`(normal 20N, fragile 5N, deformable 12N)이 선언만 되고 한 번도
+    적용되지 않았다 — fragile 물체도 RG2 최대 40N으로 쥐고 있었다.
+    """
+    width = int(round(width_m * 10000))
+    if force_n is None:
+        return str(width)
+    return f"{width},{int(round(force_n * 10))}"
 
 
 def gripper_width_mm(pose_client, joint_angle: float, timeout_s: float = 1.5) -> float | None:

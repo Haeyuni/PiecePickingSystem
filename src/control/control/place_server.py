@@ -68,11 +68,14 @@ def load_bins(path: pathlib.Path | None = None) -> dict:
         return (yaml.safe_load(f) or {}).get("bins") or {}
 
 
-def load_motion_params(path: pathlib.Path | None = None) -> dict:
+def load_skill_params(path: pathlib.Path | None = None) -> dict:
     path = path or skill_params_path()
     with path.open(encoding="utf-8") as f:
-        config = yaml.safe_load(f) or {}
-    return config.get("motion") or {}
+        return yaml.safe_load(f) or {}
+
+
+def load_motion_params(path: pathlib.Path | None = None) -> dict:
+    return load_skill_params(path).get("motion") or {}
 
 
 class PlaceServer(Node):
@@ -110,6 +113,10 @@ class PlaceServer(Node):
         # 물체(또는 그리퍼)가 바구니 바닥/기존 내용물에 먼저 닿는다 — 실물에서 충돌로
         # 안전모드에 들어간 사고가 있었다. 그 여유만큼 목표 z를 올려서 내려간다.
         self._release_clearance_mm = float(motion.get("release_clearance_mm", 30.0))
+        # TCP 원점 → 손가락이 실제로 만나는 지점 (툴 좌표계 mm). pick과 **같은 값**을 써야
+        # 한다 — orchestrator가 넘기는 object_bottom_offset_mm이 grasp_pose(=파지점) 기준
+        # 값이라, 그걸 TCP 기준으로 옮기려면 이 오프셋이 필요하다. 아래 release_z 참조.
+        self._grasp_center_offset_mm = dsr_motion.grasp_center_offset_mm(load_skill_params())
         self._place_safe_clearance_mm = float(motion.get("place_safe_clearance_mm", 100.0))
         # place_into 성공 뒤 orchestrator가 곧바로 home(관절이동)을 부른다(web/orchestrator.py).
         # 물러난 높이(approach 지점)에서 바로 관절이동을 시작하면 바구니 테두리 바로 위라
@@ -153,9 +160,55 @@ class PlaceServer(Node):
             return self._result(False, PlaceInto.Result.REASON_UNREACHABLE, time.monotonic())
 
         bin_pose = self._bins[goal.bin_id].get("pose", {})
+        # 놓는 높이 여유는 목적지마다 다를 수 있다 — bins.yaml 의 해당 목적지에
+        # release_clearance_mm 이 있으면 그것을, 없으면 skill_params.yaml 의 공용값을 쓴다.
+        # 바구니 깊이·기존 내용물 높이가 목적지마다 다르므로 공용값 하나로 맞추면
+        # 한쪽은 너무 높아 떨어뜨리고 다른 쪽은 너무 낮아 부딪힌다.
+        release_clearance_mm = float(
+            self._bins[goal.bin_id].get("release_clearance_mm", self._release_clearance_mm))
+        # **물체가 TCP 아래로 내려와 있는 만큼을 따로 더한다.** bin_pose는 빈 그리퍼로
+        # 티칭한 높이라, 물체를 든 채 그 높이까지 내려가면 물체가 바구니 바닥에 먼저 닿는다.
+        # 그러면 로봇은 목표 z에 도달하지 못한 채 계속 밀어붙이다 안전모드로 들어간다
+        # (2026-09-06 실물: 목표 213.4mm인데 217.9mm에서 멈춘 뒤 알람 → heartbeat 유실
+        # → 권한 회수로 파이프라인 전체가 멈췄다).
+        #
+        # 이 값은 web/orchestrator가 perception의 실측 물체 높이(DetectedObject.height_mm)와
+        # 실제로 쓴 파지 z로 계산해 goal에 실어 보낸다. 0이면 미상 — 그때만 예전처럼
+        # release_clearance_mm 하나로 버틴다(하위호환).
+        #
+        # 이렇게 나누면 release_clearance_mm이 "물체 높이 짐작"이 아니라 **순수한 안전
+        # 여유**가 된다 — 물체가 커지면 자동으로 더 높은 데서 놓고, 여유값은 그대로 둔다.
+        bottom_offset_mm = max(0.0, float(getattr(goal, "object_bottom_offset_mm", 0.0) or 0.0))
+        # **orchestrator의 값은 파지점(grasp_pose) 기준이지 TCP 기준이 아니다.**
+        # 그것은 `grasp_pose.z - (물체 윗면 z - 물체 높이)`, 즉 "손가락이 만나는 지점에서
+        # 물체 바닥까지"다. 여기서 명령하는 것은 TCP이고 손가락은 TCP에서
+        # tool.grasp_center_offset_mm만큼 떨어져 있으므로, 그만큼을 빼야 물체 바닥이
+        # 실제로 원하는 높이에 온다 (pick과 place가 같은 "파지점" 규약을 쓰게 하는 것).
+        #
+        # 이 보정이 없던 동안 place는 필요보다 약 18mm **높은** 데서 놓았다 — 안전한
+        # 방향이라 문제가 드러나지 않았지만, release_clearance_mm이 문서대로
+        # "순수한 안전 여유"가 되려면 여기서 정확히 맞춰야 한다. 이 변경으로 실제 여유는
+        # 48mm에서 설정값(30mm) 그대로가 된다.
+        #
+        # **물체 높이를 모르면(0) 이 변환을 하지 않는다.** 그 경우 바꿀 대상인 "파지점 기준
+        # 값" 자체가 없어서 빼 봐야 안전 여유만 18mm 깎일 뿐이다. 미상 경로는 예전 동작을
+        # 그대로 둔다.
+        tcp_to_finger_z_mm = 0.0
+        if bottom_offset_mm > 0.0:
+            tcp_to_finger_z_mm = dsr_motion.grasp_center_from_posx(
+                dsr_motion.bin_pose_to_posx(bin_pose), self._grasp_center_offset_mm)[2] \
+                - float(bin_pose.get("z", 0.0))
+        release_z = (float(bin_pose.get("z", 0.0)) + bottom_offset_mm
+                     + release_clearance_mm - tcp_to_finger_z_mm)
+        if bottom_offset_mm > 0.0:
+            detail = (f"물체높이보정 {bottom_offset_mm:.1f}mm + 여유 {release_clearance_mm:.1f}mm"
+                      f" - TCP↔손끝 {tcp_to_finger_z_mm:+.1f}mm")
+        else:
+            detail = f"여유 {release_clearance_mm:.1f}mm (물체높이 미상 — 고정 여유만 사용)"
         self.get_logger().info(
             f"place_into 시작 object={goal.object_id} bin={goal.bin_id} "
-            f"target=({bin_pose.get('x')}, {bin_pose.get('y')}, {bin_pose.get('z')})mm")
+            f"target=({bin_pose.get('x')}, {bin_pose.get('y')}, {bin_pose.get('z')})mm "
+            f"놓는높이={release_z:.1f}mm ({detail})")
         store.set_busy("place_into")
         started = time.monotonic()
 
@@ -168,7 +221,8 @@ class PlaceServer(Node):
                     self._publish_phase(goal_handle, phase)
                     time.sleep(FAKE_PHASE_DURATION_S)
             else:
-                if self._place_real(goal_handle, bin_pose) is None:
+                if self._place_real(goal_handle, bin_pose,
+                                    release_z - float(bin_pose.get("z", 0.0))) is None:
                     goal_handle.canceled()
                     return self._result(False, PlaceInto.Result.REASON_NO_CONTACT, started)
 
@@ -193,16 +247,19 @@ class PlaceServer(Node):
         feedback.phase = phase
         goal_handle.publish_feedback(feedback)
 
-    def _place_real(self, goal_handle, bin_pose: dict) -> bool | None:
+    def _place_real(self, goal_handle, bin_pose: dict,
+                    release_offset_mm: float) -> bool | None:
         """위치제어만으로 실물 place_into를 수행한다 (pick_server._pick_real과 같은 1단계
         제약 — compliance/visual_verification 없이 bins.yaml 좌표를 그대로 믿는다).
 
-        bin_pose 바로 위(approach_height_mm)에서 한 번 멈췄다, bin_pose.z + release_clearance_mm
+        bin_pose 바로 위(approach_height_mm)에서 한 번 멈췄다, bin_pose.z + release_offset_mm
         까지만 내려가 그리퍼를 열고 다시 들어올린다 — bin_pose 그 자체(z)까지 내려가지 않는다.
+        `release_offset_mm`은 "물체가 TCP 아래로 내려온 양 + 목적지별 안전 여유"의 합이다
+        (execute_callback 참조) — 호출부가 계산해 넘긴다.
         성공 True, 취소 None, 그 외 실패는 RuntimeError.
         """
         target_posx = dsr_motion.bin_pose_to_posx(bin_pose)
-        target_posx[2] += self._release_clearance_mm
+        target_posx[2] += release_offset_mm
         approach_posx = list(target_posx)
         approach_posx[2] += self._approach_height_mm
         target_xyz = target_posx[:3]

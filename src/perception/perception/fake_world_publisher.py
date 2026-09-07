@@ -62,6 +62,7 @@ def to_msg(fixture: dict) -> WorldState:
             z=float(item["position_base_mm"]["z"]),
         )
         obj.depth_valid_ratio = float(item.get("depth_valid_ratio", 0.0))
+        obj.height_mm = float(item.get("height_mm", 0.0))
         obj.graspable = bool(item.get("graspable", True))
         obj.not_graspable_reason = item.get("not_graspable_reason", "")
         obj.mass_g = float(item.get("mass_g") or 0.0)

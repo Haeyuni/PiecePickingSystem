@@ -122,6 +122,38 @@ async def _wait_for_fresh_observation(executor, timeout_s: float = 5.0) -> None:
         await asyncio.sleep(0.2)
 
 
+# "파지 후보가 없다"는 거부는 **그 순간의 관측 하나**로 정해진다. GraspNet은 프레임마다
+# 자세가 조금씩 달라서 접근각 필터(grasp_params.yaml의 approach_angle_*)를 넘겼다 못
+# 넘겼다 하고, 그래서 같은 물체가 한 프레임에서는 후보가 있고 다음 프레임에서는 없다.
+# 한 번 보고 포기하면 사람 입장에서는 "될 때도 있고 안 될 때도 있는" 것으로 보인다.
+# 새 관측을 몇 번 더 기다렸다 다시 물어본다 (관측 주기가 ~0.5초라 아래 값이면 약 1초).
+_GRASP_RETRY_ATTEMPTS = 2
+_GRASP_RETRY_REASON = "파지 후보가 없습니다"
+
+
+async def _plan_with_grasp_retry(trace_id: str, command_text: str, world_state: dict,
+                                 previous_failure, executor) -> dict:
+    """planner에 계획을 묻되, 파지 후보가 없어서 거부되면 새 관측으로 몇 번 더 시도한다.
+
+    다른 거부 사유(파지 불가 상태, 작업반경 초과, 물체가 목록에 없음 등)는 관측을 더
+    받는다고 달라지지 않으므로 그대로 돌려준다 — 무의미한 LLM 호출을 반복하지 않는다.
+    """
+    result = await planner_client.plan(trace_id, command_text, world_state, previous_failure)
+    for attempt in range(1, _GRASP_RETRY_ATTEMPTS + 1):
+        if result.get("validation_status") == "approved":
+            return result
+        if _GRASP_RETRY_REASON not in (result.get("validation_reason") or ""):
+            return result
+        logger.info("파지 후보 없음으로 거부 — 새 관측 대기 후 재시도 %d/%d (trace=%s): %s",
+                    attempt, _GRASP_RETRY_ATTEMPTS, trace_id, result.get("validation_reason"))
+        await _wait_for_fresh_observation(executor, timeout_s=1.0)
+        latest = executor.get_latest_world_state()
+        if latest is None:
+            return result
+        result = await planner_client.plan(trace_id, command_text, latest, previous_failure)
+    return result
+
+
 async def run_command(trace_id: str, command_text: str, executor) -> None:
     """명령 하나를 끝까지 처리한다. 백그라운드 태스크로 실행된다.
 
@@ -199,8 +231,8 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
                 return
 
         try:
-            result = await planner_client.plan(
-                trace_id, command_text, world_state, previous_failure,
+            result = await _plan_with_grasp_retry(
+                trace_id, command_text, world_state, previous_failure, executor,
             )
         except planner_client.PlannerUnavailable as e:
             logger.error("planner 도달 실패: %s", e)
@@ -322,11 +354,64 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
         previous_failure = failure
 
 
+def _object_bottom_offset_mm(world_state: dict, steps: list, index: int) -> float | None:
+    """place할 물체가 TCP보다 얼마나 아래로 내려와 있는지(mm). 못 구하면 None.
+
+    **왜 필요한가.** bins.yaml의 bin_pose는 **빈 그리퍼로** 티칭한 높이다. 물체를 든 채
+    그 높이까지 내려가면 물체가 바구니 바닥에 먼저 닿고, 로봇은 목표 z에 도달하지 못한
+    채 계속 밀어붙이다 안전모드로 들어간다(2026-09-06 실물: 목표 213.4mm인데 217.9mm에서
+    멈춘 뒤 알람 → heartbeat 유실 → 권한 회수). 예전에는 이걸 고정 여유
+    (skill_params.yaml의 release_clearance_mm)로 짐작했는데, 물체마다 높이가 달라
+    한 값으로는 맞출 수 없다 — 큰 물체엔 모자라고 작은 물체엔 과하다.
+
+    **계산.** perception이 물체 높이를 depth로 실측해 발행한다(DetectedObject.height_mm =
+    윗면 z - 지지면 z). 지지면 z = position_z - height_mm 이므로,
+        offset = 파지 z - 지지면 z = grasp_pose.z - position_z + height_mm
+    파지 z는 같은 물체의 **직전 pick 스텝**이 쓴 grasp_pose에서 가져온다 — planner가
+    place 스텝에는 파지 자세를 싣지 않으므로(schema.PlanStep) 여기서 되짚는다.
+
+    height_mm이 0(미상)이거나 pick 스텝을 못 찾으면 None을 돌려주고, control이 예전처럼
+    고정 여유만 쓰게 둔다 — 잘못된 값으로 더 깊이 내려가는 것보다 낫다.
+    """
+    step = steps[index]
+    object_id = step.get("object_id")
+    grasp_pose = None
+    for previous in reversed(steps[:index]):
+        if previous.get("skill") == "pick" and previous.get("object_id") == object_id:
+            grasp_pose = previous.get("grasp_pose")
+            break
+    if not grasp_pose:
+        return None
+    for obj in world_state.get("objects", []):
+        if obj.get("object_id") != object_id:
+            continue
+        height_mm = float(obj.get("height_mm") or 0.0)
+        position = obj.get("position_base_mm") or {}
+        if height_mm <= 0.0 or "z" not in position:
+            return None
+        grasp_z = ((grasp_pose.get("position") or {}).get("z")
+                   if isinstance(grasp_pose, dict) else None)
+        if grasp_z is None:
+            return None
+        offset = float(grasp_z) - float(position["z"]) + height_mm
+        # 음수는 물리적으로 말이 안 된다(물체 바닥이 TCP보다 위에 있다는 뜻).
+        # 측정이 튄 경우이므로 쓰지 않는다.
+        return offset if offset > 0.0 else None
+    return None
+
+
 async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | None:
     """스텝을 순서대로 실행한다. 실패하면 previous_failure 형태로 반환."""
     class_map = store.object_class_map(world_state)
 
-    for step in trace["steps"]:
+    for index, step in enumerate(trace["steps"]):
+        bottom_offset = (_object_bottom_offset_mm(world_state, trace["steps"], index)
+                         if step["skill"] == "place_into" else None)
+        if step["skill"] == "place_into":
+            logger.info("place_into 놓는 높이 계산 (trace=%s, object=%s): 물체 바닥 오프셋 %s",
+                        trace["trace_id"], step["object_id"],
+                        f"{bottom_offset:.1f}mm" if bottom_offset is not None
+                        else "미상 — control의 고정 여유 사용")
         goal = SkillGoal(
             trace_id=trace["trace_id"],
             request_id=step["request_id"],
@@ -335,6 +420,7 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             grasp_pose=step.get("grasp_pose"),
             gripper_width_mm=step.get("gripper_width_mm"),
             bin_id=step.get("bin_id"),
+            object_bottom_offset_mm=bottom_offset,
         )
 
         async def on_feedback(request_id, phase, _trace=trace):

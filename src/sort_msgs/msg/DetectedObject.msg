@@ -9,6 +9,17 @@ float32 confidence
 geometry_msgs/Point position_base_mm   # base 좌표계 3D 위치. 단위 mm (인터페이스_정의서 1.1절)
 
 float32 depth_valid_ratio      # 낮으면 투명/반사 의심 (8단계 확장에서 활용)
+
+# 물체가 자기 지지면(작업대 등) 위로 얼마나 솟아 있는지. depth로 실측한다 —
+# position_base_mm.z(마스크 안쪽 median depth = 보이는 윗면)에서 마스크 바깥 링의
+# 지지면 z를 뺀 값이다(perception/mask_utils.support_3d).
+# 0이면 미상(링에 유효 depth가 없었거나 TCP 자세를 못 받은 경우).
+#
+# **쓰임**: place_into가 물체를 바구니에 놓을 z를 정할 때 쓴다. bin_pose는 빈 그리퍼로
+# 티칭한 높이라, 큰 물체를 든 채 그 높이까지 내려가면 물체가 바닥에 먼저 닿아 로봇이
+# 안전모드로 들어간다(2026-09-06 실물). 지지면 z = position_base_mm.z - height_mm 이므로
+# 이 둘과 파지 z가 있으면 "물체가 TCP보다 얼마나 아래로 내려와 있는지"가 나온다.
+float32 height_mm
 bool graspable
 string not_graspable_reason    # graspable=false일 때만 값 있음, 아니면 빈 문자열
 

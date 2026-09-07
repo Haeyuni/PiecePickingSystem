@@ -232,7 +232,7 @@ class PerceptionNode(Node):
 
             if result.masks is None:
                 detections.append(self._detection(class_name, confidence, None, None, 0.0,
-                                                  REASON_NO_MASK))
+                                                  REASON_NO_MASK, 0.0))
                 continue
 
             mask = mask_utils.resize_mask(
@@ -243,9 +243,22 @@ class PerceptionNode(Node):
             if point_cam is not None and base2gripper is not None:
                 position = geometry.base_from_camera(point_cam, base2gripper, self._gripper2camera)
 
+            # 물체가 지지면 위로 얼마나 솟아 있는지. place_into가 놓는 높이를 정하는 데
+            # 쓴다(DetectedObject.msg의 height_mm 주석 참조). 마스크 바깥 링에서 지지면
+            # depth를 읽어(support_3d) 같은 (u,v)의 물체 점과 base z를 비교한다 — 두 점이
+            # 같은 픽셀이라 차이가 순수한 높이차가 된다. base 변환이 필요하므로 TCP 자세가
+            # 없으면 잴 수 없다(0=미상).
+            height_mm = 0.0
+            if position is not None:
+                support_cam = mask_utils.support_3d(mask, depth, self._intrinsics)
+                if support_cam is not None:
+                    support = geometry.base_from_camera(
+                        support_cam, base2gripper, self._gripper2camera)
+                    height_mm = max(0.0, float(position[2]) - float(support[2]))
+
             reason = self._not_graspable_reason(mask, point_cam, valid_ratio, position)
             detections.append(self._detection(class_name, confidence, position, mask,
-                                              valid_ratio, reason))
+                                              valid_ratio, reason, height_mm))
             self._maybe_save_unknown_crop(class_name, color, mask)
 
         return detections
@@ -258,7 +271,8 @@ class PerceptionNode(Node):
         return ""
 
     @staticmethod
-    def _detection(class_name, confidence, position, mask, valid_ratio, reason) -> dict:
+    def _detection(class_name, confidence, position, mask, valid_ratio, reason,
+                   height_mm) -> dict:
         return {
             "class_name": class_name,
             "confidence": confidence,
@@ -266,6 +280,7 @@ class PerceptionNode(Node):
             "mask": mask,
             "depth_valid_ratio": valid_ratio,
             "not_graspable_reason": reason,
+            "height_mm": height_mm,
         }
 
     # --- 발행 ---------------------------------------------------------------
@@ -298,6 +313,7 @@ class PerceptionNode(Node):
             position = detection["position"] or (0.0, 0.0, 0.0)
             obj.position_base_mm = Point(x=position[0], y=position[1], z=position[2])
             obj.depth_valid_ratio = detection["depth_valid_ratio"]
+            obj.height_mm = float(detection["height_mm"])
             obj.graspable = graspable
             obj.not_graspable_reason = detection["not_graspable_reason"]
             obj.mass_g = attributes["mass_g"]
