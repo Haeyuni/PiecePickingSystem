@@ -25,6 +25,9 @@ export interface DetectedObject {
 export interface WorldState {
   objects: DetectedObject[]
   needs_reobserve: string[]
+  // 온디맨드 전환(D-5) 이후 화면이 실제로 쓰는 것은 이 값뿐이다 — 탐지 물체 목록은
+  // 더 이상 렌더링하지 않고, "마지막 관측이 언제였나"만 관측 패널에 보여준다.
+  stamp: { sec: number; nanosec: number }
 }
 
 export interface TraceStep {

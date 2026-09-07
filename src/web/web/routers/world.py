@@ -1,8 +1,10 @@
 """GET /api/world-state — 최신 월드 상태 (웹_인터페이스_정의서.md 2.7절).
 
-화면정의서 2.2.5절의 "탐지 물체 목록"이 최초 렌더 시 채워지려면 필요하다. WebSocket은
-변화가 있을 때만 밀어주므로, 새로고침 직후처럼 아무 이벤트도 없는 순간에 화면이 비어 보인다.
-`GET /api/traces`가 실행 상태의 폴백인 것과 같은 역할이다.
+화면정의서 2.2.5절의 "탐지 물체 목록"이 최초 렌더 시 채워지려면 필요했다 — 그 목록은
+온디맨드 전환(docs/on-demand-perception.md D-5)으로 화면에서 빠졌지만, 이 엔드포인트는
+그대로 둔다. 프론트가 이제 여기서 쓰는 것은 `stamp`뿐이다 — 관측 패널(CameraViews)의
+"n초 전 관측" 표시가 WebSocket 재연결·최초 진입 시에도 바로 채워지려면 필요하다
+(`GET /api/traces`가 실행 상태의 폴백인 것과 같은 역할).
 """
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse

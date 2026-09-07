@@ -42,6 +42,15 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB:-piece_picking}
       # *.pt는 이미지에 굽지 않는다(.gitignore) — 아래 볼륨이 가리키는 호스트 파일을 그대로 쓴다.
       PERCEPTION_MODEL: /models/best.pt
+      # detector=vlm_sam일 때 쓰는 SAM 가중치(MobileSAM, ~40MB). 같은 볼륨에서 온다.
+      SAM_MODEL: /models/mobile_sam.pt
+      # VLM 라벨링을 planner에 물어본다(API 키가 거기에만 있다). host 네트워크라 서비스 이름
+      # DNS가 없어 게시된 포트로 부른다 — web_ros/DATABASE_URL과 같은 이유.
+      PLANNER_URL: http://localhost:8100
+      # 검출기 선택 (perception_launch.py가 이 값을 읽어 detector launch 인자의 기본값으로
+      # 쓴다). 기본은 yolo다 — vlm_sam은 하드웨어에서 아직 실측되지 않았다
+      # (docs/on-demand-perception.md 6절). 바꾸려면 여기 값을 vlm_sam으로.
+      PERCEPTION_DETECTOR: ${PERCEPTION_DETECTOR:-yolo}
     volumes:
       - ${CYCLONEDDS_CONFIG_DIR:-${HOME}/.config/cyclonedds}:/cyclonedds:ro
       # dsr_msgs2(get_current_posx 서비스 타입)의 출처. src/perception/docker-entrypoint.sh 참조.
@@ -51,6 +60,9 @@ services:
       # 유일하게 쓰기가 필요한 경로다 — 그 아래만 별도로 rw 마운트한다. /data 전체를
       # rw로 열면 캘리브레이션 결과 같은 입력을 실수로 덮어쓸 수 있어 그건 막아 둔다.
       - ./data/unknown_crops:/data/unknown_crops:rw
+      # 관측 사진 보관 (D-6, node.py:_save_observation_image). 같은 이유로 /data 전체가
+      # 아니라 이 경로만 rw로 연다.
+      - ./data/observations:/data/observations:rw
       - ./models:/models:ro
     deploy:
       resources:

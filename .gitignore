@@ -11,6 +11,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
+*.tsbuildinfo
 downloads/
 eggs/
 .eggs/
@@ -247,6 +248,9 @@ data/samples/*
 data/unknown_crops/
 data/scenes/*
 !data/scenes/.gitkeep
+# 관측 사진(D-6) — 용량이 크고 재현 가능한 산출물이라 git으로 관리하지 않는다.
+data/observations/*
+!data/observations/.gitkeep
 
 # web/frontend 빌드 산출물
 web/frontend/node_modules/

@@ -8,6 +8,10 @@ opencv-python==5.0.0.93
 numpy==2.5.2
 PyYAML==6.0.1
 
+# detector=vlm_sam이 planner의 /internal/label-marks를 부른다. web의 planner_client와 같은
+# 라이브러리를 쓴다 — 여기서는 노드 콜백 안이라 동기 호출(httpx.post)이다.
+httpx
+
 # DB(object_attributes) 조회는 선택 사항이다 — 없으면 attribute_db.py가 objects.yaml
 # seed로 대신하고 경고만 남긴다(코드 참조). 버전을 못 박을 근거(host 실측)가 없어 미고정.
 psycopg[binary]

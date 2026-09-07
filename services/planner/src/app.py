@@ -2,6 +2,12 @@
 
 B0: 마이그레이션 적용 + objects.yaml 시드 + /health
 B1: /internal/plan (계획 생성 → 그라운딩 → 검증 → task_sequences 기록)
+B?: /internal/label-marks (SAM이 번호를 그린 프레임 → 번호별 클래스 판단)
+
+**VLM 호출이 여기 있는 이유**: planner는 ROS2를 모르는 서비스이고 OPENAI_API_KEY도 여기에만
+있다. perception이 직접 부르면 ROS 컨테이너에 API 키와 인터넷 의존이 들어간다. SAM은 로컬
+GPU라 perception에 두고, 번호를 그린 이미지만 여기로 보내 이름을 받아 간다
+(docs/on-demand-perception.md 4절).
 """
 import json
 import logging
@@ -9,10 +15,10 @@ import uuid
 from contextlib import asynccontextmanager
 
 import psycopg
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from . import db, grounding, llm_client, seed, validator
+from . import db, grounding, llm_client, seed, validator, vlm_detect
 from .schema import SCHEMA_VERSION, PlanRequest, PlanResponse
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -132,6 +138,57 @@ def internal_plan(req: PlanRequest):
         trace_id=req.trace_id, sequence_id=sequence_id,
         validation_status="approved", steps=steps,
     )
+
+
+def _error(status: int, code: str, message: str, trace_id: str = "") -> JSONResponse:
+    """웹_인터페이스_정의서 6절의 공통 에러 형식."""
+    body: dict = {"schema_version": SCHEMA_VERSION,
+                  "error": {"code": code, "message": message}}
+    if trace_id:
+        body["trace_id"] = trace_id
+    return JSONResponse(status_code=status, content=body)
+
+
+@app.post("/internal/label-marks")
+async def internal_label_marks(
+    image: UploadFile = File(..., description="SAM 마스크마다 번호를 그려 넣은 프레임"),
+    mark_ids: str = Form(..., description="이미지에 그려진 번호. 쉼표로 구분 (예: 1,2,3)"),
+    trace_id: str = Form(""),
+    detail: str = Form("high"),
+):
+    """번호가 그려진 프레임 → 번호별 "무엇인가" 판단 (좌표는 묻지 않는다).
+
+    **지시(명령문)를 받지 않는다.** 인지가 지시에 끌려가기 때문이다 — 실측에서 "우산
+    왼쪽으로"를 함께 주자 배경 조각을 umbrella라고 답했다(vlm_detect.label_marks 주석).
+    어느 물체를 옮길지는 이 결과를 텍스트로 받는 /internal/plan이 정한다.
+    """
+    try:
+        ids = [int(v) for v in mark_ids.split(",") if v.strip()]
+    except ValueError:
+        return _error(400, "BAD_MARK_IDS", f"mark_ids를 정수 목록으로 읽을 수 없습니다: {mark_ids!r}",
+                      trace_id)
+    if not ids:
+        return _error(400, "BAD_MARK_IDS", "mark_ids가 비어 있습니다", trace_id)
+
+    data = await image.read()
+    if not data:
+        return _error(400, "EMPTY_IMAGE", "이미지 본문이 비어 있습니다", trace_id)
+
+    data_url = vlm_detect.encode_bytes(data, image.content_type or "image/png")
+    try:
+        scene = vlm_detect.label_marks(data_url, ids, detail=detail)
+    except Exception as e:
+        logger.exception("VLM 라벨링 실패 (trace_id=%s)", trace_id)
+        # 하위 서비스(VLM API) 장애는 503 — /internal/plan의 LLM 장애와 같은 판단이다
+        return _error(503, "VLM_UNAVAILABLE", f"라벨링에 실패했습니다: {e}", trace_id)
+
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "trace_id": trace_id,
+        "model": vlm_detect.model_name(),
+        "prompt_version": vlm_detect.MARKS_PROMPT_VERSION,
+        "marks": [m.model_dump() for m in scene.marks],
+    }
 
 
 def main():

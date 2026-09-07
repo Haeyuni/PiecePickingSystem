@@ -73,6 +73,36 @@ def base_from_camera(point_cam_mm, base2gripper: np.ndarray,
     return tuple(float(v) for v in base_point[:3])
 
 
+def camera_from_base(point_base_mm, base2gripper: np.ndarray,
+                     gripper2camera: np.ndarray) -> tuple[float, float, float]:
+    """base 좌표계 점(mm) → 카메라 좌표계 점(mm). `base_from_camera`의 역방향.
+
+    **어디에 쓰나**: 직전 관측에서 알아낸 물체의 base 좌표를 지금 카메라가 어디로 보는지
+    되돌려, SAM에 "여기를 잡아라"라고 줄 프롬프트를 만든다(온디맨드 재관측, D-1).
+    eye-in-hand라 카메라가 움직이므로 이 계산 없이는 직전 마스크가 지금 프레임의 어느
+    픽셀인지 알 수 없다.
+
+    `base2gripper`는 **그때가 아니라 지금**의 TCP 자세로 만든 것이어야 한다 — 그것이
+    시점 변화를 흡수하는 지점이다.
+    """
+    homogeneous = np.append(np.asarray(point_base_mm, dtype=float), 1.0)
+    camera_point = np.linalg.inv(base2gripper @ gripper2camera) @ homogeneous
+    return tuple(float(v) for v in camera_point[:3])
+
+
+def project_to_pixel(point_cam_mm, intrinsics: dict) -> tuple[float, float] | None:
+    """카메라 좌표계 점(mm) → 픽셀 (u, v). 카메라 뒤에 있으면 None.
+
+    `mask_utils.mask_3d`가 하는 역투영(u = cx + fx*x/z)의 정방향이다. z<=0을 걸러 내는 것이
+    중요하다 — 그냥 나누면 뒤에 있는 점이 화면 안쪽 좌표로 접혀 들어와 엉뚱한 곳을 가리킨다.
+    """
+    x, y, z = (float(v) for v in point_cam_mm)
+    if z <= 0.0:
+        return None
+    return (intrinsics["cx"] + intrinsics["fx"] * x / z,
+            intrinsics["cy"] + intrinsics["fy"] * y / z)
+
+
 def quaternion_to_matrix(qx: float, qy: float, qz: float, qw: float) -> np.ndarray:
     """단위 쿼터니언(x,y,z,w) → 3x3 회전행렬. `posx_to_matrix`의 역방향 변환에 쓴다
     (control이 grasp_pose/bin_pose를 dsr_msgs2 movel의 ZYZ 오일러로 보내야 할 때,

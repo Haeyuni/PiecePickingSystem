@@ -1,0 +1,43 @@
+# 온디맨드 관측. web이 명령 실행 흐름 중에 perception을 부른다
+# (docs/on-demand-perception.md D-4). 서비스가 아니라 액션인 이유는 Home.action과 같다 —
+# SAM+VLM 왕복이 수 초~10초대라 정지(웹_인터페이스_정의서 2.6절)로 취소할 수 있어야 한다.
+#
+# 두 가지 관측 모드가 있다(docs/on-demand-perception.md 2절):
+#   MODE_FULL     장면 전체를 SAM everything으로 조각내고 VLM에 물어 "무엇이 있는가"를 새로 안다.
+#                 명령 접수 직후, 또는 재계획 전 딱 한 번만 쓴다 — VLM 왕복이 여기 한 번뿐이다.
+#   MODE_REPROMPT 직전 관측이 남긴 물체들이 지금 프레임에 아직 있는지만 확인한다. VLM을
+#                 부르지 않는다(D-1) — pick/place_into 스텝 사이마다 이걸 쓴다.
+#
+# trace_id는 web이 명령 접수 시 발급한 것을 그대로 싣는다 — perception이 예전처럼
+# 관측 일련번호(obs-NNNNNN)를 지어내는 이유가 이제 없다(node.py의 옛 주석 참조).
+
+# --- Goal ---
+string schema_version
+string trace_id
+string request_id
+
+uint8 MODE_FULL=0
+uint8 MODE_REPROMPT=1
+uint8 mode
+---
+# --- Result ---
+bool success
+
+string REASON_NONE=none
+string REASON_NO_FRAME=no_frame
+string REASON_NO_ROBOT_POSE=no_robot_pose
+string REASON_NOTHING_TO_REPROMPT=nothing_to_reprompt
+string REASON_VLM_UNAVAILABLE=vlm_unavailable
+string failure_reason
+
+int32 object_count
+builtin_interfaces/Time stamp
+float32 cycle_time_ms
+---
+# --- Feedback ---
+string PHASE_CAPTURING=capturing
+string PHASE_SEGMENTING=segmenting
+string PHASE_LABELING=labeling
+string PHASE_RECAPTURING=recapturing
+string PHASE_PUBLISHING=publishing
+string phase

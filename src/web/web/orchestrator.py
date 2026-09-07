@@ -32,7 +32,21 @@ MAX_PLACE_RETRIES = 2
 # world_state가 이보다 오래되면 계획에 쓰지 않고 새 관측을 한 번 기다린다 — perception이
 # 멈췄거나(카메라 문제) 팔이 시야를 가린 채로 오래된 스냅샷을 그대로 계획에 쓰는 사고를
 # 막는다. 매직넘버로 박아두지 않고 환경변수로 둔다(2026-09-05, WorldState 최신성 점검).
+#
+# 온디맨드 전환(docs/on-demand-perception.md) 이후에도 이 값 자체는 그대로 둔다 — D-8
+# 덕분에 발행되는 stamp는 항상 재촬영 직전 시각이라 age_s는 성공한 관측이라면 여전히
+# 거의 0이다. 실제로 늘어난 것은 "새 관측이 오기까지" 기다리는 시간 쪽이고, 그건 아래
+# OBSERVE_*_TIMEOUT_S가 담당한다.
 MAX_WORLD_STATE_AGE_S = float(os.environ.get("MAX_WORLD_STATE_AGE_S", "5.0"))
+
+# 온디맨드 관측 타임아웃. GPU 실측이 아직 없다(docs/on-demand-perception.md 6절 미실측
+# 항목) — CPU 실측(vlm_sam_pipeline.md)은 MODE_FULL(everything+VLM 라벨링+D-8 재촬영)이
+# 26~40초, MODE_REPROMPT(재투영 박스로 SAM 1패스)가 0.2초였다. GPU에서 다시 재면 낮춰도
+# 된다. 관측 자체(observe 액션)와 grasp가 뒤이어 /world_state를 내는 시간은 서로 다른
+# 지연이라 따로 둔다.
+OBSERVE_FULL_TIMEOUT_S = float(os.environ.get("OBSERVE_FULL_TIMEOUT_S", "60.0"))
+OBSERVE_REPROMPT_TIMEOUT_S = float(os.environ.get("OBSERVE_REPROMPT_TIMEOUT_S", "10.0"))
+WORLD_STATE_RELAY_TIMEOUT_S = float(os.environ.get("WORLD_STATE_RELAY_TIMEOUT_S", "3.0"))
 
 # trace_id → 스냅샷. WebSocket 재연결 시 GET /api/traces/{trace_id}로 돌려줄 현재 상태.
 traces: dict[str, dict] = {}
@@ -104,22 +118,52 @@ def _world_state_age_s(world_state: dict | None) -> float | None:
     return time.time() - (stamp["sec"] + stamp["nanosec"] * 1e-9)
 
 
-async def _wait_for_fresh_observation(executor, timeout_s: float = 5.0) -> None:
-    """스탬프가 바뀐 새 /world_state가 들어올 때까지 기다린다(최선을 다해서, 실패해도 넘어간다).
+async def _wait_for_fresh_observation(executor, trace_id: str, mode: str = "full",
+                                      timeout_s: float | None = None) -> bool:
+    """관측을 **트리거하고**, 그 결과가 새 /world_state로 들어올 때까지 기다린다.
+
+    온디맨드 전환 전에는 이 함수가 순수 폴링이었다 — perception이 주기 발행 중이니
+    가만히 기다리기만 하면 됐다. 이제 perception은 명령을 받은 순간에만 돌므로
+    (docs/on-demand-perception.md), 여기서 직접 `executor.observe()`를 불러야 애초에
+    새 관측이 생긴다. 안 그러면 첫 명령부터 world_state가 영영 None이다.
 
     home 이동 직후 곧바로 `get_latest_world_state()`를 부르면 팔이 아직 시야를 가리고
     있거나 이동 전에 찍힌 오래된 스냅샷을 돌려줄 수 있다 — 재계획이 그 상태를 근거로
     LLM에 다시 물으면 방금 건드린 물체가 아직도 "안 보이는" 것으로 나온다.
+
+    반환값(성공 여부)은 호출자가 원하면 보되, 강제하지 않는다 — 실패해도 그다음의
+    `get_latest_world_state()`/신선도 검사가 알아서 걸러 사용자에게 알린다(기존 "최선을
+    다해서, 실패해도 넘어간다" 원칙을 유지한다).
     """
+    if timeout_s is None:
+        timeout_s = OBSERVE_FULL_TIMEOUT_S if mode == "full" else OBSERVE_REPROMPT_TIMEOUT_S
+
     before = executor.get_latest_world_state()
     before_stamp = (before or {}).get("stamp")
-    deadline = asyncio.get_event_loop().time() + timeout_s
+
+    try:
+        observed = await asyncio.wait_for(executor.observe(trace_id, mode), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        logger.warning("관측 트리거 시간 초과 (%.0fs, trace=%s, mode=%s)",
+                       timeout_s, trace_id, mode)
+        return False
+    if observed is not None and not observed.get("success", True):
+        logger.warning("관측 실패 (trace=%s, mode=%s): %s",
+                       trace_id, mode, observed.get("failure_reason"))
+        return False
+
+    # 관측 액션이 성공했으면 grasp가 그 뒤를 이어 /world_state를 낸다 — perception→grasp
+    # 처리 지연분만 더 기다리면 된다(관측 자체의 지연은 이미 위에서 다 기다렸다).
+    deadline = asyncio.get_event_loop().time() + WORLD_STATE_RELAY_TIMEOUT_S
     while asyncio.get_event_loop().time() < deadline:
         current = executor.get_latest_world_state()
         stamp = (current or {}).get("stamp")
         if stamp and stamp != before_stamp:
-            return
-        await asyncio.sleep(0.2)
+            return True
+        await asyncio.sleep(0.1)
+    logger.warning("observe는 성공했지만 /world_state가 갱신되지 않았다 (trace=%s) — "
+                   "grasp 상태를 확인한다", trace_id)
+    return False
 
 
 # "파지 후보가 없다"는 거부는 **그 순간의 관측 하나**로 정해진다. GraspNet은 프레임마다
@@ -146,7 +190,9 @@ async def _plan_with_grasp_retry(trace_id: str, command_text: str, world_state: 
             return result
         logger.info("파지 후보 없음으로 거부 — 새 관측 대기 후 재시도 %d/%d (trace=%s): %s",
                     attempt, _GRASP_RETRY_ATTEMPTS, trace_id, result.get("validation_reason"))
-        await _wait_for_fresh_observation(executor, timeout_s=1.0)
+        # VLM은 다시 안 부른다 — 물체가 무엇인지는 이미 알고, GraspNet이 프레임마다
+        # 자세가 조금씩 달라 후보를 놓쳤을 뿐이다(위 주석). reprompt로 depth만 새로 잰다.
+        await _wait_for_fresh_observation(executor, trace_id, mode="reprompt")
         latest = executor.get_latest_world_state()
         if latest is None:
             return result
@@ -192,7 +238,12 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
             except Exception:
                 logger.exception("재계획 전 home 이동 실패 (trace=%s) — 그래도 재계획은 시도한다",
                                  trace_id)
-            await _wait_for_fresh_observation(executor)
+
+        # 온디맨드 전환: attempt==0(최초 시도)도 이 트리거가 없으면 world_state가 영영
+        # None이다 — perception이 더는 알아서 발행하지 않는다(docs/on-demand-perception.md).
+        # 매 시도마다 전체 스캔(full)을 다시 한다 — 재계획은 장면이 통째로 달라졌을 수
+        # 있다고 보는 경로이므로 라벨을 재사용하는 reprompt로는 부족하다.
+        await _wait_for_fresh_observation(executor, trace_id, mode="full")
 
         world_state = executor.get_latest_world_state()
         if world_state is None:
@@ -215,7 +266,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
             # home 복귀와 별개다: 여기는 애초에 최초 관측이 오래된 경우도 잡는다.
             logger.warning("world_state가 오래됨 (%.1fs > %.1fs, trace=%s) — 새 관측 대기",
                             age_s, MAX_WORLD_STATE_AGE_S, trace_id)
-            await _wait_for_fresh_observation(executor)
+            await _wait_for_fresh_observation(executor, trace_id, mode="full")
             world_state = executor.get_latest_world_state()
             age_s = _world_state_age_s(world_state)
             trace["world_state_age_s"] = age_s
@@ -500,6 +551,26 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             except Exception:
                 logger.exception("place_into 후 home 이동 실패 (trace=%s) — 계속 진행한다",
                                  trace["trace_id"])
+
+            # 온디맨드 관측(D-1): VLM은 다시 안 부른다 — 방금 옮긴 물체를 지웠다는 것과
+            # 아직 안 옮긴 물체들이 잘 있다는 것을 재투영 박스로만 확인한다.
+            #
+            # **의도적으로 이 결과로 위의 `world_state`/`class_map`을 바꾸지 않는다.**
+            # 처음엔 여기서 world_state를 갈아끼우면 "뒤 스텝이 옛 좌표로 돈다"는 문제가
+            # 풀릴 줄 알았는데(계획 초안), 실제로는 그렇지 않다 — 이 함수의 각 스텝이 쓰는
+            # grasp_pose는 이미 planner 응답에 다 정해져서 trace["steps"]에 박혀 있고
+            # (`_object_bottom_offset_mm`도 world_state가 아니라 trace["steps"]의 직전
+            # pick 기록에서 파지 z를 가져온다), 이 루프 안에서 world_state를 다시 읽어도
+            # 그 좌표가 바뀌지 않는다. 오히려 방금 집은 물체는 이제 테이블 위에 없으므로
+            # world_state를 갈아끼우면 `_object_bottom_offset_mm`이 그 물체의 height_mm/
+            # position을 못 찾아 지금보다 더 자주 None(고정 여유로 후퇴)이 된다 — 있던
+            # 정보를 잃는 방향이라 갈아끼우지 않는다. 여기서 트리거하는 이유는 순전히
+            # 화면의 관측 이미지(D-5)와 executor.get_latest_world_state()를 최신으로
+            # 유지하기 위해서다. 다음 명령이 쓸 진짜 새 전체 스캔은 `_run_command_body`
+            # 진입 시(위 246행)의 mode="full" 트리거가 담당한다.
+            await _wait_for_fresh_observation(
+                executor, trace["trace_id"], mode="reprompt",
+                timeout_s=OBSERVE_REPROMPT_TIMEOUT_S)
 
     return None
 
