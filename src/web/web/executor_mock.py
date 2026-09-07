@@ -38,6 +38,10 @@ class MockExecutor:
         self._current_request_id: str | None = None
         self._cancelled: set[str] = set()
         self._on_event: Callable[[dict], Awaitable[None]] | None = None
+        # observe()가 찍는다. 픽스처 파일 자체는 고정 스냅샷이라 stamp가 안 바뀌므로(예:
+        # world_state_normal.json), 이게 없으면 orchestrator._wait_for_fresh_observation의
+        # "stamp가 바뀔 때까지 기다린다"가 매 명령마다 타임아웃까지 통째로 날아간다.
+        self._stamp_override: dict | None = None
 
     # --- 수명주기 -----------------------------------------------------------
 
@@ -54,7 +58,10 @@ class MockExecutor:
         if not path.exists():
             logger.error("픽스처를 찾을 수 없습니다: %s", path)
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if self._stamp_override is not None:
+            state["stamp"] = self._stamp_override
+        return state
 
     def use_fixture(self, name: str) -> None:
         """개발 중 시나리오 전환용 (mock 전용 — 실물 어댑터에는 없는 기능)."""
@@ -77,6 +84,19 @@ class MockExecutor:
 
     def latest_depth_jpeg(self) -> bytes | None:
         return None
+
+    async def observe(self, trace_id: str, mode: str = "full") -> dict | None:
+        """SAM·VLM 없이 신선도만 흉내 낸다 — 픽스처 내용(물체 목록)은 그대로 두고
+        stamp만 지금 시각으로 찍는다. orchestrator는 "새 관측이 왔는가"만 보므로 이걸로
+        충분하고, 실물처럼 초 단위로 기다리게 하면 mock의 존재 이유(로봇·GPU 없이 빠르게
+        확인)가 없어진다."""
+        now = time.time()
+        self._stamp_override = {"sec": int(now), "nanosec": int((now % 1) * 1e9)}
+        world = self.get_latest_world_state()
+        object_count = len((world or {}).get("objects", []))
+        logger.info("mock 관측 트리거 (mode=%s, trace=%s) — 물체 %d개", mode, trace_id, object_count)
+        return {"success": True, "failure_reason": "none", "object_count": object_count,
+               "cycle_time_ms": 0.0, "cancelled": False}
 
     async def _emit_state(self) -> None:
         if self._on_event:

@@ -23,7 +23,7 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 
-from sort_msgs.action import Home, Pick, PlaceInto
+from sort_msgs.action import Home, Observe, Pick, PlaceInto
 from sort_msgs.msg import GraspCandidate, RobotState, SafetyEvent, WorldState
 
 from .executor import SkillGoal, SkillResult
@@ -200,6 +200,8 @@ class _BridgeNode(Node):
         self.pick_client = ActionClient(self, Pick, "pick")
         self.place_client = ActionClient(self, PlaceInto, "place_into")
         self.home_client = ActionClient(self, Home, "home")
+        # perception이 명령을 받은 순간에만 도는 온디맨드 관측 (docs/on-demand-perception.md)
+        self.observe_client = ActionClient(self, Observe, "observe")
 
     def _on_world_state(self, msg: WorldState) -> None:
         """최신값을 갱신하고 그대로 브라우저로 밀어준다.
@@ -332,14 +334,52 @@ class RosExecutor:
         if self._node:
             self._node.on_event = bridge
 
-    async def _send(self, client: ActionClient, goal_msg, request_id: str,
-                    on_feedback) -> SkillResult:
+    async def observe(self, trace_id: str, mode: str = "full") -> dict | None:
+        """온디맨드 관측 트리거 (executor.Executor.observe, docs/on-demand-perception.md).
+
+        Home과 같은 이유로 액션이다 — SAM+VLM 왕복이 수 초~10초대라 Stop으로 취소할 수
+        있어야 한다. `_send_goal`을 그대로 타므로 `stop()`이 이 goal도 취소한다.
+        """
+        msg = Observe.Goal()
+        msg.schema_version = SCHEMA_VERSION
+        msg.trace_id = trace_id
+        msg.request_id = f"rq-observe-{uuid.uuid4().hex[:8]}"
+        msg.mode = (Observe.Goal.MODE_REPROMPT if mode == "reprompt"
+                   else Observe.Goal.MODE_FULL)
+
+        async def _ignore_feedback(_request_id: str, _phase: str) -> None:
+            """관측 진행률(CAPTURING/SEGMENTING/...)은 아직 화면에 안 낸다 — pick/place의
+            trace 기반 진행률과 형태가 달라 별도 이벤트가 필요하면 그때 잇는다."""
+
+        sent = await self._send_goal(
+            self._node.observe_client, msg, msg.request_id, _ignore_feedback)
+        if sent is None:
+            return None
+        result, cancelled, elapsed_ms = sent
+        return {
+            "success": result.success,
+            "failure_reason": result.failure_reason,
+            "object_count": result.object_count,
+            "cycle_time_ms": result.cycle_time_ms or elapsed_ms,
+            "cancelled": cancelled,
+        }
+
+    async def _send_goal(self, client: ActionClient, goal_msg, request_id: str,
+                         on_feedback) -> tuple[object, bool, float] | None:
+        """goal을 보내고 완료까지 기다린다. 반환은 (result, cancelled, elapsed_ms) 또는
+        서버에 닿지 못했거나 거절됐으면 None — 실패 사유는 호출자가 정한다(액션마다
+        기본 사유가 다르다: Pick/PlaceInto/Observe는 각자의 REASON_* 상수를 쓴다).
+
+        Pick/PlaceInto/Home/Observe가 전부 이 경로를 지난다 — `stop()`이 취소해야 할
+        `_active_goal_handle`을 등록하는 곳이 여기 한 곳이라야 어떤 액션이 진행 중이든
+        Stop이 먹힌다.
+        """
         started = time.monotonic()
         loop = asyncio.get_running_loop()
 
         if not client.wait_for_server(timeout_sec=5.0):
             logger.error("액션 서버에 연결하지 못했습니다 (%s)", request_id)
-            return SkillResult(success=False, failure_reason="unreachable")
+            return None
 
         def feedback_cb(feedback):
             phase = feedback.feedback.phase
@@ -349,7 +389,7 @@ class RosExecutor:
         goal_handle = await _await_ros_future(send_future)
 
         if not goal_handle.accepted:
-            return SkillResult(success=False, failure_reason="unreachable")
+            return None
 
         self._active_goal_handle = goal_handle
         self._active_request_id = request_id
@@ -358,12 +398,19 @@ class RosExecutor:
         finally:
             self._active_goal_handle = None
             self._active_request_id = None
-        result = response.result
 
         # goal.status(GoalStatus)를 봐야 "정말 취소됐는지"를 안다 — result.success만 보면
         # 취소도 일반 실패(success=False)와 구분이 안 돼서, orchestrator가 Stop 이후에도
         # 같은 물체를 다시 계획해 재시도하는 사고가 있었다(2026-09-05 실물 확인).
         cancelled = response.status == GoalStatus.STATUS_CANCELED
+        return response.result, cancelled, (time.monotonic() - started) * 1000
+
+    async def _send(self, client: ActionClient, goal_msg, request_id: str,
+                    on_feedback) -> SkillResult:
+        sent = await self._send_goal(client, goal_msg, request_id, on_feedback)
+        if sent is None:
+            return SkillResult(success=False, failure_reason="unreachable")
+        result, cancelled, elapsed_ms = sent
 
         # 액션마다 Result 필드가 다르다 (Home에는 재시도·토크 개념이 없다).
         # 공통 필드만 직접 읽고 나머지는 getattr로 낮춘다.
@@ -371,7 +418,7 @@ class RosExecutor:
             success=result.success,
             failure_reason=result.failure_reason,
             retries_used=getattr(result, "retries_used", 0),
-            cycle_time_ms=result.cycle_time_ms or (time.monotonic() - started) * 1000,
+            cycle_time_ms=result.cycle_time_ms or elapsed_ms,
             visual_verification_passed=getattr(result, "visual_verification_passed", None),
             torque_trace=list(getattr(result, "torque_trace_summary", []) or []),
             # pick만 채운다 — Home/PlaceInto.Result에는 없는 필드다.

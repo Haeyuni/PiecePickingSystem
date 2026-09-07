@@ -72,14 +72,33 @@ class Executor(Protocol):
         """최신 RobotState. 최소한 mode를 포함한다 (2.1절 busy 차단 판단에 쓰인다)."""
 
     def latest_color_jpeg(self) -> bytes | None:
-        """카메라 원본 스트림의 최근 프레임(JPEG, 화면정의서 2.2.4절 — 마스크 오버레이 없음).
-        아직 못 받았거나(mock/카메라 미연결) 스트림 자체가 없으면 None."""
+        """"카메라 뷰"의 최근 프레임(JPEG). **원본 RGB가 아니라 grasp의 관측 오버레이다**
+        (마스크 윤곽 + 파지 후보 그립 모양) — 화면정의서 2.2.4절 원안(원본만, 오버레이
+        없음)은 이후 사용자 요청으로 뒤집혔다(ros_bridge.py의 `_BridgeNode` 주석 참조,
+        D-5). 아직 못 받았거나(mock/카메라 미연결) 스트림 자체가 없으면 None."""
 
     def latest_depth_jpeg(self) -> bytes | None:
         """뎁스 맵을 컬러맵으로 시각화한 최근 프레임(JPEG). 없으면 None."""
 
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
         """robot_state / safety_event 변화를 web으로 밀어 올리는 콜백을 등록한다."""
+
+    async def observe(self, trace_id: str, mode: str = "full") -> dict | None:
+        """온디맨드 관측을 트리거한다 (docs/on-demand-perception.md). perception은 더
+        이상 주기 발행하지 않으므로, `/world_state`를 새로 채우려면 이 호출이 있어야 한다.
+
+        mode: "full"(장면 전체를 SAM everything+VLM으로 다시 본다. 명령당 이걸 여러 번
+        부르면 API 비용과 지연이 그만큼 쌓인다 — 명령당 1회가 원칙이다) |
+        "reprompt"(직전 관측이 남긴 물체들을 재투영 박스로 SAM만 1패스 돌린다. VLM은
+        안 부른다. pick/place_into 스텝 사이처럼 자주 불러도 되는 쪽). ROS의
+        `Observe.Goal.MODE_*`와 뜻이 같다 — web이 그 enum을 몰라도 되게 문자열로 받는다.
+
+        반환은 `{"success", "failure_reason", "object_count", "cycle_time_ms",
+        "cancelled"}` 또는 액션 자체에 접수되지 못했으면 None. **성공해도 `/world_state`가
+        그 자리에서 갱신되는 것은 아니다** — grasp가 뒤이어 처리하는 시간이 있다. 호출자는
+        이어서 `get_latest_world_state()`의 stamp 변화를 기다려야 한다
+        (`orchestrator._wait_for_fresh_observation`이 그 역할이다).
+        """
 
     async def call_pick(self, goal: SkillGoal, on_feedback: FeedbackCallback) -> SkillResult: ...
 

@@ -46,6 +46,45 @@ def mask_3d(mask_bool: np.ndarray, depth_mm: np.ndarray,
     return (x, y, zc), ratio
 
 
+def mask_extent_3d(mask_bool: np.ndarray, depth_mm: np.ndarray, intrinsics: dict,
+                   count: int = 24) -> list[tuple[float, float, float]]:
+    """마스크 **테두리**를 따라 뽑은 카메라 좌표계 3D 점들(mm). 물체가 차지한 범위다.
+
+    `mask_3d`는 중심 한 점만 준다. 온디맨드 재관측(D-1)은 그것으로 부족하다 — 다음 프레임에서
+    SAM에 줄 **박스**를 만들어야 하는데(점 프롬프트는 물체 대신 무늬를 잡는다,
+    sam_marks.segment_at_boxes 주석) 박스에는 범위가 필요하다.
+
+    테두리를 쓰는 이유는 그것이 곧 박스의 경계이기 때문이다. depth가 무효인 점은 뺀다 —
+    지어낸 깊이로 만든 박스는 다음 프레임에서 엉뚱한 곳을 감싼다. 각 점은 **자기 픽셀의
+    depth**로 역투영하므로 기울어진 물체도 범위가 유지된다.
+    """
+    if mask_bool.shape != depth_mm.shape:
+        return []
+    ys, xs = np.nonzero(mask_bool)
+    if xs.size == 0:
+        return []
+
+    # 행마다 좌우 끝 픽셀 = 마스크의 테두리. contour를 쓰지 않는 이유는 cv2 의존을 늘리지
+    # 않기 위해서다(이 모듈은 numpy만 쓴다).
+    rows = np.unique(ys)
+    if rows.size > count // 2:
+        rows = rows[np.linspace(0, rows.size - 1, count // 2).astype(int)]
+
+    points = []
+    for row in rows:
+        columns = xs[ys == row]
+        for column in (columns.min(), columns.max()):
+            z = float(depth_mm[row, column])
+            if z <= 0:
+                continue
+            points.append((
+                (float(column) - intrinsics["cx"]) * z / intrinsics["fx"],
+                (float(row) - intrinsics["cy"]) * z / intrinsics["fy"],
+                z,
+            ))
+    return points
+
+
 def mask_to_image_msg(mask_bool: np.ndarray, header):
     """mono8 0/255 단일 채널 Image (인터페이스_정의서 3.3절)."""
     from sensor_msgs.msg import Image

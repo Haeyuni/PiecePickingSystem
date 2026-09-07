@@ -11,19 +11,22 @@ import { getConfirmations, getRecentTraces, getTrace, getWorldState } from '../a
 import CameraViews from '../components/CameraViews'
 import CommandInput from '../components/CommandInput'
 import ConfirmModal from '../components/ConfirmModal'
-import ObjectList from '../components/ObjectList'
+import PendingConfirmations from '../components/PendingConfirmations'
 import RobotControls from '../components/RobotControls'
 import SafetyBanner from '../components/SafetyBanner'
 import StatusBar from '../components/StatusBar'
 import TaskProgress from '../components/TaskProgress'
 import { useLive } from '../hooks/useLive'
-import type { DetectedObject, LiveEvent, ObjectConfirmation, RobotState, SafetyEvent, Trace } from '../types'
+import type { LiveEvent, ObjectConfirmation, RobotState, SafetyEvent, Trace, WorldState } from '../types'
 
 const INITIAL_ROBOT: RobotState = { mode: 'idle', current_skill: 'none', gripper_width_mm: 0 }
 
 export default function ControlPage() {
   const [robot, setRobot] = useState<RobotState>(INITIAL_ROBOT)
-  const [objects, setObjects] = useState<DetectedObject[]>([])
+  // 탐지 물체 목록은 더 이상 화면에 없다(화면정의서 2.2.5 삭제, D-5) — 대신 "마지막
+  // 관측이 언제였나"만 관측 패널(CameraViews)에 보여준다. 온디맨드 전환 이후 perception이
+  // 명령 사이에는 조용하므로, objects 전체를 들고 있을 이유가 없어졌다.
+  const [worldStamp, setWorldStamp] = useState<WorldState['stamp'] | null>(null)
   const [trace, setTrace] = useState<Trace | null>(null)
   const [critical, setCritical] = useState<SafetyEvent | null>(null)
   const [warning, setWarning] = useState<SafetyEvent | null>(null)
@@ -32,9 +35,9 @@ export default function ControlPage() {
 
   const refreshWorld = useCallback(async () => {
     try {
-      setObjects((await getWorldState()).objects)
+      setWorldStamp((await getWorldState()).stamp)
     } catch {
-      setObjects([])
+      setWorldStamp(null)
     }
   }, [])
 
@@ -100,13 +103,13 @@ export default function ControlPage() {
 
       case 'object_confirmation_needed':
         void refreshPending()
-        void refreshWorld()
         break
 
       case 'world_state':
-        // perception이 새로 발행할 때마다 실시간으로 반영한다 — 예전엔 이 이벤트가
-        // 아예 안 와서(ros_bridge.py의 _on_world_state 참조) 새로고침해야만 갱신됐다.
-        setObjects(event.objects)
+        // 온디맨드 전환 이후 이 이벤트는 "perception이 새로 발행했다"는 신호로만
+        // 쓴다 — 탐지 목록은 더 이상 렌더링하지 않지만, 관측 패널의 "n초 전 관측"
+        // 표시는 이 stamp가 갱신돼야 정확하다.
+        setWorldStamp(event.stamp)
         // **Top-K가 웹까지 도달했는지 확인용.** 화면에는 숫자를 띄우지 않는다(요구사항) —
         // console.debug라 브라우저 기본 로그 레벨에서는 보이지도 않는다(개발자도구에서
         // Verbose를 켜야 나온다). grasp 노드의 [후보수] 로그와 대조하면 중간에서
@@ -169,13 +172,13 @@ export default function ControlPage() {
 
       <div className="grid">
         <div className="panel">
-          <h2>카메라</h2>
-          <CameraViews />
+          <h2>관측</h2>
+          <CameraViews worldStamp={worldStamp} />
         </div>
 
         <div className="panel">
-          <h2>탐지 물체 ({objects.length})</h2>
-          <ObjectList objects={objects} onConfirmClick={setModalClass} />
+          <h2>확인 대기 ({pending.length})</h2>
+          <PendingConfirmations items={pending} onClick={setModalClass} />
           <RobotControls mode={robot.mode} />
         </div>
       </div>
@@ -196,7 +199,6 @@ export default function ControlPage() {
           onConfirmed={() => {
             setModalClass(null)
             void refreshPending()
-            void refreshWorld()
           }}
         />
       )}

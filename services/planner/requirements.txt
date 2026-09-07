@@ -8,6 +8,10 @@ openai
 # 구조화 출력 스키마 정의 (planner/src/schema.py)
 pydantic
 
+# /internal/label-marks가 이미지를 multipart로 받는다. FastAPI의 UploadFile/Form이
+# 이것 없이는 import 시점에 죽는다.
+python-multipart
+
 # DB (시스템명세서 2절, PostgreSQL 16)
 psycopg[binary]
 
