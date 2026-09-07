@@ -8,6 +8,7 @@ control은 planner를 거치지 않는 호출(재전송, 수동 테스트, 향�
 """
 import os
 import pathlib
+import threading
 import time
 
 import rclpy
@@ -18,7 +19,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from dsr_msgs2.action import MovelH2r
-from dsr_msgs2.srv import GetCurrentPosx
+from dsr_msgs2.srv import GetCurrentPosx, Ikin
 from onrobot_rg_msgs.srv import SetCommand
 from sensor_msgs.msg import JointState
 from sort_msgs.action import PlaceInto
@@ -124,6 +125,8 @@ class PlaceServer(Node):
         self._home_rise_mm = float(motion.get("home_rise_mm", 200.0))
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
+        self._ikin_client = self.create_client(
+            Ikin, "/dsr01/dsr_controller2/motion/ikin", callback_group=callbacks)
         self._posx_client = self.create_client(
             GetCurrentPosx, dsr_motion.GET_CURRENT_POSX_SERVICE, callback_group=callbacks)
         self._gripper_cmd_client = self.create_client(
@@ -241,6 +244,56 @@ class PlaceServer(Node):
             if store.snapshot()["mode"] != "error":
                 store.set_idle()
 
+    # M0609 관절 한계(도). robot_description에서 읽은 값 — J3만 ±150이고 나머지는 ±360.
+    _JOINT_LIMITS_DEG = (360.0, 360.0, 150.0, 360.0, 360.0, 360.0)
+
+    def _reachable(self, posx) -> bool | None:
+        """`posx`에 실제로 도달할 수 있는지. True/False, 판단 불가면 None.
+
+        **`ikin`의 `success`를 믿으면 안 된다.** 이 드라이버는 해가 없어도 `success=True`를
+        돌려주고 관절값만 터무니없이 낸다 — 2026-09-07 실측: 바구니 상공 목표에 대해
+        `success=True`인데 conv_posj가 `[-1674, 317, -1445, -180, 493, -1854]`도였다.
+        그래서 **관절값이 한계 안인지 직접 본다.**
+
+        무응답이면 None을 돌려 호출부가 "판단 못 함"으로 다루게 한다. 예전 구현은 이 경우
+        True(가능하다고 가정)를 돌려줘서 정작 필요한 순간에 아무것도 못 걸렀다.
+        """
+        if not self._ikin_client.service_is_ready():
+            return None
+        request = Ikin.Request()
+        request.pos = [float(v) for v in posx[:6]]
+        request.sol_space = 2      # 이 셀의 통상 solution space (get_current_posx data[6])
+        request.ref = 0
+        future = self._ikin_client.call_async(request)
+        finished = threading.Event()
+        future.add_done_callback(lambda _f: finished.set())
+        if not finished.wait(timeout=2.0):
+            return None
+        result = future.result()
+        if result is None or not result.success:
+            return False
+        return all(abs(float(q)) <= limit
+                   for q, limit in zip(result.conv_posj, self._JOINT_LIMITS_DEG))
+
+    def _reachable_z(self, xy, rot, desired_z: float, floor_z: float, what: str) -> float:
+        """`xy`/`rot`에서 실제로 팔이 닿는 가장 높은 z를 찾는다(desired_z에서 20mm씩 낮춤).
+
+        도달 불가한 높이를 그대로 명령하면 movel이 **오류 없이 그냥 안 움직이고** 60초
+        타임아웃으로 끝난다(2026-09-07 실물). 그래서 보내기 전에 걸러야 한다.
+        """
+        z = float(desired_z)
+        while z > floor_z:
+            verdict = self._reachable([xy[0], xy[1], z, *rot])
+            if verdict is None:
+                self.get_logger().warning(
+                    f"{what} {z:.0f}mm 도달 가능성 확인 실패(ikin 무응답) — 그대로 진행")
+                break
+            if verdict:
+                break
+            z = max(floor_z, z - 20.0)
+            self.get_logger().info(f"{what}가 팔 범위 밖 — {z:.0f}mm로 낮춘다")
+        return z
+
     @staticmethod
     def _publish_phase(goal_handle, phase) -> None:
         feedback = PlaceInto.Feedback()
@@ -333,6 +386,18 @@ class PlaceServer(Node):
         # 도달 가능 범위는 위 주석대로 셀을 바꿀 때 ikin으로 한 번 재보면 된다.
         transit_z = max(current_pose[2], approach_xyz[2]) + self._place_safe_clearance_mm
 
+        # **그 높이에서 바구니 상공까지 실제로 팔이 닿는지 확인하고, 안 되면 낮춘다.**
+        # 2026-09-07 실물: TCP(GripperDA_v1, 208mm)를 복구하자 같은 목표점이 도달 불가가
+        # 됐다 — TCP가 208mm 앞으로 나가면서 플랜지가 그만큼 더 뻗어야 하기 때문이다
+        # (704mm → 839mm, M0609 최대 900mm). movel은 오류를 내지 않고 그냥 움직이지 않아
+        # 60초 타임아웃으로 끝났다. 314행의 "z=500mm까지 해가 존재한다"는 2026-09-06
+        # 측정은 **TCP가 없던 상태**의 값이라 더 이상 유효하지 않다.
+        transit_z = self._reachable_z(approach_xyz, approach_posx[3:], transit_z,
+                                      max(current_pose[2], approach_xyz[2]), "안전고도")
+        self.get_logger().info(
+            f"place 안전고도 = {transit_z:.1f}mm (바구니 접근 {approach_xyz[2]:.1f}, "
+            f"현재 {current_pose[2]:.1f}, 여유 {self._place_safe_clearance_mm:.0f})")
+
         # ① 수직 상승 (XY·회전 고정)
         rise_ok, _ = move([current_pose[0], current_pose[1], transit_z,
                            current_pose[3], current_pose[4], current_pose[5]])
@@ -412,9 +477,15 @@ class PlaceServer(Node):
         # _execute_steps). 물러난 높이(approach_xyz)에서 바로 관절이동(movej)으로 넘어가면
         # 바구니 테두리 바로 위에서 팔이 방향을 크게 트는 셈이라 여유가 적다 — 그만큼 더
         # 올라간 뒤에 home을 부르도록 여기서 한 번 더 상승한다.
+        # **여기도 도달 가능한 높이인지 확인한다.** 바구니는 팔 범위 가장자리라 위로 얼마
+        # 못 올라간다 — 2026-09-07 실물: 293.8 + 200 = 493.8을 명령해 movel이 움직이지
+        # 않은 채 60초 타임아웃 → "home 이동 전 상승 실패"로 place 전체가 실패했다.
+        # (놓기까지는 정상으로 끝난 뒤였다.)
+        rise_home_z = self._reachable_z(
+            approach_xyz, retreat_pose[3:] if retreat_pose else approach_posx[3:],
+            approach_xyz[2] + self._home_rise_mm, approach_xyz[2], "home 전 상승")
         rise_home_posx = next_target(
-            [approach_xyz[0], approach_xyz[1], approach_xyz[2] + self._home_rise_mm],
-            retreat_pose)
+            [approach_xyz[0], approach_xyz[1], rise_home_z], retreat_pose)
         if rise_home_posx is None:
             if goal_handle.is_cancel_requested:
                 return None
