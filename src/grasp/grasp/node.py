@@ -58,11 +58,18 @@ from perception_common.robot_pose import RobotPoseClient
 
 from . import pointcloud_utils, strategies
 from .config_utils import asset_path
+from .strategies.exceptions import InferenceBusy
+from .strategies.graspnet_baseline import _NoUprightCandidate
 
 SCHEMA_VERSION = "1.0.0"
 DEPTH_BUFFER_SIZE = 60          # 30fps 기준 2초. 관측 stamp가 조금 뒤처져도 같은 프레임을 찾는다
 DEPTH_ENCODINGS = ("16UC1", "mono16")
-COLOR_BUFFER_SIZE = 60          # 디버그 오버레이용. depth 버퍼와 같은 크기로 맞춘다
+# 디버그 오버레이용. heuristic_pca는 거의 즉시 처리해 depth와 같은 2초 버퍼로 충분했지만,
+# graspnet_baseline은 컨테이너 콜드 스타트 포함 관측당 5~8초가 걸린다(2026-09-05 실물 확인) —
+# 그만큼 오래된 컬러 프레임도 버퍼에 남아 있어야 디버그 이미지를 낼 수 있다. 30fps 기준
+# 15초치. 프레임당 컬러 이미지 하나를 통째로 들고 있어 depth 버퍼보다 메모리를 더 쓰지만,
+# 디버그 뷰 용도라 감수한다.
+COLOR_BUFFER_SIZE = 450
 COLOR_ENCODINGS = ("bgr8", "rgb8")
 
 # perception_test_live.py --show / ultralytics res.plot()과 눈에 익도록 비슷한 팔레트를 쓴다.
@@ -115,6 +122,10 @@ class GraspNode(Node):
         # 관측 stamp와 depth 프레임 stamp가 이보다 벌어지면 그 관측은 버린다.
         # 다른 순간의 depth로 만든 포인트클라우드는 물체가 그때 있던 자리를 가리킨다.
         self.declare_parameter("max_depth_age_s", 0.5)
+        # 디버그 이미지용 컬러 프레임 허용 오차. depth와 달리 3D 재구성 정확도와 무관한
+        # 시각화 용도라 훨씬 느슨하다 — graspnet_baseline의 관측당 수 초짜리 지연을
+        # 감안한 값이다(COLOR_BUFFER_SIZE 주석 참조).
+        self.declare_parameter("debug_color_max_age_s", 15.0)
 
         path = pathlib.Path(self.get_parameter("config_path").value or config_path())
         with path.open(encoding="utf-8") as f:
@@ -135,12 +146,16 @@ class GraspNode(Node):
         self._pointcloud_params = config.get("pointcloud") or {}
         self._pose_max_age_s = float(self.get_parameter("pose_max_age_s").value)
         self._max_depth_age_s = float(self.get_parameter("max_depth_age_s").value)
+        self._debug_color_max_age_s = float(self.get_parameter("debug_color_max_age_s").value)
 
         calibration = asset_path(self._assets, "calibration_path")
         self._gripper2camera = geometry.load_handeye(calibration)
         self._intrinsics = None
         self._depth_frames: list[tuple[float, np.ndarray, str]] = []
         self._color_frames: list[tuple[float, np.ndarray, str]] = []
+        # object_id → 그 물체 1순위 후보의 좌표 변환 중간값(graspnet_baseline만 채운다).
+        # 좌표 오차를 쫓을 때 어느 단계에서 틀어졌는지 보려면 최종값만으로는 부족하다.
+        self._chain_debug: dict[str, dict] = {}
         self._pending_masks: dict[tuple[int, int], InstanceMasks] = {}
         self._pending_worlds: dict[tuple[int, int], WorldState] = {}
         self._publish_debug = bool(self.get_parameter("publish_debug_image").value)
@@ -202,8 +217,9 @@ class GraspNode(Node):
             self._color_frames.pop(0)
 
     def _nearest_color(self, when: float) -> tuple[np.ndarray, str] | None:
-        """`when`에 가장 가까운 컬러 프레임. `_nearest_depth`와 같은 탐색이다 — 디버그
-        오버레이용이라 별도 파라미터를 늘리지 않고 depth와 같은 허용 오차를 공유한다."""
+        """`when`에 가장 가까운 컬러 프레임. `_nearest_depth`와 같은 탐색 방식이지만
+        허용 오차는 별도다 — 디버그 이미지는 3D 재구성이 아니라 시각화라 depth만큼
+        엄격할 필요가 없다(debug_color_max_age_s 선언부 참조)."""
         if not self._color_frames:
             return None
         times = [item[0] for item in self._color_frames]
@@ -214,7 +230,7 @@ class GraspNode(Node):
                 gap = abs(times[candidate] - when)
                 if gap < best_gap:
                     best, best_gap = candidate, gap
-        if best is None or best_gap > self._max_depth_age_s:
+        if best is None or best_gap > self._debug_color_max_age_s:
             return None
         _, frame, frame_id = self._color_frames[best]
         return frame, frame_id
@@ -281,8 +297,34 @@ class GraspNode(Node):
             image = mask_by_id.get(obj.object_id)
             if image is None:
                 continue
-            candidates = self._candidates_for(image, depth, depth_frame_id, T_base_camera_mm)
+            try:
+                candidates = self._candidates_for(obj, image, depth, depth_frame_id, T_base_camera_mm)
+            except InferenceBusy:
+                # busy는 파지 실패가 아니다. 빈 후보 WorldState를 내보내 planner가 정상 물체를
+                # 거부하지 않게 하고, web은 마지막으로 완성된 관측을 계속 보여준다.
+                self.get_logger().info(
+                    "GraspNet 추론 진행 중: 이번 관측 publish 보류",
+                    throttle_duration_sec=2.0)
+                return
             obj.grasp_candidates = candidates
+            if candidates:
+                d = self._chain_debug.get(obj.object_id)
+                if d:
+                    self.get_logger().info(
+                        f"[좌표체인] {obj.object_id} "
+                        f"GraspNet translation(camera,mm)={d['graspnet_translation_cam_mm']} "
+                        f"접근축(camera)={d['graspnet_approach_cam']} "
+                        f"depth={d.get('graspnet_depth_mm')}mm(접근축 전진 반영) "
+                        f"→ base 파지점={d['graspnet_point_base_mm']} "
+                        f"| offset={d['T_graspnet_tcp_translation_mm']} ({d['offset_frame']}) "
+                        f"→ TCP 목표(base,mm)={d['tcp_target_base_mm']} "
+                        f"접근축(base)={d['tcp_approach_axis_base']} "
+                        f"| 클라우드 되잡기 {d.get('refined_shift_mm')}mm "
+                        f"(폭 {d.get('graspnet_width_mm')}→실측) "
+                        f"| 기울기 {d.get('chosen_angle_deg')}deg "
+                        f"(후보 {d.get('angles_deg')} 중 임계 {d.get('used_threshold_deg')}deg로 "
+                        f"{d.get('passed_count')}개 통과)",
+                        throttle_duration_sec=5.0)
             filled += bool(candidates)
 
         self._pub.publish(world)
@@ -303,8 +345,9 @@ class GraspNode(Node):
             blockers.append("최신 TCP 자세 없음")
         return blockers
 
-    def _candidates_for(self, mask_image: Image, depth: np.ndarray, depth_frame_id: str,
+    def _candidates_for(self, obj, mask_image: Image, depth: np.ndarray, depth_frame_id: str,
                         T_base_camera_mm: np.ndarray) -> list[GraspCandidate]:
+        object_id = obj.object_id
         mask = image_to_numpy(mask_image) > 0
         if mask.shape != depth.shape:
             self.get_logger().warning(
@@ -338,11 +381,101 @@ class GraspNode(Node):
             candidates = self._plan(
                 points_base, self._strategy_params,
                 context={"points_cam_mm": points_cam, "T_base_camera_mm": T_base_camera_mm})
+        except InferenceBusy:
+            # busy는 `_process`가 따로 처리한다(publish 보류) — 여기서 삼키면 RuntimeError의
+            # 서브클래스라 아래 handler에 잡혀 "추론 불가" 에러로 오인되고 빈 후보가 나간다.
+            raise
+        except _NoUprightCandidate as exc:
+            # 추론은 됐고 후보도 나왔는데 전부 너무 기울어 실행 불가였던 경우.
+            # "추론 불가"와 구분해야 원인 추적이 된다(전자는 GPU/서버 문제, 이건 자세 문제).
+            self.get_logger().warning(f"{self._strategy_name} 쓸 만한 자세 없음: {exc}",
+                                      throttle_duration_sec=5.0)
+            return []
         except RuntimeError as exc:
             self.get_logger().error(f"{self._strategy_name} 추론 불가: {exc}",
                                     throttle_duration_sec=10.0)
             return []
+        # 전략이 중간 변환값을 실어 보냈으면(graspnet_baseline) 물체별로 보관한다 —
+        # 아래 _process가 로그로 찍는다. GraspCandidate.msg에는 이 필드가 없으므로
+        # 메시지로 변환하기 전에 여기서 빼둬야 한다.
+        if candidates and isinstance(candidates[0], dict) and candidates[0].get("debug"):
+            self._chain_debug[object_id] = candidates[0]["debug"]
+        candidates = [self._fit_grasp_depth(c, obj) for c in candidates]
         return [self._to_msg(c) for c in candidates]
+
+    # 손끝이 지지면(작업대) 아래로 내려가지 않게 남겨두는 여유(mm). 0이면 지지면에
+    # 정확히 닿는 높이까지 허용한다 — 얇은 물체는 실제로 그 높이에서 물어야 한다.
+    _SUPPORT_CLEARANCE_MM = 1.0
+    # 물체 높이의 몇 %를 목표 파지 높이로 삼는가. 0.5 = 중간 높이.
+    # 평행 그리퍼로 물건을 집을 때의 표준 선택이고, 위로 치우치면 미끄러지고 아래로
+    # 치우치면 작업대를 건드린다.
+    _GRASP_HEIGHT_FRACTION = 0.5
+
+    def _fit_grasp_depth(self, candidate: dict, obj) -> dict:
+        """파지 깊이를 **실측 물체 높이**에 맞춘다 — 너무 얕으면 내리고, 지지면 아래는 막는다.
+
+        **왜 필요한가 (얕은 쪽).** 전략은 깊이를 "보이는 표면에서 몇 mm"로 정한다
+        (refine_grasp_depth_mm / grasp_depth_mm, 둘 다 8mm). 그 8mm는 **접근축을 따라**
+        재므로, 기울어진 파지에서는 수직 침투가 `8 x cos(기울기)`로 줄어든다. 2026-09-07
+        실측: 높이 19.1mm 물체를 30도로 접근하면 손끝이 윗면 아래로 1.8mm밖에 안 들어간다 —
+        모서리만 스쳐 물어 들어올리다 놓친다. (예전에는 pick_depth_extra_mm=40이 이걸
+        우연히 메우고 있었는데, 그 값의 진짜 정체는 TCP↔손끝 오프셋이라 지금은 0이다.)
+
+        **왜 필요한가 (깊은 쪽).** 반대로 물체가 얇으면 그 8mm가 물체를 지나쳐 작업대
+        속이 된다. 실측: 높이 7.0mm 물체의 윗면 z=327.8, 지지면 z=320.8 → 윗면-8mm는
+        319.8로 작업대보다 1.0mm 아래다. 그대로 명령하면 손가락이 작업대를 눌러 충돌·
+        안전모드로 들어간다. 지금까지 안 드러난 건 TCP↔손끝 오프셋 때문에 손끝이 어차피
+        18mm 위에서 닫히고 있었기 때문이다 — **그 오프셋을 바로잡는 순간 드러난다.**
+
+        규칙(모두 실측값에서 나온다. 튜닝 상수는 위 둘뿐이다):
+          목표    = 물체 중간 높이 (지지면 + 높이 x _GRASP_HEIGHT_FRACTION)
+          더 깊게만 내린다 — 전략이 이미 중간보다 깊게 잡았으면 그 판단을 존중한다
+          바닥    = 지지면 + _SUPPORT_CLEARANCE_MM, 절대 그 아래로는 안 간다
+
+        지지면은 perception이 마스크 바깥 링에서 실측한 값이다
+        (`position_base_mm.z - height_mm`, mask_utils.support_3d). `height_mm=0`은
+        "미상"이므로(DetectedObject.msg) 그때는 아무것도 하지 않는다 — 모르는 값으로
+        추정해 옮기면 멀쩡한 파지를 망친다.
+
+        움직이는 방향은 **그 후보 자신의 접근축**이다. base Z로 옮기면 기울어진 파지에서
+        옆으로 밀린다(pick_server._pick_real의 같은 논리).
+        """
+        height_mm = float(getattr(obj, "height_mm", 0.0) or 0.0)
+        if height_mm <= 0.0 or not isinstance(candidate, dict):
+            return candidate
+        pose = candidate.get("pose") or {}
+        position, orientation = pose.get("position"), pose.get("orientation")
+        if not position or not orientation:
+            return candidate
+
+        support_z = float(obj.position_base_mm.z) - height_mm
+        floor_z = support_z + self._SUPPORT_CLEARANCE_MM
+        current_z = float(position["z"])
+        # 중간 높이까지만 내린다(이미 더 깊으면 그대로), 그리고 바닥 위로 올린다.
+        target_z = max(min(current_z, support_z + height_mm * self._GRASP_HEIGHT_FRACTION),
+                       floor_z)
+        if abs(target_z - current_z) < 0.5:
+            return candidate
+
+        approach = geometry.quaternion_to_matrix(
+            orientation["x"], orientation["y"], orientation["z"], orientation["w"])[:, 2]
+        if abs(float(approach[2])) < 1e-6:
+            # 접근축이 수평이면 이 축으로는 높이를 바꿀 수 없다.
+            return candidate
+        moved = np.array([position["x"], position["y"], current_z]) + (
+            (target_z - current_z) / float(approach[2])) * approach
+        self.get_logger().info(
+            f"[파지깊이] {obj.object_id} 물체높이 {height_mm:.1f}mm "
+            f"(지지면 {support_z:.1f} ~ 윗면 {float(obj.position_base_mm.z):.1f}) "
+            f"| 후보 z={current_z:.1f} → {target_z:.1f} "
+            f"({'더 깊게' if target_z < current_z else '지지면 보호'}, "
+            f"접근축 따라 {float(np.linalg.norm(moved - np.array([position['x'], position['y'], current_z]))):.1f}mm)",
+            throttle_duration_sec=5.0)
+        candidate = dict(candidate)
+        candidate["pose"] = {**pose, "position": {"x": float(moved[0]),
+                                                  "y": float(moved[1]),
+                                                  "z": float(moved[2])}}
+        return candidate
 
     # --- 디버그 오버레이 (perception_test_live.py --show와 같은 그림 + 파지 후보) ----------
     def _publish_debug_image(self, world: WorldState, mask_by_id: dict,
@@ -372,8 +505,17 @@ class GraspNode(Node):
 
         self._publish_image(vis, world.stamp, frame_id)
 
+    # 손끝이 물체를 물기 전 대략 이만큼 뒤에서 다가온다고 보고 그린다 — 실제 손가락
+    # 길이 데이터는 없어서(GraspCandidate에 안 실림) 순수 시각화 상수다. graspnetAPI의
+    # plot_gripper_pro_max가 그리는 "ㄷ"자 그리퍼 스케치와 같은 구조(손끝 두 점 + 그
+    # 뒤 몸통)를 우리 좌표계로 다시 그린다.
+    _FINGER_LENGTH_MM = 40.0
+    _DEFAULT_WIDTH_MM = 60.0
+
     def _draw_grasp_candidates(self, vis: np.ndarray, candidates, camera2base: np.ndarray) -> None:
-        """파지 후보를 base→camera 역변환·투영해 점(닫는 축 = 선분)으로 찍는다.
+        """파지 후보를 base→camera 역변환·투영해 실제 개폭·접근축을 반영한 그리퍼
+        스케치로 그린다 — "닫는 축 선 하나"만 그리면 개폭·접근 방향이 안 보여
+        PCA 결과와 구분이 안 됐다(2026-09-05, 사용자 피드백).
 
         전략이 점수 내림차순으로 돌려주므로(heuristic_pca.py) 상위 3개만 그린다 — 많이 그리면
         가려지고, 어차피 planner/pick_server가 실제로 시도하는 건 1순위다.
@@ -389,25 +531,53 @@ class GraspNode(Node):
                 continue
 
             q = candidate.pose.orientation
-            closing_axis = geometry.quaternion_to_matrix(q.x, q.y, q.z, q.w)[:, 0]
+            rotation = geometry.quaternion_to_matrix(q.x, q.y, q.z, q.w)
+            closing_axis, approach_axis = rotation[:, 0], rotation[:, 2]
+            half_width = 0.5 * float(candidate.gripper_width_mm or self._DEFAULT_WIDTH_MM)
             base_point = np.array([p.x, p.y, p.z])
-            endpoints_px = []
-            for endpoint in (base_point + 25.0 * closing_axis, base_point - 25.0 * closing_axis):
-                endpoint_cam = camera2base @ np.append(endpoint, 1.0)
-                if endpoint_cam[2] <= 0:
-                    endpoints_px = None
-                    break
-                endpoints_px.append(pointcloud_utils.project(
-                    endpoint_cam[np.newaxis, :3], self._intrinsics)[0])
+
+            # 접근축(approach_axis)은 그리퍼가 물체를 향해 다가가는 방향이라, 그리퍼 몸통은
+            # 그 반대(-approach_axis)에 있다 — 손끝(contact)에서 몸통(base)으로 선을 긋는다.
+            tip_left = base_point + half_width * closing_axis
+            tip_right = base_point - half_width * closing_axis
+            body_left = tip_left - self._FINGER_LENGTH_MM * approach_axis
+            body_right = tip_right - self._FINGER_LENGTH_MM * approach_axis
+
+            pixels = self._project_points(
+                [tip_left, tip_right, body_left, body_right], camera2base)
+            if pixels is None:
+                continue
+            (tlx, tly), (trx, try_), (blx, bly), (brx, bry) = pixels
 
             marker_color = (0, 220, 0) if rank == 0 else (0, 180, 255)
-            cv2.circle(vis, (cx, cy), 10 if rank == 0 else 6, marker_color, 2)
-            if endpoints_px is not None:
-                (x1, y1), (x2, y2) = endpoints_px
-                cv2.line(vis, (int(x1), int(y1)), (int(x2), int(y2)), marker_color, 2)
+            # 손가락 두 개(손끝→몸통) + 몸통을 잇는 선(팜) = graspnetAPI 그리퍼 스케치의
+            # "ㄷ"자와 같은 형태. 손끝에 작은 원을 찍어 실제로 물체를 무는 지점을 강조한다.
+            cv2.line(vis, (blx, bly), (brx, bry), marker_color, 2)          # 팜(base)
+            cv2.line(vis, (tlx, tly), (blx, bly), marker_color, 2)         # 왼손가락
+            cv2.line(vis, (trx, try_), (brx, bry), marker_color, 2)        # 오른손가락
+            cv2.circle(vis, (tlx, tly), 4, marker_color, -1)
+            cv2.circle(vis, (trx, try_), 4, marker_color, -1)
             if rank == 0:
-                cv2.putText(vis, f"grasp {candidate.score:.2f}", (cx + 12, cy - 12),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, marker_color, 2, cv2.LINE_AA)
+                # strategy를 라벨에 그대로 찍는다 — heuristic_pca 결과가 GraspNet처럼
+                # 보이면 안 된다(2026-09-05, 데이터 출처 오인 방지 요구사항).
+                cv2.putText(vis, f"[{candidate.strategy}] {candidate.score:.2f} "
+                           f"w={candidate.gripper_width_mm:.0f}mm",
+                           (cx + 12, cy - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                           marker_color, 2, cv2.LINE_AA)
+
+    def _project_points(self, points_base: list[np.ndarray],
+                        camera2base: np.ndarray) -> list[tuple[int, int]] | None:
+        """base 좌표계 점들을 한꺼번에 카메라 픽셀로 투영한다. 하나라도 카메라 뒤쪽
+        (point_cam[2]<=0)이면 그리퍼 스케치 전체를 그리지 않는다 — 절반만 그리면
+        방향을 오해하기 쉽다."""
+        pixels = []
+        for point in points_base:
+            point_cam = camera2base @ np.append(point, 1.0)
+            if point_cam[2] <= 0:
+                return None
+            u, v = pointcloud_utils.project(point_cam[np.newaxis, :3], self._intrinsics)[0]
+            pixels.append((int(round(u)), int(round(v))))
+        return pixels
 
     @staticmethod
     def _draw_label(vis: np.ndarray, origin: tuple[int, int], text: str,
