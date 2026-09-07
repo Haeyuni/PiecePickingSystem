@@ -1,85 +1,98 @@
-# Grasp Runtime
+# grasp
 
-`heuristic_pca`는 ROS host 또는 compose 컨테이너에서 실행할 수 있다. `graspnet_baseline`은
-PyTorch/CUDA를 ROS 환경과 섞지 않기 위해 **host에서 실행한 grasp node**가 별도 Docker runtime을
-호출한다. compose의 grasp 컨테이너에는 Docker socket/CLI를 넣지 않는다.
+`world_state_raw` + `instance_masks` + depth → 물체별 포인트클라우드 → 파지 후보를 채워
+`/world_state`로 발행한다. `/world_state`의 발행자는 이 노드 하나다(인터페이스_정의서 2.0절).
 
-## 개발 PC
+## 실행
 
-개발 PC는 Docker image, PyTorch, GPU, checkpoint가 없어도 된다. 기본 전략은 `heuristic_pca`이며
-`graspnet_baseline`을 선택하지 않는 한 Docker를 검사하거나 build/pull하지 않는다.
+compose로 띄운다. 전략은 환경변수로 고르며, 이미지 재빌드가 필요 없다.
 
 ```bash
-colcon build --merge-install --packages-select perception_common sort_msgs perception grasp control web
-source install/setup.bash
-pytest -q src/grasp/test/test_pointcloud_pca.py src/grasp/test/test_graspnet_baseline.py
+FAKE_ROBOT=0 docker compose --profile ros up -d db planner perception graspnet grasp control web_ros
 ```
 
-`PIECE_PICKING_ASSETS_DIR` 설정은 개발 PC에서는 선택 사항이다. GraspNet 실제 GPU 추론은
-**HW_UNVERIFIED**이며, 테스트 PC에서만 준비·검증한다. 이 단계에서는 Docker 명령을 실행하지 않는다.
+```bash
+GRASP_STRATEGY=heuristic_pca docker compose up -d grasp   # 기본값은 graspnet_baseline
+```
 
-## 테스트 PC 최초 1회
+## 전략
 
-1. Git pull 후 공용 Drive의 `piece_picking_assets`를 `$HOME/piece_picking_assets`에 준비한다.
-2. assets 안에 내려받은 archive가 있는지 확인한다.
+| 이름 | 필요한 것 |
+|---|---|
+| `heuristic_pca` | 없음. 포인트클라우드만으로 계산한다 |
+| `graspnet_baseline` | compose의 `graspnet` 서비스(GPU) + checkpoint |
+
+`graspnet_baseline`은 **상주 추론 서버**에 HTTP로 보낸다 — `grasp_params.yaml`의
+`graspnet_baseline.endpoint`(기본 `http://localhost:8200`)가 compose의 `graspnet` 서비스다.
+grasp는 `network_mode: host`라 서비스 이름 DNS 대신 localhost로 부른다.
+
+checkpoint는 저장소 밖 assets에 둔다. compose가 이 경로를 컨테이너의 `/checkpoint.tar`로
+read-only 마운트한다(`docker-compose.yml`의 `graspnet` 서비스):
 
 ```text
-$HOME/piece_picking_assets/models/graspnet/checkpoint-rs.tar
+${PIECE_PICKING_ASSETS_DIR:-$HOME/piece_picking_assets}/models/graspnet/checkpoint.tar
 ```
 
-3. Docker와 NVIDIA Container Toolkit이 준비된 host terminal에서 실행한다.
+## 설정
+
+`config/grasp_params.yaml`은 **마운트된다** — 값을 고치고 재빌드 없이 반영한다.
 
 ```bash
-export PIECE_PICKING_ASSETS_DIR="$HOME/piece_picking_assets"
-bash src/grasp/scripts/setup_graspnet_runtime.sh
+docker compose restart grasp
 ```
 
-이 스크립트만 Docker image build와 CUDA/checkpoint load를 수행한다. image
-`piece-picking-graspnet-baseline:0.1.0`가 이미 있으면 다시 build/pull하지 않는다. archive는 이
-최초 setup에서만 풀리고, 최종 checkpoint는 아래 경로에 보관된다.
+`.py`를 고쳤을 때만 `docker compose up -d --build grasp`.
+
+주요 값은 파일 안 주석에 근거와 이력이 함께 있다. 특히:
+
+* `refine_grasp_depth_mm` — 파지 깊이의 유일한 손잡이. 얕게 물면 여기를 올린다.
+* `approach_angle_max_deg` — 이 각도를 넘는 후보는 버린다. 좁힐수록 자세는 좋아지지만
+  후보가 전멸하는 물체가 늘어난다.
+* `camera_frame_offset_mm` — **0으로 두는 것이 맞다.** 올리기 전에 그 주석을 읽을 것.
+
+좌표계·오프셋의 전체 그림은 `docs/problem/2026-09-07-grasp-coordinate-offset.md`에 있다.
+
+## 좌표 변환
+
+카메라가 그리퍼에 붙어 있어(eye-in-hand) 변환은 매 프레임 TCP 자세에 따라 달라진다.
 
 ```text
-$HOME/piece_picking_assets/models/graspnet/checkpoint.tar
+T_base_camera = posx_to_matrix(get_current_posx()) @ T_gripper2camera
 ```
 
-runtime은 이 단일 `checkpoint.tar`만 `/checkpoint.tar:ro`로 read-only mount해 `torch.load()`한다.
-runtime에는 archive 해제, checkpoint 다운로드, Docker build/pull, pip install 코드가 없다. archive가
-`checkpoint.tar`를 포함하지 않으면 setup은 실패하므로, 공용 Drive의 파일 형식을 먼저 확인해야 한다.
-이 단계는 로봇을 움직이지 않는다.
+`T_gripper2camera`(`data/calibration/T_gripper2camera.npy`)는 **`get_current_posx()`가
+보고하는 TCP 정의**로 풀려 있다. 컨트롤러의 TCP가 바뀌거나 선택 해제되면 좌표 전체가
+조용히 틀어진다 — 위 문서의 "원인 0" 참조.
 
-이미지 tag를 바꿀 때는 `config/grasp_params.yaml`의 `graspnet_baseline.image`와 setup 명령의
-`GRASPNET_IMAGE`를 같은 값으로 맞춘다.
+`graspnet_baseline.T_graspnet_tcp_mm`은 GraspNet의 축 규약(X=접근, Y=닫힘)을 이 프로젝트의
+TCP 규약(Z=접근, X=닫힘)으로 바꾸는 회전이다. 최종 후보는 다음으로 계산된다.
+
+```text
+T_base_tcp = T_base_camera @ T_camera_graspnet @ T_graspnet_tcp
+```
+
+## 진단 도구
+
+`tools/calibration/`이 컨테이너에 `/tools`로 마운트되어 있다. rclpy + sort_msgs +
+dsr_msgs2 + perception_common이 모두 갖춰진 유일한 곳이라 그대로 돈다.
 
 ```bash
-GRASPNET_IMAGE="piece-picking-graspnet-baseline:team-v1" \
-  bash src/grasp/scripts/setup_graspnet_runtime.sh
+docker exec ros2_ws-grasp-1 bash -c '
+  source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash &&
+  source /doosan_ws/share/dsr_msgs2/local_setup.bash &&
+  python3 /tools/measure_tcp_offset.py'
 ```
 
-## 테스트 PC 이후
+| 도구 | 무엇을 재는가 |
+|---|---|
+| `measure_tcp_offset.py` | TCP 원점 ↔ 실제 파지점 (로봇 좌표만 사용) |
+| `check_handeye_consistency.py` | hand-eye 이동 성분 보정량 |
+| `touch_check.py` | perception 좌표 vs 실제 손끝 |
 
-assets 경로를 유지한 채 Git pull, build, launch만 한다. 실행 단계는 Docker build/pull, pip install,
-checkpoint download를 절대 수행하지 않는다.
+## 테스트
 
 ```bash
-export PIECE_PICKING_ASSETS_DIR="$HOME/piece_picking_assets"
-colcon build --merge-install --packages-select perception_common sort_msgs perception grasp control web
-source install/setup.bash
-ros2 launch grasp grasp_launch.py config_path:=/absolute/path/grasp_test_pc.yaml
+docker exec ros2_ws-grasp-1 bash -c \
+  'source /opt/ros/jazzy/setup.bash && source /ros2_ws/install/setup.bash &&
+   cd /ros2_ws && python3 -m pytest src/grasp/test -q'
 ```
-
-`grasp_test_pc.yaml`은 기본 `config/grasp_params.yaml`의 전체 복사본으로 만들고,
-`strategy.name: graspnet_baseline` 및 테스트 셀 값을 설정한다. launch의 `config_path`가 이 파일을
-node parameter로 전달한다. 필요한 경우 YAML을 바꾸지 않고 아래처럼 strategy만 override할 수 있다.
-
-```bash
-ros2 launch grasp grasp_launch.py \
-  config_path:=/absolute/path/grasp_test_pc.yaml \
-  strategy:=graspnet_baseline
-```
-
-`graspnet_baseline.T_graspnet_tcp_mm`은 **TCP frame을 GraspNet predicted-gripper frame으로 변환하는
-mm 4x4 행렬**이다. 최종 후보는
-`T_base_tcp_mm = T_base_camera_mm @ T_camera_graspnet_mm @ T_graspnet_tcp_mm`으로 계산된다.
-이 값은 테스트 셀의 RG2 TCP 정의와 GraspNet 축 관계를 측정해 넣어야 하며, 기본값은 비어 있다.
-보정값 없이 나온 파지 자세는 실제 로봇에 신뢰할 수 없다. 준비하지 않은 image나 transform을 선택하면
-node는 오류만 안내하며, 자동 설치나 PCA fallback을 하지 않는다.

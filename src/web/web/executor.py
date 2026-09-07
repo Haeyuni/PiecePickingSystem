@@ -24,8 +24,16 @@ class SkillGoal:
     request_id: str
     object_id: str
     profile: str
-    grasp_pose: dict | None = None   # pick
-    gripper_width_mm: float | None = None  # pick — 골라둔 후보의 GraspCandidate.gripper_width_mm
+    grasp_pose: dict | None = None   # pick — 1순위 후보. 후보 목록이 비었을 때의 대체값이기도 하다
+    gripper_width_mm: float | None = None  # pick — 1순위 후보의 GraspCandidate.gripper_width_mm
+    # pick — planner가 작업반경으로 거른 후보 전체(점수 내림차순). **실행할 하나는
+    # control이 고른다**(개폭·IK·관절·안전 검사가 로봇 쪽에서만 가능하다).
+    grasp_candidates: list = field(default_factory=list)
+    # pick — control의 후보 랭킹이 쓰는 물체 정보. control은 /world_state를 안 보므로
+    # 여기 실어 보내지 않으면 물체 중심·높이·depth 신뢰도를 알 방법이 없다.
+    object_center_mm: dict | None = None
+    object_height_mm: float | None = None
+    depth_valid_ratio: float | None = None
     bin_id: str | None = None        # place_into
     # place_into — 든 물체가 TCP보다 얼마나 아래로 내려와 있는지(mm).
     # orchestrator가 물체 높이와 파지 z로 계산한다. None/0이면 control이 고정 여유만 쓴다.
@@ -41,6 +49,9 @@ class SkillResult:
     cycle_time_ms: float = 0.0
     visual_verification_passed: bool | None = None
     torque_trace: list = field(default_factory=list)
+    # 실제로 실행한 파지 후보의 candidate_id (pick만). control이 고른 것 —
+    # 후보를 하나도 통과시키지 못했거나 grasp_pose 하나만 보낸 경우는 빈 문자열이다.
+    selected_candidate_id: str = ""
     # 사용자가 Stop을 눌러 취소된 결과인지 — orchestrator가 이걸로 "재계획할 실패"와
     # "그만둬야 할 취소"를 구분한다. success=False만 보고는 구분이 안 된다(2026-09-05,
     # Stop 이후 재실행 사고 조사에서 확인 — 취소도 실패와 같은 failure_reason으로

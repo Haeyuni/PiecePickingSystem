@@ -77,6 +77,11 @@ def pick_goal(request_id):
     g.grasp_pose.position.y = -38.0
     g.grasp_pose.position.z = 62.0
     g.grasp_pose.orientation.w = 1.0
+    # **개폭을 반드시 넣는다.** 2026-09-07부터 control은 개폭 미상(0) 후보를 실행 전에
+    # 탈락시킨다(control/grasp_selection.check_width) — 그 경우 그리퍼가 완전 닫기로
+    # 떨어져 빈 그리퍼도 "물었다"로 판정되기 때문이다. 실제 후보는 두 전략 모두 폭을
+    # 내므로, 여기서 0으로 두면 실물에 없는 상황을 검사하게 된다.
+    g.gripper_width_mm = 35.0
     g.max_retries = 1
     return g
 

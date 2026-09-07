@@ -5,7 +5,10 @@
 
 LLM이 정하는 것과 코드가 정하는 것을 나눈다:
 - LLM: 어떤 물체를(`object_id`) 어디로(`bin_id`) 어떤 순서로
-- 코드: 파지 자세(`grasp_pose`, 후보 중 최고점), 제어 프로파일(`profile`, 속성 DB 기준)
+- 코드: 파지 후보 목록(`grasp_candidates`)과 제어 프로파일(`profile`, 속성 DB 기준).
+  **실행할 후보 하나를 최종 선택하는 것은 control이다** — 개폭 유효성·IK·관절 한계는
+  로봇에 붙어 있어야 답할 수 있고(ikin 서비스), planner는 ROS2를 모르는 별도 서비스다.
+  여기서는 작업반경 안에 있는 후보만 점수 순으로 추려서 넘긴다.
 
 파지 자세와 프로파일은 물리적 안전에 직결되므로 LLM 출력에 맡기지 않는다(NFR-03a).
 """
@@ -54,12 +57,34 @@ class Pose(BaseModel):
     orientation: dict[str, float]
 
 
+class GraspCandidateOut(BaseModel):
+    """sort_msgs/GraspCandidate 중 control이 후보를 고르는 데 쓰는 필드만."""
+
+    pose: Pose
+    score: float = 0.0
+    gripper_width_mm: float = 0.0    # 0이면 미상 — control이 그 후보를 탈락시킨다
+    candidate_id: str = ""           # "<object_id>#<순위>". 로그·웹·control이 같은 후보를 가리킨다
+    # 진단용(control은 쓰지 않는다). 여기서 빠뜨리면 world_state → planner → control
+    # 왕복에서 조용히 0이 된다.
+    grasp_depth_mm: float = 0.0
+    strategy: str = ""
+
+
 class PlanStep(BaseModel):
     skill: SkillName
     object_id: str
     profile: Profile
+    # 1순위 후보(= grasp_candidates[0]). 후보 목록을 못 읽는 예전 경로와 로그·DB 기록이
+    # 그대로 쓴다. **실제로 실행할 후보는 control이 grasp_candidates에서 고른다.**
     grasp_pose: Pose | None = None   # pick일 때만
-    gripper_width_mm: float | None = None  # pick일 때만. 고른 후보의 예측 그리퍼 개폭(mm) — 없으면 미상
+    gripper_width_mm: float | None = None  # pick일 때만. 1순위 후보의 예측 그리퍼 개폭(mm) — 없으면 미상
+    # 작업반경 안에 있는 후보 전체(점수 내림차순). control이 개폭·IK·관절·안전을 보고 고른다.
+    grasp_candidates: list[GraspCandidateOut] = Field(default_factory=list)
+    # --- control의 후보 랭킹이 쓰는 물체 정보 (DetectedObject에서 그대로 옮긴다) ---
+    # control은 /world_state를 구독하지 않으므로 여기 실어 보내지 않으면 볼 방법이 없다.
+    object_center_mm: dict[str, float] | None = None   # position_base_mm
+    object_height_mm: float | None = None              # height_mm. 미상이면 None
+    depth_valid_ratio: float | None = None
     bin_id: str | None = None        # place_into일 때만
 
 

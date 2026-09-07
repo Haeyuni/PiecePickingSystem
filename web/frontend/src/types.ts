@@ -12,6 +12,24 @@ export interface RobotState {
   gripper_width_mm: number
 }
 
+/** grasp 노드가 낸 파지 후보 하나 (sort_msgs/GraspCandidate.msg).
+ *
+ * Top-K가 그대로 내려온다(2026-09-07) — 화면에 숫자로 표시하지는 않지만, 후보가 몇 개
+ * 도착했는지 확인하고 다음 단계(로봇 제약 기반 최종 선택)에서 쓰기 위해 타입을 둔다.
+ * 실제 그리퍼 그림은 서버가 /grasp/debug_image에 그려서 내려보낸다(CameraViews).
+ */
+export interface GraspCandidate {
+  candidate_id: string
+  pose: {
+    position: { x: number; y: number; z: number }
+    orientation: { x: number; y: number; z: number; w: number }
+  }
+  score: number
+  strategy: string
+  gripper_width_mm: number
+  grasp_depth_mm: number
+}
+
 export interface DetectedObject {
   object_id: string
   class_name: string
@@ -20,6 +38,8 @@ export interface DetectedObject {
   graspable: boolean
   not_graspable_reason: string
   needs_confirmation: boolean
+  /** 점수 내림차순. 비어 있으면 파지 후보가 없다는 뜻이다. */
+  grasp_candidates?: GraspCandidate[]
 }
 
 export interface WorldState {

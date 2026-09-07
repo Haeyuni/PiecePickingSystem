@@ -73,8 +73,8 @@ services:
   graspnet:
     build:
       context: src/grasp/docker/graspnet_baseline
-    # setup_graspnet_runtime.sh와 같은 태그를 쓴다(그 스크립트는 이미지가 있으면 빌드를
-    # 건너뛰므로, runner.py가 바뀌면 태그를 같이 올려야 옛 이미지를 재사용하지 않는다).
+    # 이미지는 compose가 위 build 컨텍스트에서 직접 만든다. checkpoint만 assets에서
+    # 마운트하면 되고, 별도 셋업 스크립트는 없다.
     image: piece-picking-graspnet-baseline:0.2.0
     command: ["--serve", "/checkpoint.tar", "cuda:0", "8200"]
     volumes:

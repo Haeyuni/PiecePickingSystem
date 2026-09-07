@@ -6,24 +6,18 @@ point cloud도 유지하되, 이 전략에만 context의 camera-mm points와 bas
 컨테이너는 camera frame 추론만 하고, 이 파일이 `T_base_camera_mm @ T_camera_graspnet_mm
 @ T_graspnet_tcp_mm`으로 최종 TCP Pose를 base-mm로 단 한 번 변환한다.
 
-추론 요청 경로는 둘이다. `endpoint`가 설정돼 있으면 **상주 추론 서버**(compose의 graspnet
-서비스)에 HTTP로 보내고, 비어 있으면 예전처럼 `docker run`으로 1회용 컨테이너를 띄운다.
-서버 쪽이 기본이자 권장 경로다 — 1회용은 호출마다 모델 로드를 다시 해서 추론 하나가
-수십~수백 초 걸리고, grasp 노드에 Docker socket/CLI를 요구해 compose 컨테이너 안에서는
-아예 못 돈다. `docker run` 경로는 grasp 노드를 호스트에서 네이티브로 돌릴 때를 위해 남겨둔다.
+추론은 **상주 추론 서버**(compose의 `graspnet` 서비스)에 HTTP로 보낸다 — `endpoint`가
+그 주소다. 예전에는 `endpoint`가 비어 있으면 `docker run`으로 1회용 컨테이너를 띄우는
+경로가 있었지만 제거했다: 호출마다 모델을 다시 로드해 추론 하나가 수십~수백 초 걸렸고,
+grasp 노드에 Docker socket/CLI를 요구해 compose 컨테이너(지금의 실행 환경) 안에서는
+애초에 돌 수 없었다.
 """
 import io
 import json
-import shutil
-import subprocess
-import tempfile
 import threading
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
-from pathlib import Path
-
 import numpy as np
 
 from .exceptions import InferenceBusy
@@ -34,7 +28,6 @@ class _NoUprightCandidate(RuntimeError):
     일반 실패와 구분한다 — 이 경우는 "추론 불가"가 아니라 "쓸 만한 자세가 없음"이다."""
 
 STRATEGY = "graspnet_baseline"
-_CHECKPOINT_MOUNT = "/checkpoint.tar"
 
 # grasp_node는 ReentrantCallbackGroup을 쓴다 — 한 추론(수십 초, 콜드 스타트 포함 컨테이너
 # 하나)이 끝나기 전에 새 관측이 들어오면 그 스레드가 별도로 또 docker run을 쏜다. 실물로
@@ -66,28 +59,6 @@ def _quaternion_from_matrix(matrix: np.ndarray) -> tuple[float, float, float, fl
             scale = np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1]) * 2.0
             x, y, z, w = (matrix[0, 2] + matrix[2, 0]) / scale, (matrix[1, 2] + matrix[2, 1]) / scale, 0.25 * scale, (matrix[1, 0] - matrix[0, 1]) / scale
     return tuple(float(value) for value in (x, y, z, w))
-
-
-def _docker_directory() -> Path:
-    try:
-        from ament_index_python.packages import get_package_share_directory
-
-        installed = Path(get_package_share_directory("grasp")) / "docker" / "graspnet_baseline"
-        if (installed / "Dockerfile").is_file():
-            return installed
-    except Exception:
-        pass
-    return Path(__file__).resolve().parents[2] / "docker" / "graspnet_baseline"
-
-
-def _require_image(image: str) -> None:
-    if shutil.which("docker") is None:
-        raise RuntimeError("docker 명령을 찾지 못했습니다")
-    exists = subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
-    if not exists:
-        raise RuntimeError(
-            f"GraspNet Docker image가 없습니다: {image}. 테스트 PC에서 "
-            "bash src/grasp/scripts/setup_graspnet_runtime.sh 를 먼저 실행하세요.")
 
 
 # base 좌표계에서 "아래로 똑바로" 내려가는 방향. 접근축을 이 벡터와 비교해 기울기를 잰다.
@@ -196,13 +167,14 @@ def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
     return position, float(c_hi - c_lo)
 
 
-def _select_best(raw_candidates: list, T_base_camera_mm: np.ndarray,
-                 T_graspnet_tcp_mm: np.ndarray, threshold_deg: float,
-                 max_deg: float, step_deg: float,
-                 camera_offset_mm=(0.0, 0.0, 0.0),
-                 points_base=None, refine_depth_mm: float = 8.0) -> tuple[dict | None, dict]:
+def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
+                       T_graspnet_tcp_mm: np.ndarray, threshold_deg: float,
+                       max_deg: float, step_deg: float,
+                       camera_offset_mm=(0.0, 0.0, 0.0),
+                       points_base=None, refine_depth_mm: float = 8.0,
+                       top_k: int = 10) -> tuple[list, dict]:
     """camera frame GraspNet 후보들을 base로 한 번에 옮기고, **접근축이 수직에 가까운**
-    후보만 남겨 점수가 가장 높은 하나를 돌려준다. (선택된 후보, 진단정보)를 반환한다.
+    후보만 남겨 점수 상위 `top_k`개를 돌려준다. (후보 리스트, 진단정보)를 반환한다.
 
     **왜 base로 옮긴 뒤에 각도를 재는가.** GraspNet의 접근축은 `rotation_matrix[:, 0]`인데
     그건 **카메라 좌표** 기준이다. 카메라가 손목에 달려 있어(eye-in-hand) 로봇 자세마다
@@ -223,7 +195,7 @@ def _select_best(raw_candidates: list, T_base_camera_mm: np.ndarray,
     """
     diagnostics: dict = {"raw_count": len(raw_candidates)}
     if not raw_candidates:
-        return None, diagnostics
+        return [], diagnostics
 
     # --- 벡터화: 파싱 + 유효성 ---------------------------------------------
     n = len(raw_candidates)
@@ -256,7 +228,7 @@ def _select_best(raw_candidates: list, T_base_camera_mm: np.ndarray,
     valid = finite & orthonormal & right_handed
     diagnostics["valid_count"] = int(valid.sum())
     if not valid.any():
-        return None, diagnostics
+        return [], diagnostics
 
     index = np.flatnonzero(valid)
     rot_cam, trans_mm = rot_cam[index], trans_mm[index]
@@ -325,49 +297,70 @@ def _select_best(raw_candidates: list, T_base_camera_mm: np.ndarray,
         limit += float(step_deg)
     if used_deg is None:
         diagnostics["used_threshold_deg"] = None
-        return None, diagnostics
+        return [], diagnostics
     diagnostics["used_threshold_deg"] = round(used_deg, 1)
     diagnostics["passed_count"] = int(keep.sum())
 
-    # --- 통과 후보 중 최고 점수 하나 ----------------------------------------
+    # --- 통과 후보를 점수순으로 Top-K ---------------------------------------
+    # **하나만 돌려주지 않는다.** 예전에는 최고점 하나만 내보내 웹 시각화와 이후 선택
+    # 알고리즘이 쓸 후보가 남지 않았다. 서버가 이미 NMS + sort_by_score를 마친 것을
+    # 주므로(docker/graspnet_baseline/runner.py: GraspGroup.nms/sort_by_score) 여기서는
+    # 기울기 필터를 통과한 것 중 점수 상위 K개를 그대로 유지한다.
+    #
+    # 실제로 어느 후보를 집을지는 control이 정한다(control/grasp_selection.py) —
+    # 개폭 유효성·접근/파지 IK·관절 한계·최소 안전을 보고 통과한 것들 중 랭킹으로 고른다.
+    # planner는 그 사이에서 작업반경만 걸러 목록을 그대로 넘긴다.
+    # 이 단계는 "선택지를 잃지 않는 것"까지만 한다.
     kept = np.flatnonzero(keep)
-    best = int(kept[int(np.argmax(score[kept]))])
-    T_best = T_base_tcp[best]
-    chosen_width_mm = float(width_mm[best])
-    if points_base is not None and len(points_base) >= 30:
-        position, chosen_width_mm = _refine_on_cloud(T_best, points_base, refine_depth_mm)
-        diagnostics["refined_from_mm"] = [round(float(v), 1) for v in T_best[:3, 3]]
-        diagnostics["refined_shift_mm"] = round(
-            float(np.linalg.norm(position - T_best[:3, 3])), 1)
-        diagnostics["graspnet_width_mm"] = round(float(width_mm[best]), 1)
-        T_best = T_best.copy()
-        T_best[:3, 3] = position
-    qx, qy, qz, qw = _quaternion_from_matrix(T_best[:3, :3])
-    diagnostics.update({
-        "chosen_angle_deg": round(float(angle_deg[best]), 1),
-        "chosen_score": round(float(score[best]), 3),
-        "graspnet_translation_cam_mm": [round(float(v), 2) for v in trans_mm[best]],
-        "graspnet_depth_mm": round(float(depth_mm[best]), 1),
-        "graspnet_approach_cam": [round(float(v), 3) for v in rot_cam[best][:, 0]],
-        "T_graspnet_tcp_translation_mm": [round(float(v), 2) for v in T_graspnet_tcp_mm[:3, 3]],
-        "offset_frame": "GraspNet gripper frame (X=접근, Y=닫힘, Z=나머지)",
-        "graspnet_point_base_mm": [round(float(v), 2) for v in T_base_graspnet[best][:3, 3]],
-        "tcp_target_base_mm": [round(float(v), 2) for v in T_best[:3, 3]],
-        "tcp_approach_axis_base": [round(float(v), 3) for v in T_best[:3, 2]],
-        "camera_offset_mm": [round(float(v), 1) for v in offset_cam],
-        "camera_axis_base": [round(float(v), 3) for v in camera_axis_base / norm_axis],
-    })
-    return {
-        "debug": diagnostics,
-        "pose": {
-            "position": {"x": float(T_best[0, 3]), "y": float(T_best[1, 3]),
-                         "z": float(T_best[2, 3])},
-            "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
-        },
-        "width_mm": chosen_width_mm,
-        "score": float(np.clip(score[best], 0.0, 1.0)),
-        "strategy": STRATEGY,
-    }, diagnostics
+    order = kept[np.argsort(-score[kept])][:max(1, int(top_k))]
+    diagnostics["topk_count"] = int(len(order))
+
+    results = []
+    for rank, best in enumerate(int(v) for v in order):
+        T_best = T_base_tcp[best]
+        chosen_width_mm = float(width_mm[best])
+        refined_shift = None
+        if points_base is not None and len(points_base) >= 30:
+            position, chosen_width_mm = _refine_on_cloud(T_best, points_base, refine_depth_mm)
+            refined_shift = round(float(np.linalg.norm(position - T_best[:3, 3])), 1)
+            T_best = T_best.copy()
+            T_best[:3, 3] = position
+        qx, qy, qz, qw = _quaternion_from_matrix(T_best[:3, :3])
+        entry = {
+            "pose": {
+                "position": {"x": float(T_best[0, 3]), "y": float(T_best[1, 3]),
+                             "z": float(T_best[2, 3])},
+                "orientation": {"x": qx, "y": qy, "z": qz, "w": qw},
+            },
+            "width_mm": chosen_width_mm,
+            "score": float(np.clip(score[best], 0.0, 1.0)),
+            "grasp_depth_mm": float(depth_mm[best]),
+            "strategy": STRATEGY,
+        }
+        if rank == 0:
+            # 1순위에만 좌표 변환 중간값을 실어 보낸다 — node가 [좌표체인] 로그로 찍는다.
+            # 후보마다 붙이면 로그가 K배로 늘어나기만 한다.
+            diagnostics.update({
+                "chosen_angle_deg": round(float(angle_deg[best]), 1),
+                "chosen_score": round(float(score[best]), 3),
+                "graspnet_translation_cam_mm": [round(float(v), 2) for v in trans_mm[best]],
+                "graspnet_depth_mm": round(float(depth_mm[best]), 1),
+                "graspnet_approach_cam": [round(float(v), 3) for v in rot_cam[best][:, 0]],
+                "T_graspnet_tcp_translation_mm": [round(float(v), 2)
+                                                  for v in T_graspnet_tcp_mm[:3, 3]],
+                "offset_frame": "GraspNet gripper frame (X=접근, Y=닫힘, Z=나머지)",
+                "graspnet_point_base_mm": [round(float(v), 2)
+                                           for v in T_base_graspnet[best][:3, 3]],
+                "tcp_target_base_mm": [round(float(v), 2) for v in T_best[:3, 3]],
+                "tcp_approach_axis_base": [round(float(v), 3) for v in T_best[:3, 2]],
+                "camera_offset_mm": [round(float(v), 1) for v in offset_cam],
+                "camera_axis_base": [round(float(v), 3) for v in camera_axis_base / norm_axis],
+                "refined_shift_mm": refined_shift,
+                "graspnet_width_mm": round(float(width_mm[best]), 1),
+            })
+            entry["debug"] = diagnostics
+        results.append(entry)
+    return results, diagnostics
 
 
 def _infer_via_endpoint(endpoint: str, points_cam_mm: np.ndarray, params: dict) -> list:
@@ -411,61 +404,6 @@ def _infer_via_endpoint(endpoint: str, points_cam_mm: np.ndarray, params: dict) 
         raise RuntimeError("GraspNet 결과 형식이 올바르지 않습니다") from exc
 
 
-def _infer_via_docker_run(points_cam_mm: np.ndarray, params: dict) -> list:
-    """1회용 컨테이너 경로(fallback). grasp 노드가 호스트에서 네이티브로 돌 때만 쓴다 —
-    compose의 grasp 컨테이너에는 Docker socket/CLI가 없다(src/grasp/Dockerfile 주석)."""
-    checkpoint = Path(str(params.get("checkpoint_path", ""))).expanduser()
-    if not checkpoint.is_file():
-        raise RuntimeError(
-            "graspnet_baseline.checkpoint_path가 없습니다. 테스트 PC에서 "
-            "setup_graspnet_runtime.sh를 실행해 checkpoint.tar를 준비하세요 "
-            "(또는 endpoint를 설정해 상주 서버를 쓰세요)")
-    device = str(params.get("device", "cuda:0"))
-    if not device.startswith("cuda"):
-        raise RuntimeError("GraspNet-baseline은 CUDA device가 필요합니다")
-
-    image = str(params.get("image", "piece-picking-graspnet-baseline:0.2.0"))
-    _require_image(image)
-    num_points = int(params.get("num_points", 20000))
-    max_candidates = int(params.get("max_candidates", 5))
-    timeout_s = float(params.get("timeout_s", 60.0))
-    min_width_m = float(params.get("min_width_mm", 5.0)) / 1000.0
-    max_width_m = float(params.get("max_opening_mm", 110.0)) / 1000.0
-
-    container_name = f"graspnet-baseline-{uuid.uuid4().hex[:12]}"
-    with tempfile.TemporaryDirectory(prefix="graspnet_baseline_") as temp_dir:
-        temp = Path(temp_dir)
-        np.savez_compressed(temp / "input.npz",
-                            points_cam_m=points_cam_mm.astype(np.float32) / 1000.0)
-        command = [
-            "docker", "run", "--rm", "--gpus", "all", "--name", container_name,
-            "-v", f"{temp}:/io",
-            "-v", f"{checkpoint.resolve()}:{_CHECKPOINT_MOUNT}:ro",
-            image, "/io/input.npz", "/io/output.json", _CHECKPOINT_MOUNT, device,
-            str(num_points), str(min_width_m), str(max_width_m), str(max_candidates),
-        ]
-        try:
-            run = subprocess.run(command, text=True, capture_output=True, timeout=timeout_s)
-        except subprocess.TimeoutExpired as exc:
-            # subprocess timeout은 `docker` CLI(클라이언트) 프로세스만 죽인다 — 컨테이너
-            # 본체는 데몬에서 계속 돌며 GPU 메모리를 쥔 채 고아로 남는다(2026-09-05 실물
-            # 확인: 컨테이너 20개 넘게 쌓여 GPU를 다 먹고 perception까지 OOM으로 죽음).
-            # --name으로 명시적으로 죽여야 실제로 회수된다.
-            subprocess.run(["docker", "kill", container_name], capture_output=True, timeout=10.0)
-            raise RuntimeError(f"GraspNet 추론 timeout ({timeout_s:.0f}s)") from exc
-        output = temp / "output.json"
-        if run.returncode or not output.is_file():
-            detail = (run.stderr or run.stdout).strip().splitlines()
-            raise RuntimeError(f"GraspNet container 실행 실패: {detail[-1] if detail else run.returncode}")
-        try:
-            result = json.loads(output.read_text(encoding="utf-8"))
-            if result.get("input_frame") != "camera" or result.get("input_unit") != "m":
-                raise RuntimeError("GraspNet 결과의 camera/m 입력 계약이 다릅니다")
-            return result["candidates"]
-        except (OSError, ValueError, KeyError) as exc:
-            raise RuntimeError("GraspNet 결과 형식이 올바르지 않습니다") from exc
-
-
 def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> list[dict]:
     """Camera-mm point cloud를 GraspNet에 보내고 base-mm 후보로 돌려준다."""
     # points_base는 GraspNet 입력에는 안 쓰지만(모델은 camera frame을 요구한다) 결과를
@@ -481,6 +419,11 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
     if T_graspnet_tcp_mm.shape != (4, 4):
         raise RuntimeError(
             "검증된 graspnet_baseline.T_graspnet_tcp_mm(GraspNet frame에서 RG2 TCP frame으로의 mm 변환)이 필요합니다")
+    endpoint = str(params.get("endpoint", "") or "").strip()
+    if not endpoint:
+        raise RuntimeError(
+            "graspnet_baseline.endpoint가 비어 있습니다. compose의 graspnet 서비스 주소를 "
+            "넣으세요(기본 http://localhost:8200). 이 전략은 상주 추론 서버로만 동작합니다")
 
     min_points = int(params.get("min_points", 80))
     if len(points_cam_mm) < min_points:
@@ -494,27 +437,24 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
     if not _INFERENCE_LOCK.acquire(blocking=False):
         raise InferenceBusy("이전 GraspNet 추론이 진행 중입니다")
     try:
-        endpoint = str(params.get("endpoint", "") or "").strip()
-        if endpoint:
-            raw_candidates = _infer_via_endpoint(endpoint, points_cam_mm, params)
-        else:
-            raw_candidates = _infer_via_docker_run(points_cam_mm, params)
+        raw_candidates = _infer_via_endpoint(endpoint, points_cam_mm, params)
     finally:
         _INFERENCE_LOCK.release()
 
-    best, diagnostics = _select_best(
+    candidates, diagnostics = _select_candidates(
         raw_candidates, T_base_camera_mm, T_graspnet_tcp_mm,
         float(params.get("approach_angle_threshold_deg", 15.0)),
         float(params.get("approach_angle_max_deg", 45.0)),
         float(params.get("approach_angle_step_deg", 5.0)),
         _camera_offset(params),
         np.asarray(points_base, dtype=float) if points_base is not None else None,
-        float(params.get("refine_grasp_depth_mm", 8.0)))
-    if best is None:
+        float(params.get("refine_grasp_depth_mm", 8.0)),
+        int(params.get("top_k", 10)))
+    if not candidates:
         # 추론은 됐는데 임계각 안에 드는 후보가 없다. 빈 리스트로 돌려주면 node가
         # "후보 없음"으로 발행하고 planner는 파지 불가로 읽는데, **왜** 걸러졌는지가
         # 로그에 없으면 추적이 안 된다 — 일반 실패와 구분되는 예외로 알린다.
         max_deg = params.get("approach_angle_max_deg", 45.0)
         raise _NoUprightCandidate(
             f"수직 대비 {max_deg}도 이내 후보 없음 (기울기 {diagnostics.get('angles_deg')})")
-    return [best]
+    return candidates

@@ -2,13 +2,17 @@
 
 검증 항목: 스키마 유효성, 작업공간 경계, 가반하중, 스킬 전제조건, 활성 SafetyEvent 유무.
 
+**파지 후보는 여기서 하나로 좁히지 않는다.** 작업반경 안에 있는 것을 점수 순으로 전부
+넘기고, 실행할 하나는 control이 고른다(control/grasp_selection.py) — 개폭 유효성·IK·
+관절 한계는 로봇에 붙어 있어야만 답할 수 있고 planner는 ROS2를 모르기 때문이다.
+
 검증을 통과한 시퀀스는 사람의 승인 없이 자동 실행되므로(웹_인터페이스_정의서 1절),
 여기서 막지 못한 것은 로봇이 그대로 수행한다. 판정은 전부 코드로 하고 LLM 출력을 신뢰하지 않는다.
 """
 import math
 
 from . import grounding
-from .schema import PlanStep, Pose
+from .schema import GraspCandidateOut, PlanStep, Pose
 
 # M0609 사양 (BR 6.1절). 작업반경 900mm, 가반하중 6kg.
 WORKSPACE_RADIUS_MM = 900.0
@@ -54,14 +58,43 @@ def resolve_profile(obj: dict) -> str:
     return profile
 
 
-def _best_grasp(obj: dict) -> dict:
+def _reachable_candidates(obj: dict) -> list[dict]:
+    """작업반경 안에 있는 파지 후보를 점수 내림차순으로 돌려준다. 하나도 없으면 Rejected.
+
+    **후보 하나가 아니라 목록을 넘긴다.** 예전에는 점수 최고 후보 하나만 골라 보냈고,
+    그 하나가 실행 불가능하면(개폭 미상, IK 안 풀림) pick 전체가 실패했다 — 나머지
+    후보는 멀쩡한데도 쓰이지 못했다. 실행 가능성 판정은 로봇에 붙은 control이 하므로
+    (control/grasp_selection.py) 여기서는 **로봇 없이도 확실히 아는 것**만 거른다:
+    팔이 물리적으로 닿지 않는 거리에 있는 후보.
+
+    그래서 작업반경 검사도 "1순위가 벗어나면 거부"가 아니라 "전부 벗어나면 거부"다.
+    """
     candidates = obj.get("grasp_candidates") or []
     if not candidates:
         raise Rejected(
             f"'{obj['object_id']}'({obj.get('name_ko') or obj.get('class_name')})에 "
             f"유효한 파지 후보가 없습니다"
         )
-    return max(candidates, key=lambda c: c.get("score", 0.0))
+    ordered = sorted(candidates, key=lambda c: c.get("score", 0.0), reverse=True)
+    in_reach = [c for c in ordered
+                if _reach_mm(c["pose"]["position"]) <= WORKSPACE_RADIUS_MM]
+    if not in_reach:
+        raise Rejected(
+            f"'{obj['object_id']}'의 파지 후보 {len(ordered)}개가 모두 "
+            f"작업반경 {WORKSPACE_RADIUS_MM:g}mm를 벗어납니다"
+        )
+    return in_reach
+
+
+def _candidate_out(candidate: dict) -> GraspCandidateOut:
+    return GraspCandidateOut(
+        pose=Pose(**candidate["pose"]),
+        score=float(candidate.get("score") or 0.0),
+        gripper_width_mm=float(candidate.get("gripper_width_mm") or 0.0),
+        candidate_id=candidate.get("candidate_id") or "",
+        grasp_depth_mm=float(candidate.get("grasp_depth_mm") or 0.0),
+        strategy=candidate.get("strategy") or "",
+    )
 
 
 def validate(llm_steps: list, world_state: dict, bins: dict,
@@ -103,19 +136,20 @@ def validate(llm_steps: list, world_state: dict, bins: dict,
                     f"{where}: '{step.object_id}'의 무게 {mass:g}g가 "
                     f"가반하중 {MAX_PAYLOAD_G:g}g를 초과합니다"
                 )
-            grasp = _best_grasp(obj)
-            position = grasp["pose"]["position"]
-            if _reach_mm(position) > WORKSPACE_RADIUS_MM:
-                raise Rejected(
-                    f"{where}: 파지 위치가 작업반경 {WORKSPACE_RADIUS_MM:g}mm를 벗어납니다"
-                )
+            candidates = _reachable_candidates(obj)
+            best = candidates[0]
+            center = obj.get("position_base_mm") or None
             held = step.object_id
             plan.append(PlanStep(
                 skill="pick",
                 object_id=step.object_id,
                 profile=profile,
-                grasp_pose=Pose(**grasp["pose"]),
-                gripper_width_mm=grasp.get("gripper_width_mm") or None,
+                grasp_pose=Pose(**best["pose"]),
+                gripper_width_mm=best.get("gripper_width_mm") or None,
+                grasp_candidates=[_candidate_out(c) for c in candidates],
+                object_center_mm=dict(center) if center else None,
+                object_height_mm=obj.get("height_mm") or None,
+                depth_valid_ratio=obj.get("depth_valid_ratio") or None,
             ))
 
         else:  # place_into

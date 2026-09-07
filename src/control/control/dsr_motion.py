@@ -47,6 +47,11 @@ def _rotation_angle_diff_deg(a_zyz: list[float], b_zyz: list[float]) -> float:
     cos_angle = max(-1.0, min(1.0, (trace - 1.0) / 2.0))
     return math.degrees(math.acos(cos_angle))
 
+def rotation_diff_deg(a_zyz, b_zyz) -> float:
+    """두 ZYZ 자세가 실제로 몇 도 떨어져 있는지. 로그용 공개 이름."""
+    return _rotation_angle_diff_deg(list(a_zyz), list(b_zyz))
+
+
 MOVEJ_ACTION = "/dsr01/motion/movej_h2r"
 MOVEL_ACTION = "/dsr01/motion/movel_h2r"
 GET_CURRENT_POSX_SERVICE = "/dsr01/dsr_controller2/aux_control/get_current_posx"
@@ -55,6 +60,146 @@ GRIPPER_JOINT_STATES_TOPIC = "/onrobot_joint_states"
 # RG2 컨트롤러 상태 비트필드(gsta 포함). onrobot_rg_control 드라이버가 발행한다 —
 # 2026-09-07에 추가한 토픽이라, 드라이버를 그 이후로 빌드/재기동하지 않았으면 없다.
 GRIPPER_STATUS_TOPIC = "/onrobot/status"
+IKIN_SERVICE = "/dsr01/dsr_controller2/motion/ikin"
+FKIN_SERVICE = "/dsr01/dsr_controller2/motion/fkin"
+GET_CURRENT_SOLUTION_SPACE_SERVICE = (
+    "/dsr01/dsr_controller2/aux_control/get_current_solution_space")
+
+# M0609 관절 한계(도). dsr_description2/urdf/m0609.urdf의 <limit lower/upper>를 도로 옮긴 값
+# (±6.2832 rad = ±360도, J3만 ±2.618 rad = ±150도). 컨트롤러의 소프트 리밋이 더 좁게
+# 설정돼 있을 수 있으므로 skill_params.yaml에서 좁힐 수 있게 해 둔다.
+JOINT_LIMITS_DEG = (360.0, 360.0, 150.0, 360.0, 360.0, 360.0)
+
+# ikin이 돌려준 관절해를 fkin으로 되돌렸을 때 원래 목표와 이만큼 안쪽이면 "해가 맞다"로 본다.
+# 실측(2026-09-07): 정상 해의 왕복 오차는 0.005mm / 0.001도 수준이고, 해가 없을 때는
+# 수백 mm 단위로 벌어진다 — 두 경우 사이에 넓은 간격이 있어 경계값 선택이 민감하지 않다.
+IK_ROUND_TRIP_TOL_MM = 1.0
+IK_ROUND_TRIP_TOL_DEG = 1.0
+
+IK_OK = "ok"                 # 해가 있고 관절 한계 안
+IK_UNREACHABLE = "unreachable"   # 해가 없다 (왕복 검증 실패)
+IK_JOINT_LIMIT = "joint_limit"   # 해는 있는데 관절 한계를 넘는다
+IK_UNKNOWN = "unknown"           # 서비스 무응답 — 판단하지 않았다
+
+
+class IkVerdict:
+    """`verify_ik`의 결과. `status`는 IK_* 중 하나.
+
+    **판단 불가(IK_UNKNOWN)를 "가능"으로 뭉개면 안 된다.** 호출부가 그 경우를 구분해야
+    "확인하고 통과시켰다"와 "확인을 못 했다"를 로그에서 나눌 수 있다.
+    """
+
+    __slots__ = ("status", "posj", "joint_margin_deg", "round_trip_mm", "round_trip_deg")
+
+    def __init__(self, status, posj=None, joint_margin_deg=None,
+                 round_trip_mm=None, round_trip_deg=None):
+        self.status = status
+        self.posj = posj
+        self.joint_margin_deg = joint_margin_deg
+        self.round_trip_mm = round_trip_mm
+        self.round_trip_deg = round_trip_deg
+
+    @property
+    def ok(self) -> bool:
+        return self.status == IK_OK
+
+    @property
+    def known(self) -> bool:
+        return self.status != IK_UNKNOWN
+
+    def __repr__(self) -> str:
+        margin = ("%.1f" % self.joint_margin_deg) if self.joint_margin_deg is not None else "?"
+        return f"IkVerdict({self.status}, margin={margin}deg)"
+
+
+def _call_service(client, request, timeout_s: float):
+    """서비스를 한 번 부르고 결과를 돌려준다. 무응답이면 None.
+
+    `rclpy.spin_until_future_complete`를 쓰지 않는 이유는 이 모듈의 다른 호출들과 같다 —
+    노드는 MultiThreadedExecutor가 이미 돌리고 있어서, 여기서는 완료 이벤트만 기다린다.
+    """
+    if not client.service_is_ready():
+        return None
+    done = threading.Event()
+    future = client.call_async(request)
+    future.add_done_callback(lambda _f: done.set())
+    if not done.wait(timeout=timeout_s):
+        return None
+    return future.result()
+
+
+def joint_margin_deg(posj, limits=JOINT_LIMITS_DEG) -> float:
+    """관절해가 한계까지 남긴 여유(도) 중 **가장 적은 것**. 음수면 이미 한계를 넘었다."""
+    return min(float(limit) - abs(float(q)) for q, limit in zip(posj, limits))
+
+
+def current_solution_space(client, default: int = 2, timeout_s: float = 2.0) -> int:
+    """지금 로봇이 있는 solution space. 못 읽으면 `default`.
+
+    ikin은 solution space마다 다른 해를 낸다. movel은 현재 space를 유지하므로,
+    "이 자세로 **지금 상태에서** 갈 수 있는가"를 물으려면 현재 space로 물어야 한다.
+    """
+    from dsr_msgs2.srv import GetCurrentSolutionSpace
+
+    result = _call_service(client, GetCurrentSolutionSpace.Request(), timeout_s)
+    if result is None or not result.success:
+        return int(default)
+    return int(result.sol_space)
+
+
+def verify_ik(ikin_client, fkin_client, posx, sol_space: int = 2,
+              limits=JOINT_LIMITS_DEG, timeout_s: float = 2.0) -> IkVerdict:
+    """`posx`에 실제로 갈 수 있는지 ikin으로 확인한다.
+
+    **`ikin`의 `success`는 아무 의미가 없다.** dsr_controller2.cpp의 `ikin_cb`는 해가
+    있든 없든 마지막 줄에서 `res->success = true`를 넣는다(소스로 확인). 2026-09-07 실측:
+    도달 불가능한 목표(x=2000)에 `success=True`, `conv_posj=[-7203, -2186, -7732, ...]`도.
+    그래서 두 가지를 직접 본다.
+
+    1. **왕복 검증** — fkin(ikin(posx))이 원래 posx로 돌아오는가. 해가 없을 때 나오는
+       쓰레기 관절값은 전혀 다른 자세로 되돌아온다(위 예: (80, -3.9, -138)). 회전은
+       ZYZ 파라미터가 아니라 회전행렬 각도차로 비교한다 — ry가 180도 근처면 같은 방향이
+       다른 (rx,rz)로 표현될 수 있어서다(이 모듈 docstring 참조).
+    2. **관절 한계** — 왕복이 맞아도 한계를 넘는 해일 수 있다.
+
+    서비스가 준비 안 됐거나 무응답이면 IK_UNKNOWN이다. 호출부는 이것을 "불가"로 다루면
+    안 된다 — ikin이 죽어 있다는 이유로 모든 후보를 버리면 pick이 통째로 멈춘다.
+    """
+    from dsr_msgs2.srv import Fkin, Ikin
+
+    request = Ikin.Request()
+    request.pos = [float(v) for v in posx[:6]]
+    request.sol_space = int(sol_space)
+    request.ref = 0  # DR_BASE
+    result = _call_service(ikin_client, request, timeout_s)
+    if result is None:
+        return IkVerdict(IK_UNKNOWN)
+    posj = [float(q) for q in result.conv_posj]
+    if not all(math.isfinite(q) for q in posj):
+        return IkVerdict(IK_UNREACHABLE, posj=posj)
+
+    back = Fkin.Request()
+    back.pos = posj
+    back.ref = 0
+    forward = _call_service(fkin_client, back, timeout_s)
+    if forward is None:
+        # ikin은 답했는데 fkin이 무응답 — 왕복 검증을 못 했다. 관절 한계만으로 판정하면
+        # "쓰레기 해가 우연히 한계 안"인 경우를 놓치므로 모른다고 답한다.
+        return IkVerdict(IK_UNKNOWN, posj=posj, joint_margin_deg=joint_margin_deg(posj, limits))
+    reached = [float(v) for v in forward.conv_posx]
+    error_mm = math.sqrt(sum((reached[i] - float(posx[i])) ** 2 for i in range(3)))
+    error_deg = rotation_diff_deg(reached[3:6], [float(v) for v in posx[3:6]])
+    margin = joint_margin_deg(posj, limits)
+    if error_mm > IK_ROUND_TRIP_TOL_MM or error_deg > IK_ROUND_TRIP_TOL_DEG:
+        return IkVerdict(IK_UNREACHABLE, posj=posj, joint_margin_deg=margin,
+                         round_trip_mm=error_mm, round_trip_deg=error_deg)
+    if margin < 0.0:
+        return IkVerdict(IK_JOINT_LIMIT, posj=posj, joint_margin_deg=margin,
+                         round_trip_mm=error_mm, round_trip_deg=error_deg)
+    return IkVerdict(IK_OK, posj=posj, joint_margin_deg=margin,
+                     round_trip_mm=error_mm, round_trip_deg=error_deg)
+
+
 
 
 def get_current_posx(client, goal_handle, timeout_s: float = 5.0, retries: int = 6,
@@ -153,14 +298,49 @@ def _rotation_from_pose(pose):
     return quaternion_to_matrix(q.x, q.y, q.z, q.w)
 
 
-def tcp_posx_for_grasp(pose, offset_mm) -> list[float]:
+# 접근축(툴 Z) 둘레 180도 회전. 평행 그리퍼는 손가락 두 개가 대칭이라 닫힘축의 부호가
+# 뒤집혀도 **물리적으로 완전히 같은 파지**다 — 무는 지점도, 접근 방향도, 개폭도 같다.
+_FLIP_ABOUT_APPROACH = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
+
+
+def nearest_equivalent_grasp_rotation(rotation, current_zyz_deg):
+    """같은 파지를 나타내는 두 자세(R, R·Rz180) 중 **현재 손목 자세에 가까운 쪽**을 고른다.
+
+    **왜 필요한가.** 전략이 내는 닫힘축 부호는 임의다. 먼 쪽 표현을 그대로 명령하면 로봇이
+    같은 파지를 위해 손목을 180도 가까이 헛돌린다 — 2026-09-07 실물: 회전오차 172.4도로
+    시작해 접근에만 14초가 걸렸고, 뒤집은 표현을 썼다면 7.6도면 될 일이었다.
+    회전이 크면 시간만 드는 게 아니라 경로가 크게 휘어 주변과 부딪힐 위험도 커진다.
+
+    `current_zyz_deg`가 없으면(자세를 못 읽음) 원래 자세를 그대로 돌려준다 — 모르면
+    바꾸지 않는 쪽이 안전하다.
+    """
+    import numpy as np
+
+    if current_zyz_deg is None:
+        return rotation
+    current = posx_to_matrix([0.0, 0.0, 0.0, *current_zyz_deg[:3]])[:3, :3]
+    flipped = np.asarray(rotation) @ np.asarray(_FLIP_ABOUT_APPROACH)
+
+    def separation(candidate):
+        trace = float((current.T @ np.asarray(candidate)).trace())
+        return math.degrees(math.acos(max(-1.0, min(1.0, (trace - 1.0) / 2.0))))
+
+    return flipped if separation(flipped) < separation(rotation) else rotation
+
+
+def tcp_posx_for_grasp(pose, offset_mm, current_zyz_deg=None) -> list[float]:
     """**파지점**(손가락이 만나야 하는 지점) Pose → 거기에 손가락이 오도록 명령할 TCP posx.
+
+    `current_zyz_deg`를 주면 같은 파지를 나타내는 두 자세 중 현재 손목에 가까운 쪽을
+    고른다(nearest_equivalent_grasp_rotation) — 헛도는 180도 회전을 막는다.
 
     파지점 P와 자세 R이 주어졌을 때 실제 파지점은 `TCP + R @ offset`이므로, 그것이 P가
     되려면 `TCP = P - R @ offset`을 명령해야 한다. R을 함께 곱하기 때문에 수직 파지든
     기울어진 파지든 같은 식 하나로 맞는다 — base 축에 상수를 더하는 방식과 다른 점이 이것이다.
     """
     rotation = _rotation_from_pose(pose)
+    if current_zyz_deg is not None:
+        rotation = nearest_equivalent_grasp_rotation(rotation, current_zyz_deg)
     rx, ry, rz = matrix_to_zyz_deg(rotation)
     shift = rotation @ [float(v) for v in offset_mm]
     return [float(pose.position.x - shift[0]),
@@ -248,6 +428,26 @@ def approach_axis_from_pose(pose) -> list[float]:
     if norm < 1e-9:
         return [0.0, 0.0, -1.0]     # 회전이 깨진 경우: 예전 동작(수직 하강)으로 대체
     return [float(v / norm) for v in axis]
+
+
+def plan_pick_posx(pose, offset_mm, approach_height_mm: float, depth_extra_mm: float,
+                   current_zyz_deg=None):
+    """파지 후보 Pose → pick이 실제로 명령할 (하강 posx, 접근 posx, 접근축).
+
+    `pick_server._pick_real`이 쓰던 계산을 그대로 함수로 뺐다. **후보를 고르기 전 IK를
+    검사하려면 실행할 좌표와 완전히 같은 좌표로 물어야 한다** — 검사와 실행이 각자
+    계산하면 둘이 갈라져 "검사는 통과했는데 실행은 못 가는" 후보가 생긴다.
+
+    두 오프셋(하강 깊이, 접근 여유)은 base Z가 아니라 **접근축**을 따라 준다. 기울어진
+    파지에서 base Z에 더하면 오프셋이 수평 성분을 만들어 그리퍼가 물체를 옆으로 밀어낸다
+    (2026-09-07 실측: 37도 후보에서 접근 시작점이 수평으로 48.2mm 어긋났다).
+    수직 파지에서는 접근축이 (0,0,-1)이라 예전 식과 정확히 같은 값이 된다.
+    """
+    target_posx = tcp_posx_for_grasp(pose, offset_mm, current_zyz_deg=current_zyz_deg)
+    axis = approach_axis_from_pose(pose)
+    target_xyz = [target_posx[i] + depth_extra_mm * axis[i] for i in range(3)]
+    approach_xyz = [target_xyz[i] - approach_height_mm * axis[i] for i in range(3)]
+    return ([*target_xyz, *target_posx[3:]], [*approach_xyz, *target_posx[3:]], axis)
 
 
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,

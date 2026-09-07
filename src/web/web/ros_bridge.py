@@ -24,7 +24,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 
 from sort_msgs.action import Home, Pick, PlaceInto
-from sort_msgs.msg import RobotState, SafetyEvent, WorldState
+from sort_msgs.msg import GraspCandidate, RobotState, SafetyEvent, WorldState
 
 from .executor import SkillGoal, SkillResult
 
@@ -92,6 +92,22 @@ def _pose_to_msg(pose: dict):
     return msg
 
 
+def _candidate_to_msg(candidate: dict) -> GraspCandidate:
+    """planner가 낸 후보 dict → sort_msgs/GraspCandidate.
+
+    `_world_state_to_dict`가 메시지를 dict로 편 것의 역방향이다 — planner는 ROS2를 모르는
+    HTTP 서비스라 후보가 dict로 왕복하고, control에게 넘길 때 여기서 다시 메시지가 된다.
+    """
+    msg = GraspCandidate()
+    msg.pose = _pose_to_msg(candidate["pose"])
+    msg.score = float(candidate.get("score") or 0.0)
+    msg.gripper_width_mm = float(candidate.get("gripper_width_mm") or 0.0)
+    msg.candidate_id = str(candidate.get("candidate_id") or "")
+    msg.grasp_depth_mm = float(candidate.get("grasp_depth_mm") or 0.0)
+    msg.strategy = str(candidate.get("strategy") or "")
+    return msg
+
+
 def _world_state_to_dict(msg: WorldState) -> dict:
     """WorldState.msg → JSON. planner에 넘기는 형태이자 mock 픽스처와 같은 구조다."""
     return {
@@ -133,6 +149,10 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                         "score": c.score,
                         "strategy": c.strategy,
                         "gripper_width_mm": c.gripper_width_mm,
+                        # Top-K를 그대로 내보내므로(2026-09-07) 어느 후보인지 가리킬
+                        # 식별값이 필요하다. "<object_id>#<순위>", 순위 0이 1순위다.
+                        "candidate_id": c.candidate_id,
+                        "grasp_depth_mm": c.grasp_depth_mm,
                     }
                     for c in o.grasp_candidates
                 ],
@@ -188,7 +208,7 @@ class _BridgeNode(Node):
         목록이 최초 진입·재연결 때 받은 스냅샷에 멈춰 있고 perception이 물체를 새로
         보거나 놓쳐도 반영되지 않았다 — 새로고침(REST GET /api/world-state 재호출)해야만
         갱신됐다. world_state는 perception이 이미 초당 1회 안팎으로 스로틀해 발행하므로
-        (grasp_test 세션에서 확인, ~0.5~2Hz) robot_state처럼 변화 여부를 따로 걸러낼
+        (실물 실측 ~0.5~2Hz) robot_state처럼 변화 여부를 따로 걸러낼
         필요 없이 매 수신을 그대로 내보낸다.
         """
         self.latest_world_state = _world_state_to_dict(msg)
@@ -354,6 +374,8 @@ class RosExecutor:
             cycle_time_ms=result.cycle_time_ms or (time.monotonic() - started) * 1000,
             visual_verification_passed=getattr(result, "visual_verification_passed", None),
             torque_trace=list(getattr(result, "torque_trace_summary", []) or []),
+            # pick만 채운다 — Home/PlaceInto.Result에는 없는 필드다.
+            selected_candidate_id=getattr(result, "selected_candidate_id", "") or "",
             cancelled=cancelled,
         )
 
@@ -366,6 +388,15 @@ class RosExecutor:
         msg.profile = goal.profile
         msg.grasp_pose = _pose_to_msg(goal.grasp_pose)
         msg.gripper_width_mm = float(goal.gripper_width_mm or 0.0)
+        # 후보 목록과 물체 정보를 그대로 넘긴다 — 실행할 후보는 control이 고른다
+        # (개폭·IK·관절·최소안전 검사가 로봇에 붙어 있어야만 가능하다).
+        msg.grasp_candidates = [_candidate_to_msg(c) for c in (goal.grasp_candidates or [])]
+        center = goal.object_center_mm or {}
+        msg.object_center_mm.x = float(center.get("x", 0.0))
+        msg.object_center_mm.y = float(center.get("y", 0.0))
+        msg.object_center_mm.z = float(center.get("z", 0.0))
+        msg.object_height_mm = float(goal.object_height_mm or 0.0)
+        msg.depth_valid_ratio = float(goal.depth_valid_ratio or 0.0)
         msg.max_retries = goal.max_retries
         return await self._send(self._node.pick_client, msg, goal.request_id, on_feedback)
 

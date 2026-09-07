@@ -121,6 +121,7 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
         candidates.append({"pose": _pose_from_closing_axis(position, minor),
                            "score": round(float(np.clip(score, 0.0, 1.0)), 4),
                            "strategy": STRATEGY,
+                           "grasp_depth_mm": float(grasp_depth_mm),
                            "width_mm": round(minor_extent, 1)})
 
     # 2순위: 긴 축 쪽. 짧은 축이 너무 얇아 손가락이 헛도는 물체에서는 이쪽이 낫다.
@@ -130,6 +131,7 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
         candidates.append({"pose": _pose_from_closing_axis(position, major),
                            "score": round(float(np.clip(score, 0.0, 1.0)), 4),
                            "strategy": STRATEGY,
+                           "grasp_depth_mm": float(grasp_depth_mm),
                            "width_mm": round(major_extent, 1)})
 
     candidates.sort(key=lambda c: c["score"], reverse=True)

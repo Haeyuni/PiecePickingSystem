@@ -107,6 +107,14 @@ export default function ControlPage() {
         // perception이 새로 발행할 때마다 실시간으로 반영한다 — 예전엔 이 이벤트가
         // 아예 안 와서(ros_bridge.py의 _on_world_state 참조) 새로고침해야만 갱신됐다.
         setObjects(event.objects)
+        // **Top-K가 웹까지 도달했는지 확인용.** 화면에는 숫자를 띄우지 않는다(요구사항) —
+        // console.debug라 브라우저 기본 로그 레벨에서는 보이지도 않는다(개발자도구에서
+        // Verbose를 켜야 나온다). grasp 노드의 [후보수] 로그와 대조하면 중간에서
+        // 깎였는지 알 수 있다.
+        console.debug(
+          `[grasp] web received=${event.objects.reduce(
+            (sum, o) => sum + (o.grasp_candidates?.length ?? 0), 0)}`,
+          event.objects.map((o) => `${o.object_id}=${o.grasp_candidates?.length ?? 0}`).join(' '))
         break
     }
   }, [refreshPending, refreshTrace, refreshWorld])

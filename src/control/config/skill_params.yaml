@@ -12,9 +12,9 @@ profiles:
   fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
   deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
 
-# --- 툴 기하 (로봇 기구 상수. 물체·프로필과 무관하다) ------------------------
+# --- Tool reference model (empirical, not independent physical geometry) ---
 tool:
-  # **로봇이 명령·보고하는 TCP 원점에서, 그리퍼가 실제로 무는 지점까지의 벡터 (툴 좌표계 mm).**
+  # TCP to modeled pad/reference vector (tool frame, mm), not measured physical finger position.
   #
   # 왜 필요한가: 파이프라인이 내는 grasp_pose는 "손가락이 여기서 만나라"는 뜻인데,
   # movel은 그 자리에 **TCP 원점**을 보낸다. 두 점이 다르면 그 차이만큼 손끝이 빗나간다.
@@ -26,7 +26,7 @@ tool:
   # 손끝이 그만큼 더 깊이 들어간다. 그래서 control은 TCP를 그만큼 덜 보낸다
   # (dsr_motion.tcp_posx_for_grasp).
   #
-  # --- 2026-09-07 확정 ---
+  # --- 2026-09-07 historical estimate (superseded below) ---
   # 실측 두 개의 차이로 나온다. 둘 다 로봇 자신의 좌표만 쓴다(perception/티칭 불사용):
   #   실제 파지점 (플랜지 기준) = 233.2mm   <- measure_tcp_offset 방식, 고정점 3자세 최소제곱
   #                                          (잔차 1.2mm, 가로 성분 -4.6/-0.2 ~= 0 → 대칭 그리퍼와 일치.
@@ -51,17 +51,13 @@ tool:
   #
   # 가로 성분(-4.6, -0.2)은 측정 불확실도(±4.3mm) 안이고 대칭 그리퍼의 파지점은 툴 축
   # 위에 있어야 하므로 0으로 둔다.
-  # --- 2026-09-07 (3차, 실물 시연으로 확정) 25.2 → 5.3 ---
-  # 25.2는 "완전히 닫은 손가락의 **맨 끝(tip)**"까지의 거리였다(233.2 − TCP 208.0).
-  # 그런데 물체를 실제로 무는 곳은 그 끝이 아니라 **패드**이고, 그만큼 뒤쪽이다.
-  # tip을 목표에 맞추면 물체가 손가락 맨 끝에 걸쳐 제대로 안 물린다.
-  #
-  # 사용자가 "이 높이까지 내려와야 집힌다"고 실물로 보여준 자세에서 역산했다:
-  #   그 자세의 TCP z            = 89.1
-  #   그때 파이프라인의 목표 손끝 = 지지면 81.8 + 여유 2.0 = 83.8
-  #   → 오프셋 = 89.1 - 83.8 = 5.3mm
-  # 교차 확인: 25.2를 쓰면 계산상 손끝이 작업대 17.9mm **아래**가 되어 물리적으로 불가능했다.
-  # (그 자세는 툴이 수직이라 z 산수가 그대로 성립한다 — 접근축 (0.005, -0.002, -1.0))
+  # --- 2026-09-07 empirical adjustment: 25.2 -> 5.3 ---
+  # WARNING: 5.3 = 89.1 - (81.8 + 2.0), from demonstrated TCP z minus the
+  # pipeline's support+clearance reference, at a nearly vertical approach.
+  # This is NOT independent geometry or an independent support-height validation.
+  # RG2 opening changes finger/pad reach; one fixed offset does not model that motion.
+  # A reconstructed reference below modeled support cannot alone prove physical contact
+  # or establish that the old 25.2mm value was a tip rather than a pad measurement.
   grasp_center_offset_mm: {x: 0.0, y: 0.0, z: 5.3}
 
 motion:
@@ -188,9 +184,8 @@ motion:
   pick_depth_extra_mm: 0.0
 
 gripper:
-  # 이 미만 개폭으로 닫히면 "닫혔지만 아무것도 안 물렸다"로 본다 — grasp_test/
-  # robot_executor.py가 쓰는 것과 같은 기본값(RG2 개폭 기준 손가락이 완전히 맞닿는
-  # 지점 근처, 5.0mm).
+  # 이 미만 개폭으로 닫히면 "닫혔지만 아무것도 안 물렸다"로 본다.
+  # 5.0mm는 RG2 개폭 기준 손가락이 완전히 맞닿는 지점 근처다.
   min_grip_width_mm: 5.0
   # pick 전 그리퍼를 GraspCandidate.width_mm + 이 값만큼만 연다(pick_server._open_width_m).
   # width_mm을 모르면(0) 대신 motion.gripper_open_m(최대)까지 연다.
@@ -210,6 +205,58 @@ gripper:
   # 그리퍼를 **열 때** 쓰는 힘(N). 닫기에서 낮은 힘(fragile 5N)을 설정하면 드라이버가
   # 그 값을 유지하므로, 열기에는 항상 이 값을 명시해 상태 의존을 없앤다. RG2 최대는 40N.
   open_force_n: 40.0
+
+# --- 파지 후보 최종 선택 (control/grasp_selection.py) --------------------------
+# planner가 GraspNet 후보를 **순위대로 전부** 넘기고, 실행할 하나는 control이 고른다.
+# 로봇에 붙어 있어야만 답할 수 있는 것들(IK, 관절 한계)이 판정에 들어가기 때문이다.
+#
+# 검사 순서: 개폭 → 접근/파지 IK → 관절 한계 → 최소 안전 → (통과한 것들만) 점수 랭킹.
+# 실행 전에 탈락한 후보는 다음 후보로 넘어간다 — 후보 하나가 안 된다고 pick 전체가
+# 실패하지 않는다. 전부 탈락하면 로봇을 움직이지 않고 no_feasible_grasp로 끝낸다.
+#
+# **여기서 하지 않는 것**: 3D collision 검사, 주변 물체와의 간섭 예측, 특이점 판정,
+# 경로(두 끝점 사이) 검사. grasp_selection.py 모듈 docstring에 이유가 적혀 있다.
+grasp_selection:
+  # 검사할 후보 수 상한. ikin 한 번이 실측 약 31ms(2026-09-07, 이 셀)라 후보당 접근+파지
+  # 2회 = 약 66ms다. grasp_params.yaml의 top_k(10)와 맞춰 두면 받은 만큼 전부 본다.
+  max_evaluated: 10
+
+  # 지지면(= 물체 윗면 z - height_mm)보다 이만큼까지 내려가는 것은 허용한다.
+  # 손끝 위치 자체가 모델값이라(tool.grasp_center_offset_mm — 실측 기하가 아니다)
+  # 0으로 두면 모델 오차만으로 멀쩡한 후보가 탈락한다.
+  support_tolerance_mm: 5.0
+
+  # 작업대의 절대 높이(TCP z 하한). **미설정(null)이 기본이다** — 이 셀의 작업대 높이를
+  # 접촉으로 재본 적이 없어서 넣을 숫자가 없다. 재고 나면 여기에 넣으면 물체 높이를
+  # 모르는(height_mm=0) 후보까지 바닥 침범으로 걸러진다.
+  min_tcp_z_mm: null
+
+  # 관절 한계(도). 비워두면 dsr_description2/urdf/m0609.urdf 값(J3만 150, 나머지 360)을 쓴다.
+  # 컨트롤러 소프트 리밋이 더 좁으면 여기서 좁힌다.
+  # joint_limits_deg: [360.0, 360.0, 150.0, 360.0, 360.0, 360.0]
+
+  # 이보다 좁은 예상 개폭은 "손끝이 스칠 위험"으로 보고 점수를 깎는다(탈락은 아니다).
+  # **측정 근거가 없는 튜닝값이다.** 얇은 물체를 자꾸 놓치면 올리고, 멀쩡한 후보가
+  # 밀리면 내린다.
+  comfort_min_width_mm: 15.0
+  # 중심 근접도를 나눌 길이의 하한(mm). 보통은 후보들의 최대 개폭 절반(물체 반폭 추정)을
+  # 쓰고, 그게 이보다 작을 때만 이 값을 쓴다.
+  center_scale_floor_mm: 20.0
+  # 관절 여유가 이 이상이면 만점(도). M0609는 J3만 ±150이라 사실상 J3 여유를 보는 항이다.
+  joint_margin_ref_deg: 30.0
+
+  # 점수 가중치. 각 항은 [0,1]로 정규화돼 있고, 판단할 정보가 없는 항은 빠진 뒤 남은
+  # 가중치로 다시 정규화된다(정보 없음이 감점이 되지 않게).
+  # **GraspNet score는 여러 판단 요소 중 하나일 뿐이다** — 그것만으로 고르던 것을
+  # 바꾸는 것이 이 블록의 목적이다.
+  weights:
+    grasp_score: 0.35       # GraspCandidate.score (전략이 이미 0~1로 clip해서 낸다)
+    width_fit: 0.20         # RG2 개폭 적합성 (너무 넓으면 최대개방으로 떨어지고, 너무 좁으면 스친다)
+    center_proximity: 0.20  # 파지점이 물체 중심(xy)에 가까운가
+    height_fit: 0.10        # 물체 높이의 중간을 무는가 (윗모서리만 물면 미끄러진다)
+    joint_margin: 0.10      # 관절 한계까지 여유
+    depth_quality: 0.05     # depth_valid_ratio. 물체 단위 값이라 같은 물체 안에서는 동점이다
+
 
 visual_verification:
   wrist_camera_offset_mm: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정). 단위 mm

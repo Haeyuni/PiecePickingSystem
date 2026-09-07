@@ -27,6 +27,7 @@
 """
 import bisect
 import pathlib
+import time
 
 import cv2
 import numpy as np
@@ -35,7 +36,7 @@ import yaml
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
 
@@ -134,15 +135,15 @@ class GraspNode(Node):
         self._assets = config.get("assets") or {}
         self._strategy_name = (self.get_parameter("strategy").value
                                or (config.get("strategy") or {}).get("name")
-                               or "heuristic_pca")
+                               # 설정에도 없을 때의 최후 기본값. grasp_params.yaml의
+                               # strategy.name과 같아야 한다 — 셋(런치 인자/설정/여기)이
+                               # 어긋나면 실행 방식에 따라 다른 전략이 돈다.
+                               or "graspnet_baseline")
         self._plan = strategies.get(self._strategy_name)
         self._strategy_params = {
             **(config.get("gripper") or {}),
             **(config.get(self._strategy_name) or {}),
         }
-        checkpoint = asset_path(self._assets, "graspnet_checkpoint_path")
-        if checkpoint is not None:
-            self._strategy_params["checkpoint_path"] = str(checkpoint)
         self._pointcloud_params = config.get("pointcloud") or {}
         self._pose_max_age_s = float(self.get_parameter("pose_max_age_s").value)
         self._max_depth_age_s = float(self.get_parameter("max_depth_age_s").value)
@@ -156,6 +157,8 @@ class GraspNode(Node):
         # object_id → 그 물체 1순위 후보의 좌표 변환 중간값(graspnet_baseline만 채운다).
         # 좌표 오차를 쫓을 때 어느 단계에서 틀어졌는지 보려면 최종값만으로는 부족하다.
         self._chain_debug: dict[str, dict] = {}
+        # object_id → (전략이 낸 후보 수, 발행한 후보 수). 아래 [후보수] 로그가 쓴다.
+        self._candidate_counts: dict[str, tuple[int, int]] = {}
         self._pending_masks: dict[tuple[int, int], InstanceMasks] = {}
         self._pending_worlds: dict[tuple[int, int], WorldState] = {}
         self._publish_debug = bool(self.get_parameter("publish_debug_image").value)
@@ -179,10 +182,26 @@ class GraspNode(Node):
         self._pub = self.create_publisher(WorldState, "/world_state", 10)
         self._pose_client = RobotPoseClient(self, callback_group=callbacks)
 
+        # control이 **실제로 실행하기로 고른** 후보. 디버그 오버레이에서 그 하나만 다른
+        # 색으로 그린다 — 예전에는 1순위(rank 0)를 초록으로 칠했는데, 이제 실행할 후보는
+        # control이 개폭·IK·관절·안전을 보고 고르므로 1순위가 아닐 수 있다. 화면이
+        # 실행과 다른 것을 강조하면 안 된다.
+        # 최신 하나만 의미가 있고 늦게 붙어도 받아야 하므로 pick_server와 같은
+        # transient local QoS를 쓴다.
+        self._selected_grasp: tuple[float, GraspCandidate] | None = None
+        self.create_subscription(
+            GraspCandidate, "/control/selected_grasp", self._on_selected_grasp,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+            callback_group=callbacks)
+
         self.get_logger().info(
             f"grasp 기동 완료 (전략 {self._strategy_name}, 설정 {path})")
 
     # --- 입력 ---------------------------------------------------------------
+    def _on_selected_grasp(self, msg: GraspCandidate) -> None:
+        # candidate_id가 비면 "고른 것이 없다"(전 후보 탈락)는 뜻이라 강조를 지운다.
+        self._selected_grasp = (time.monotonic(), msg) if msg.candidate_id else None
+
     def _on_info(self, msg: CameraInfo) -> None:
         if msg.k[0] <= 0.0 or msg.k[4] <= 0.0:
             self._intrinsics = None
@@ -328,9 +347,19 @@ class GraspNode(Node):
             filled += bool(candidates)
 
         self._pub.publish(world)
+        # **후보 수를 물체별로 남긴다.** Top-K가 어디서 줄어드는지 추적하려면 발행 시점의
+        # 개수가 로그에 있어야 한다(2026-09-07). raw는 전략이 돌려준 수,
+        # published는 world_state에 실제로 실린 수다 — 둘이 다르면 노드가 깎은 것이다.
+        detail = ", ".join(
+            f"{oid}: raw={c['raw']} valid={c['valid']} filtered={c['passed']} "
+            f"published={c['published']}"
+            for oid, c in self._candidate_counts.items())
+        total_published = sum(c["published"] for c in self._candidate_counts.values())
         self.get_logger().info(
-            f"{len(world.objects)}개 중 {filled}개에 파지 후보 생성 "
-            f"({self._strategy_name})", throttle_duration_sec=2.0)
+            f"[후보수] {len(world.objects)}개 중 {filled}개에 파지 후보 생성 "
+            f"({self._strategy_name}) | 총 published={total_published}"
+            + (f" | {detail}" if detail else ""), throttle_duration_sec=2.0)
+        self._candidate_counts.clear()
 
         if self._publish_debug:
             self._publish_debug_image(world, mask_by_id, T_base_camera_mm)
@@ -398,86 +427,98 @@ class GraspNode(Node):
         # 전략이 중간 변환값을 실어 보냈으면(graspnet_baseline) 물체별로 보관한다 —
         # 아래 _process가 로그로 찍는다. GraspCandidate.msg에는 이 필드가 없으므로
         # 메시지로 변환하기 전에 여기서 빼둬야 한다.
+        debug = None
         if candidates and isinstance(candidates[0], dict) and candidates[0].get("debug"):
-            self._chain_debug[object_id] = candidates[0]["debug"]
+            debug = candidates[0]["debug"]
+            self._chain_debug[object_id] = debug
+        # 파이프라인 각 단계의 후보 수. 어디서 줄어드는지 추적하려면 전부 있어야 한다.
+        #   raw       추론 서버가 돌려준 원본 수 (서버가 이미 NMS + sort_by_score를 마친 것)
+        #   valid     회전행렬·수치가 정상인 것
+        #   passed    기울기 필터를 통과한 것
+        #   published world_state에 실린 것 (= min(passed, top_k))
+        # graspnet_baseline만 진단을 실어 보내므로, 없으면(PCA) 전략 반환 수로 채운다.
+        stage = {
+            "raw": (debug or {}).get("raw_count", len(candidates)),
+            "valid": (debug or {}).get("valid_count", len(candidates)),
+            "passed": (debug or {}).get("passed_count", len(candidates)),
+        }
         candidates = [self._fit_grasp_depth(c, obj) for c in candidates]
-        return [self._to_msg(c) for c in candidates]
+        # candidate_id는 "<object_id>#<순위>"다. 순위 0이 1순위(점수 최고)지만, **실행할
+        # 후보는 control이 고른다**(control/grasp_selection.py — 개폭·IK·관절·최소안전을
+        # 보고 랭킹). 로그·웹·planner·control이 같은 후보를 가리킬 수 있어야 Top-K를
+        # 내보내는 의미가 생긴다.
+        messages = [self._to_msg(c, f"{object_id}#{rank}")
+                    for rank, c in enumerate(candidates)]
+        stage["published"] = len(messages)
+        self._candidate_counts[object_id] = stage
+        return messages
 
-    # 손끝이 지지면(작업대) 아래로 내려가지 않게 남겨두는 여유(mm). 0이면 지지면에
-    # 정확히 닿는 높이까지 허용한다 — 얇은 물체는 실제로 그 높이에서 물어야 한다.
-    _SUPPORT_CLEARANCE_MM = 0.0
-    # 손가락이 물체를 감쌀 수 있는 유효 길이(mm). RG2 inner_finger 메쉬 전체 길이가
-    # 57.8mm이고 그중 뿌리 쪽은 관절부라, 실제로 무는 구간을 보수적으로 45mm로 본다.
-    # **추정값이다** — 큰 물체에서 그리퍼 몸통이 물체 윗면에 닿으면 줄일 것.
+    # Provisional empirical-pad clearance, not a validated fingertip safety margin.
+    # Source repeatability reaches range 3.9mm / std 0.85mm (obj_179);
+    # plane p95 ~1.5mm is a trimmed residual, not absolute error. TCP dz=+2.4mm
+    # does not prove contact. None of these establishes 2.5mm as a safe bound.
+    _SUPPORT_CLEARANCE_MM = 2.5
+
+    # Thin-object compromise: min(2.5, 0.4*h), not guaranteed physical clearance.
+    _SUPPORT_CLEARANCE_HEIGHT_FRACTION = 0.4
+    # Provisional target for candidates that are too shallow. It does not override a strategy
+    # candidate that is already deeper, and is not validated collision geometry.
     _FINGER_REACH_MM = 45.0
 
     def _fit_grasp_depth(self, candidate: dict, obj) -> dict:
-        """파지 깊이를 **실측 물체 높이**에 맞춘다 — 너무 얕으면 내리고, 지지면 아래는 막는다.
+        """Fit the empirical pad reference along the candidate's downward axis.
 
-        **왜 필요한가 (얕은 쪽).** 전략은 깊이를 "보이는 표면에서 몇 mm"로 정한다
-        (refine_grasp_depth_mm / grasp_depth_mm, 둘 다 8mm). 그 8mm는 **접근축을 따라**
-        재므로, 기울어진 파지에서는 수직 침투가 `8 x cos(기울기)`로 줄어든다. 2026-09-07
-        실측: 높이 19.1mm 물체를 30도로 접근하면 손끝이 윗면 아래로 1.8mm밖에 안 들어간다 —
-        모서리만 스쳐 물어 들어올리다 놓친다. (예전에는 pick_depth_extra_mm=40이 이걸
-        우연히 메우고 있었는데, 그 값의 진짜 정체는 TCP↔손끝 오프셋이라 지금은 0이다.)
-
-        **왜 필요한가 (깊은 쪽).** 반대로 물체가 얇으면 그 8mm가 물체를 지나쳐 작업대
-        속이 된다. 실측: 높이 7.0mm 물체의 윗면 z=327.8, 지지면 z=320.8 → 윗면-8mm는
-        319.8로 작업대보다 1.0mm 아래다. 그대로 명령하면 손가락이 작업대를 눌러 충돌·
-        안전모드로 들어간다. 지금까지 안 드러난 건 TCP↔손끝 오프셋 때문에 손끝이 어차피
-        18mm 위에서 닫히고 있었기 때문이다 — **그 오프셋을 바로잡는 순간 드러난다.**
-
-        규칙(모두 실측값에서 나온다. 튜닝 상수는 위 둘뿐이다):
-          목표    = 물체 중간 높이 (지지면 + 높이 x _GRASP_HEIGHT_FRACTION)
-          더 깊게만 내린다 — 전략이 이미 중간보다 깊게 잡았으면 그 판단을 존중한다
-          바닥    = 지지면 + _SUPPORT_CLEARANCE_MM, 절대 그 아래로는 안 간다
-
-        지지면은 perception이 마스크 바깥 링에서 실측한 값이다
-        (`position_base_mm.z - height_mm`, mask_utils.support_3d). `height_mm=0`은
-        "미상"이므로(DetectedObject.msg) 그때는 아무것도 하지 않는다 — 모르는 값으로
-        추정해 옮기면 멀쩡한 파지를 망친다.
-
-        움직이는 방향은 **그 후보 자신의 접근축**이다. base Z로 옮기면 기울어진 파지에서
-        옆으로 밀린다(pick_server._pick_real의 같은 논리).
+        Support is estimated as top-height. A shallow candidate is lowered toward
+        max(support+clearance, top-reach); an already-deep candidate is preserved unless
+        it violates the support floor. This is not a physical fingertip or collision
+        guarantee. Unknown/invalid inputs are not fitted.
         """
         height_mm = float(getattr(obj, "height_mm", 0.0) or 0.0)
-        if height_mm <= 0.0 or not isinstance(candidate, dict):
+        if not np.isfinite(height_mm) or height_mm <= 0.0 or not isinstance(candidate, dict):
+            self.get_logger().warning(f"[파지깊이] {obj.object_id} skipped: invalid/unknown height or candidate")
             return candidate
         pose = candidate.get("pose") or {}
         position, orientation = pose.get("position"), pose.get("orientation")
         if not position or not orientation:
+            self.get_logger().warning(f"[파지깊이] {obj.object_id} skipped: missing pose")
             return candidate
 
-        support_z = float(obj.position_base_mm.z) - height_mm
-        floor_z = support_z + self._SUPPORT_CLEARANCE_MM
         top_z = float(obj.position_base_mm.z)
-        current_z = float(position["z"])
-        # **손끝(tip)을 지지면 가까이 내린다.** 후보 지점은 손가락 *맨 끝*이 갈 자리인데,
-        # 예전처럼 물체 중간높이를 노리면 짧은 물체는 위쪽 절반만 손가락 사이에 들어간다
-        # (2026-09-07 실물: 높이 18.1mm 물체에서 tip이 작업대 9mm 위 → 헛무름).
-        # 다만 키 큰 물체까지 바닥으로 내리면 그리퍼 몸통이 물체 윗면에 닿으므로,
-        # 윗면에서 손가락 유효 길이보다 더 깊이는 내려가지 않는다.
-        target_z = max(floor_z, top_z - self._FINGER_REACH_MM)
-        # 전략이 이미 그보다 깊게 잡았으면 그 판단을 존중한다(단, 바닥은 지킨다).
-        target_z = max(min(current_z, target_z), floor_z)
-        if abs(target_z - current_z) < 0.5:
+        original = np.array([position[k] for k in ("x", "y", "z")], dtype=float)
+        quaternion = tuple(float(orientation[k]) for k in ("x", "y", "z", "w"))
+        if (not np.isfinite(top_z) or not np.all(np.isfinite(original))
+                or not np.all(np.isfinite(quaternion)) or not any(quaternion)):
+            self.get_logger().warning(f"[파지깊이] {obj.object_id} skipped: nonfinite/invalid pose")
+            return candidate
+        approach = geometry.quaternion_to_matrix(*quaternion)[:, 2]
+        if not np.all(np.isfinite(approach)) or float(approach[2]) >= -1e-6:
+            self.get_logger().warning(f"[파지깊이] {obj.object_id} skipped: axis not finite/downward")
             return candidate
 
-        approach = geometry.quaternion_to_matrix(
-            orientation["x"], orientation["y"], orientation["z"], orientation["w"])[:, 2]
-        if abs(float(approach[2])) < 1e-6:
-            # 접근축이 수평이면 이 축으로는 높이를 바꿀 수 없다.
-            return candidate
-        moved = np.array([position["x"], position["y"], current_z]) + (
+        support_z = top_z - height_mm
+        clearance = min(self._SUPPORT_CLEARANCE_MM,
+                        height_mm * self._SUPPORT_CLEARANCE_HEIGHT_FRACTION)
+        floor_z = support_z + clearance
+        current_z = float(original[2])
+        reach_z = top_z - self._FINGER_REACH_MM
+        old_z = max(min(current_z, max(support_z, reach_z)), support_z)
+        target_z = max(min(current_z, max(floor_z, reach_z)), floor_z)
+        moved = original + (
             (target_z - current_z) / float(approach[2])) * approach
+        moved[2] = target_z  # Avoid roundoff below the numerical floor.
         self.get_logger().info(
-            f"[파지깊이] {obj.object_id} 물체높이 {height_mm:.1f}mm "
-            f"(지지면 {support_z:.1f} ~ 윗면 {float(obj.position_base_mm.z):.1f}) "
-            f"| 후보 z={current_z:.1f} → {target_z:.1f} "
-            f"(바닥 {floor_z:.1f}, 윗면-손가락 {top_z - self._FINGER_REACH_MM:.1f}) "
-            f"({'더 깊게' if target_z < current_z else '지지면 보호'}, "
-            f"접근축 따라 {float(np.linalg.norm(moved - np.array([position['x'], position['y'], current_z]))):.1f}mm)",
-            throttle_duration_sec=5.0)
+            f"[파지깊이] {obj.object_id} empirical_pad "
+            f"h={height_mm!r} top_z={top_z!r} support_z=top-h={support_z!r} "
+            f"candidate_z={current_z!r} reach={self._FINGER_REACH_MM!r} "
+            f"| OLD zero-clearance: max(min(candidate_z, max(support_z+0, top_z-reach)), "
+            f"support_z+0)={old_z!r} (legacy deadband: abs(OLD-candidate_z)<0.5; "
+            f"returned_z={current_z if abs(old_z - current_z) < 0.5 else old_z!r}) "
+            f"| NEW clearance=min({self._SUPPORT_CLEARANCE_MM!r}, "
+            f"{self._SUPPORT_CLEARANCE_HEIGHT_FRACTION!r}*h)={clearance!r}; "
+            f"max(min(candidate_z, max(support_z+clearance={floor_z!r}, "
+            f"top_z-reach={reach_z!r})), support_z+clearance)={target_z!r} "
+            f"| fitted_z={float(moved[2])!r} fitted_xyz={tuple(float(v) for v in moved)!r} "
+            f"quaternion_xyzw={quaternion!r} unchanged={target_z == current_z}")
         candidate = dict(candidate)
         candidate["pose"] = {**pose, "position": {"x": float(moved[0]),
                                                   "y": float(moved[1]),
@@ -519,15 +560,55 @@ class GraspNode(Node):
     _FINGER_LENGTH_MM = 40.0
     _DEFAULT_WIDTH_MM = 60.0
 
+    # control이 고른 후보를 이 시간까지만 강조한다. pick 한 번이 수십 초라 그보다는
+    # 길어야 하고, 다음 사이클까지 남아 엉뚱한 후보를 강조하면 안 된다.
+    _SELECTED_MAX_AGE_S = 90.0
+    # 선택 메시지의 자세와 이만큼 안쪽이면 "같은 후보"로 본다. candidate_id의 순위 부분은
+    # 프레임마다 바뀔 수 있어(점수 순위가 흔들린다) id만으로는 못 맞춘다 — 자세로 맞춘다.
+    _SELECTED_MATCH_TOL_MM = 5.0
+
+    def _selected_index(self, candidates) -> int | None:
+        """이 후보 목록에서 control이 고른 것의 인덱스. 없으면 None.
+
+        object_id(candidate_id의 '#' 앞부분)가 같고 파지점이 가장 가까운 후보를 고른다.
+        서로 다른 물체의 선택이 남아 있어도 강조되지 않게 하려는 것이다.
+        """
+        if self._selected_grasp is None or not candidates:
+            return None
+        received, selected = self._selected_grasp
+        if time.monotonic() - received > self._SELECTED_MAX_AGE_S:
+            return None
+        object_id = selected.candidate_id.split("#")[0]
+        best, best_distance = None, self._SELECTED_MATCH_TOL_MM
+        for index, candidate in enumerate(candidates):
+            if candidate.candidate_id.split("#")[0] != object_id:
+                continue
+            a, b = candidate.pose.position, selected.pose.position
+            distance = float(np.linalg.norm([a.x - b.x, a.y - b.y, a.z - b.z]))
+            if distance <= best_distance:
+                best, best_distance = index, distance
+        return best
+
     def _draw_grasp_candidates(self, vis: np.ndarray, candidates, camera2base: np.ndarray) -> None:
         """파지 후보를 base→camera 역변환·투영해 실제 개폭·접근축을 반영한 그리퍼
         스케치로 그린다 — "닫는 축 선 하나"만 그리면 개폭·접근 방향이 안 보여
         PCA 결과와 구분이 안 됐다(2026-09-05, 사용자 피드백).
 
-        전략이 점수 내림차순으로 돌려주므로(heuristic_pca.py) 상위 3개만 그린다 — 많이 그리면
-        가려지고, 어차피 planner/pick_server가 실제로 시도하는 건 1순위다.
+        전략이 점수 내림차순으로 돌려주므로(heuristic_pca.py / graspnet_baseline.py) 앞에서부터
+        그린다. 2026-09-07 이전에는 상위 3개만 그렸는데, Top-K를 유지하도록 바꾸면서
+        **받은 후보를 전부** 그린다 — 시각화의 목적이 "선택지가 몇 개나 있는지"를 보는
+        것이기 때문이다.
+
+        **초록으로 강조하는 것은 control이 실제로 고른 후보 하나뿐이다**(/control/selected_grasp).
+        예전에는 1순위(점수 최고)를 초록으로 칠했는데, 이제 실행할 후보는 control이
+        개폭·IK·관절·최소안전을 보고 고르므로 1순위가 아닐 수 있다 — 화면이 실행과 다른
+        것을 강조하면 사람이 잘못된 후보를 보고 판단하게 된다. 아직 아무것도 고르지 않은
+        상태(첫 pick 전)에서는 전부 주황이다.
+
+        숫자(점수·개폭)는 그리지 않는다 — 화면을 깨끗하게 유지한다(2026-09-07 요구사항).
         """
-        for rank, candidate in enumerate(candidates[:3]):
+        selected_index = self._selected_index(candidates)
+        for rank, candidate in enumerate(candidates):
             p = candidate.pose.position
             point_cam = camera2base @ np.array([p.x, p.y, p.z, 1.0])
             if point_cam[2] <= 0:
@@ -556,19 +637,23 @@ class GraspNode(Node):
                 continue
             (tlx, tly), (trx, try_), (blx, bly), (brx, bry) = pixels
 
-            marker_color = (0, 220, 0) if rank == 0 else (0, 180, 255)
+            is_selected = rank == selected_index
+            marker_color = (0, 220, 0) if is_selected else (0, 180, 255)
+            # 색만으로는 겹쳤을 때 구분이 어렵다 — 선택된 것만 굵게 그린다.
+            thickness = 3 if is_selected else 2
             # 손가락 두 개(손끝→몸통) + 몸통을 잇는 선(팜) = graspnetAPI 그리퍼 스케치의
             # "ㄷ"자와 같은 형태. 손끝에 작은 원을 찍어 실제로 물체를 무는 지점을 강조한다.
-            cv2.line(vis, (blx, bly), (brx, bry), marker_color, 2)          # 팜(base)
-            cv2.line(vis, (tlx, tly), (blx, bly), marker_color, 2)         # 왼손가락
-            cv2.line(vis, (trx, try_), (brx, bry), marker_color, 2)        # 오른손가락
-            cv2.circle(vis, (tlx, tly), 4, marker_color, -1)
-            cv2.circle(vis, (trx, try_), 4, marker_color, -1)
-            if rank == 0:
-                # strategy를 라벨에 그대로 찍는다 — heuristic_pca 결과가 GraspNet처럼
-                # 보이면 안 된다(2026-09-05, 데이터 출처 오인 방지 요구사항).
-                cv2.putText(vis, f"[{candidate.strategy}] {candidate.score:.2f} "
-                           f"w={candidate.gripper_width_mm:.0f}mm",
+            cv2.line(vis, (blx, bly), (brx, bry), marker_color, thickness)   # 팜(base)
+            cv2.line(vis, (tlx, tly), (blx, bly), marker_color, thickness)   # 왼손가락
+            cv2.line(vis, (trx, try_), (brx, bry), marker_color, thickness)  # 오른손가락
+            cv2.circle(vis, (tlx, tly), 4 + thickness - 2, marker_color, -1)
+            cv2.circle(vis, (trx, try_), 4 + thickness - 2, marker_color, -1)
+            if rank == 0 or is_selected:
+                # **숫자는 찍지 않는다**(2026-09-07 요구사항: score/width를 화면에 표시하면
+                # 화면이 지저분해진다). 전략명만 남긴다 — heuristic_pca 결과가 GraspNet처럼
+                # 보이면 안 되기 때문이다(2026-09-05, 데이터 출처 오인 방지).
+                # score/width/후보 판정은 메시지·로그에 그대로 있으므로 필요할 때 거기서 본다.
+                cv2.putText(vis, f"[{candidate.strategy}]",
                            (cx + 12, cy - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
                            marker_color, 2, cv2.LINE_AA)
 
@@ -607,7 +692,7 @@ class GraspNode(Node):
         self._debug_pub.publish(msg)
 
     @staticmethod
-    def _to_msg(candidate: dict) -> GraspCandidate:
+    def _to_msg(candidate: dict, candidate_id: str = "") -> GraspCandidate:
         from geometry_msgs.msg import Pose
 
         msg = GraspCandidate()
@@ -622,6 +707,8 @@ class GraspNode(Node):
         msg.pose = pose
         msg.score = float(candidate["score"])
         msg.strategy = candidate["strategy"]
+        msg.candidate_id = candidate_id
+        msg.grasp_depth_mm = float(candidate.get("grasp_depth_mm", 0.0) or 0.0)
         msg.gripper_width_mm = float(candidate.get("width_mm") or 0.0)
         return msg
 

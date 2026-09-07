@@ -25,10 +25,12 @@ def test_camera_meter_output_becomes_base_mm_pose():
 
     # 접근축(회전 1열)이 base -Z를 향해야 기울기 필터를 통과한다.
     rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
-    best, _ = graspnet_baseline._select_best(
+    picked, _ = graspnet_baseline._select_candidates(
         [_raw(rotation, [0.1, 0.2, 0.3])], T_base_camera_mm, T_graspnet_tcp_mm,
         15.0, 30.0, 5.0, points_base=None)
 
+    assert len(picked) == 1
+    best = picked[0]
     assert best['strategy'] == 'graspnet_baseline'
     assert best['width_mm'] == pytest.approx(40.0)
     position = best['pose']['position']
@@ -41,14 +43,15 @@ def test_graspnet_depth_advances_along_the_approach_axis():
     """`depth_m`은 무는 지점까지의 거리다 — 접근축을 따라 전진해야 한다 (버리면 허공)."""
     rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
     common = dict(T_base_camera_mm=np.eye(4), T_graspnet_tcp_mm=np.eye(4))
-    without, _ = graspnet_baseline._select_best(
+    without, _ = graspnet_baseline._select_candidates(
         [_raw(rotation, [0.0, 0.0, 0.5], depth_m=0.0)],
         common['T_base_camera_mm'], common['T_graspnet_tcp_mm'], 15.0, 30.0, 5.0,
         points_base=None)
-    with_depth, _ = graspnet_baseline._select_best(
+    with_depth, _ = graspnet_baseline._select_candidates(
         [_raw(rotation, [0.0, 0.0, 0.5], depth_m=0.03)],
         common['T_base_camera_mm'], common['T_graspnet_tcp_mm'], 15.0, 30.0, 5.0,
         points_base=None)
+    without, with_depth = without[0], with_depth[0]
     # 접근축이 base -Z이므로 30mm 전진은 z가 30mm 낮아지는 것으로 나타난다.
     assert (without['pose']['position']['z']
             - with_depth['pose']['position']['z']) == pytest.approx(30.0)
@@ -57,10 +60,10 @@ def test_graspnet_depth_advances_along_the_approach_axis():
 def test_upright_filter_rejects_candidates_that_stab_from_below():
     """아래에서 위로 찌르는 자세는 abs()로 재면 0도로 통과한다 — 걸러져야 한다."""
     upward = np.column_stack([(0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (-1.0, 0.0, 0.0)])
-    best, diagnostics = graspnet_baseline._select_best(
+    picked, diagnostics = graspnet_baseline._select_candidates(
         [_raw(upward, [0.0, 0.0, 0.5])], np.eye(4), np.eye(4), 15.0, 30.0, 5.0,
         points_base=None)
-    assert best is None
+    assert picked == []
     assert diagnostics['angles_deg'] == [180.0]
 
 
@@ -115,32 +118,67 @@ def test_missing_tcp_transform_is_not_replaced_by_pca():
         )
 
 
-def test_missing_checkpoint_is_not_replaced_by_pca():
-    with pytest.raises(RuntimeError, match='checkpoint_path'):
+def test_missing_endpoint_is_not_replaced_by_pca():
+    """endpoint가 없으면 조용히 PCA로 떨어지지 않고 **오류를 낸다.**
+
+    이 전략은 상주 추론 서버로만 동작한다(1회용 docker run 경로는 2026-09-07에 제거).
+    빈 후보를 돌려주면 planner가 "파지 불가"로 읽어 멀쩡한 물체를 거부하므로,
+    설정 누락은 반드시 드러나야 한다.
+    """
+    with pytest.raises(RuntimeError, match='endpoint'):
         graspnet_baseline.plan(
             np.empty((0, 3)),
-            {
-                'checkpoint_path': '/does/not/exist/checkpoint.tar',
-                'T_graspnet_tcp_mm': np.eye(4).tolist(),
-            },
+            {'T_graspnet_tcp_mm': np.eye(4).tolist()},
             context={'points_cam_mm': np.ones((80, 3)), 'T_base_camera_mm': np.eye(4)},
         )
 
 
-def test_busy_inference_does_not_become_empty_candidates(monkeypatch, tmp_path):
-    checkpoint = tmp_path / 'checkpoint.tar'
-    checkpoint.touch()
-    monkeypatch.setattr(graspnet_baseline, '_require_image', lambda image: None)
+def test_busy_inference_does_not_become_empty_candidates():
+    """이전 추론이 진행 중이면 빈 후보가 아니라 InferenceBusy로 알린다.
+
+    빈 후보는 planner에게 "파지 불가"를 뜻하므로, 단지 바쁜 것과 구분되어야 한다.
+    """
     assert graspnet_baseline._INFERENCE_LOCK.acquire(blocking=False)
     try:
         with pytest.raises(InferenceBusy):
             graspnet_baseline.plan(
                 np.empty((0, 3)),
                 {
-                    'checkpoint_path': str(checkpoint),
+                    'endpoint': 'http://localhost:8200',
                     'T_graspnet_tcp_mm': np.eye(4).tolist(),
                 },
                 context={'points_cam_mm': np.ones((80, 3)), 'T_base_camera_mm': np.eye(4)},
             )
     finally:
         graspnet_baseline._INFERENCE_LOCK.release()
+
+
+def test_top_k_candidates_are_kept_in_score_order():
+    """**Top-K가 유지돼야 한다.** 예전에는 최고점 하나만 돌려줘서 웹 시각화와 이후의
+    최종 선택 알고리즘이 쓸 후보가 남지 않았다(2026-09-07).
+    """
+    rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
+    raws = [_raw(rotation, [0.01 * i, 0.0, 0.5], score=0.1 * i) for i in range(1, 8)]
+
+    picked, diagnostics = graspnet_baseline._select_candidates(
+        raws, np.eye(4), np.eye(4), 15.0, 30.0, 5.0, points_base=None, top_k=5)
+
+    assert len(picked) == 5, "top_k 만큼 유지돼야 한다"
+    assert diagnostics['raw_count'] == 7
+    scores = [c['score'] for c in picked]
+    assert scores == sorted(scores, reverse=True), "점수 내림차순이어야 한다"
+    assert picked[0]['score'] == pytest.approx(0.7)
+    # 1순위에만 좌표체인 진단이 붙는다(로그가 K배로 늘지 않게)
+    assert 'debug' in picked[0] and 'debug' not in picked[1]
+    # 각 후보가 필요한 필드를 갖는다
+    for c in picked:
+        assert set(c) >= {'pose', 'width_mm', 'score', 'grasp_depth_mm', 'strategy'}
+
+
+def test_top_k_is_capped_by_available_candidates():
+    """후보가 top_k보다 적으면 있는 만큼만 — 빈 자리를 만들지 않는다."""
+    rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
+    picked, _ = graspnet_baseline._select_candidates(
+        [_raw(rotation, [0.0, 0.0, 0.5])], np.eye(4), np.eye(4), 15.0, 30.0, 5.0,
+        points_base=None, top_k=10)
+    assert len(picked) == 1

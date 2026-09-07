@@ -9,12 +9,12 @@ gripper:
   # 이보다 얇으면 손가락이 물체를 스치고 지나가기 쉽다 — 후보에서 빼지 않고 점수만 낮춘다.
   min_width_mm: 5.0
 
-# 로컬/공용 자산은 Git 밖의 assets_dir에 둔다. 개발 PC에서는 환경변수를 설정하지 않아도 PCA 빌드·검증이 가능하다.
-# grasp는 checkpoint/calibration만 소비한다. yolo/results 경로는 동일 assets 계약을 다른
-# 노드·도구에서 사용할 수 있도록 함께 기록한다.
+# 로컬/공용 자산은 Git 밖의 assets_dir에 둔다.
+# grasp가 여기서 읽는 것은 calibration_path뿐이다(비어 있으면 HANDEYE_PATH/기본 경로를 쓴다).
+# GraspNet checkpoint는 compose가 직접 마운트한다 — docker-compose.yml의 graspnet 서비스 참조.
+# yolo/results 경로는 같은 assets 계약을 다른 노드·도구가 쓸 수 있도록 함께 기록한다.
 assets:
   assets_dir: "${PIECE_PICKING_ASSETS_DIR}"
-  graspnet_checkpoint_path: models/graspnet/checkpoint.tar
   yolo_weights_path: ""
   calibration_path: ""
   results_dir: ""
@@ -22,24 +22,29 @@ assets:
 strategy:
   # sort_msgs/GraspCandidate.msg의 STRATEGY_* 중 하나.
   # 학습 기반 전략은 가중치·CUDA 환경이 붙어야 등록된다 (strategies/__init__.py).
-  name: heuristic_pca
+  #
+  # 2026-09-07: heuristic_pca → graspnet_baseline. 이 프로젝트의 **기본 전략**이다.
+  # 예전에는 여기가 heuristic_pca인데 docker-compose는 ${GRASP_STRATEGY:-graspnet_baseline}
+  # 이라, `ros2 launch`로 직접 띄우면 PCA가 되고 compose로 띄우면 GraspNet이 되는
+  # 불일치가 있었다. 이제 어느 쪽으로 띄워도 graspnet_baseline이다.
+  # heuristic_pca는 fallback으로 그대로 등록돼 있다(strategies/__init__.py) —
+  #   GRASP_STRATEGY=heuristic_pca docker compose up -d grasp
+  #   ros2 launch grasp grasp_launch.py strategy:=heuristic_pca
+  name: graspnet_baseline
 
 heuristic_pca:
   min_points: 80              # 이보다 적으면 축이 잡음에 흔들린다 — 후보를 내지 않는다
   top_surface_band_mm: 15.0   # 윗면으로 볼 두께. depth 잡음 한 점이 파지 높이가 되지 않게 한다
   grasp_depth_mm: 8.0         # 윗면보다 이만큼 내려가서 잡는다 (스치지 않도록)
 
-# HW_UNVERIFIED: 개발 PC에서는 Docker image/GPU/checkpoint를 준비하거나 실행하지 않는다.
-# GraspNet은 테스트 PC에서 setup_graspnet_runtime.sh를 최초 1회 실행한 뒤에만 선택한다.
-# 별도 Docker CUDA runtime에서 camera-frame/m point cloud로 추론한다.
-# checkpoint_path는 assets.graspnet_checkpoint_path가 비어 있을 때만 직접 쓴다.
+# GraspNet은 compose의 상주 `graspnet` 서비스(GPU)에 camera-frame/m point cloud를 보내
+# 추론한다. 이미지는 compose가 빌드하고 checkpoint는 assets에서 마운트된다 —
+# 별도 셋업 절차는 없다(src/grasp/README.md).
 graspnet_baseline:
-  # 추론을 어디로 보낼지. **비우지 않는 것이 기본이자 권장**이다.
-  #   설정됨  → compose의 graspnet 상주 서비스에 HTTP로 보낸다. 모델이 이미 올라가 있어
-  #             호출마다 로드를 다시 하지 않고, grasp 노드가 compose 컨테이너 안에 있어도
-  #             된다(Docker socket/CLI 불필요).
-  #   비어있음 → 예전처럼 `docker run`으로 1회용 컨테이너를 띄운다. grasp 노드를 호스트에서
-  #             네이티브로 돌릴 때만 가능하다(아래 checkpoint_path/device/image가 그 경로용).
+  # 추론을 보낼 상주 서버 주소 — compose의 `graspnet` 서비스다. **필수값이다.**
+  # 비우면 전략이 오류를 낸다. (`endpoint`가 비면 `docker run`으로 1회용 컨테이너를 띄우던
+  # 경로는 2026-09-07에 제거했다 — grasp 컨테이너에 Docker CLI/socket이 없어 애초에
+  # 동작할 수 없었고, 호출마다 모델을 다시 로드해 수십~수백 초가 걸렸다.)
   # grasp는 network_mode: host라 게시된 포트를 localhost로 부른다(planner/db와 같은 이유).
   endpoint: "http://localhost:8200"
   # 서버 경로의 요청 타임아웃. 모델이 이미 올라가 있으므로 콜드 스타트를 기다릴 필요가 없다.
@@ -125,16 +130,16 @@ graspnet_baseline:
   # "쓸 만한 자세 없음: ... (기울기 [...])" 로 확인할 것.
   approach_angle_max_deg: 30.0
 
-  # --- 아래는 endpoint가 비어 있을 때(1회용 docker run 경로)만 쓴다 ---
-  checkpoint_path: ""
-  device: "cuda:0"
-  num_points: 20000
-  min_points: 80
-  max_candidates: 50
-  # 1회용 경로는 호출마다 컨테이너 기동 + 모델 로드를 다시 해서 이만큼 필요하다
-  # (60s가 두 번 연속 초과됨, 2026-09-05). 상주 서버를 쓰면 endpoint_timeout_s가 쓰인다.
-  timeout_s: 180.0
-  image: "piece-picking-graspnet-baseline:0.2.0"
+  # 기울기 필터를 통과한 후보 중 점수 상위 몇 개를 world_state로 내보낼지.
+  # 1로 두면 예전처럼 1순위만 나간다. 웹 시각화와 이후의 최종 선택 알고리즘이 쓸
+  # 선택지를 남기는 값이라, 늘려도 로봇 동작은 바뀌지 않는다 —
+  # 실제로 집을 후보는 planner(validator._best_grasp)가 여전히 하나만 고른다.
+  # 늘릴수록 오버레이가 빽빽해지고 world_state 메시지가 커진다.
+  top_k: 10
+
+  num_points: 20000       # 서버로 보낼 최대 점 수. 많을수록 추론이 느려진다
+  min_points: 80          # 이보다 적으면 후보를 내지 않는다
+  max_candidates: 50      # 서버가 돌려줄 후보 개수. 기울기 필터가 이 중에서 고른다
   # T_graspnet_tcp_mm: TCP frame 좌표를 GraspNet predicted-gripper frame으로 바꾸는 mm 변환.
   # 테스트 셀의 RG2 TCP 정의와 GraspNet 축을 측정해 채운다. 빈 값은 의도적으로 후보 생성을 실패시킨다.
   #

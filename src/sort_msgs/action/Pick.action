@@ -4,9 +4,25 @@ string trace_id
 string request_id
 string object_id
 string profile                 # DetectedObject.profile 값을 그대로 전달 (제어 파라미터 결정)
+# planner가 순위대로 고른 1순위 후보. `grasp_candidates`가 비었을 때(구 planner,
+# 직접 goal을 쏘는 도구)의 유일한 파지 자세이기도 하다 — 그 경우 control은 이 하나만
+# 검사하고 실행한다.
 geometry_msgs/Pose grasp_pose   # planner가 grasp_candidates 중 고른 것
 float32 gripper_width_mm        # 그 후보의 GraspCandidate.gripper_width_mm. 0이면 미상 —
                                  # control이 skill_params.yaml의 gripper_open_m으로 대체한다.
+
+# **실행 후보 전체(점수 내림차순).** 최종 선택은 control이 한다 — 개폭 유효성·IK·관절
+# 한계는 로봇에 붙어 있어야만 알 수 있고(ikin 서비스), 그 판정 결과가 랭킹에 들어가기
+# 때문이다(control/grasp_selection.py). 비어 있으면 위 grasp_pose 하나만 쓴다.
+sort_msgs/GraspCandidate[] grasp_candidates
+
+# --- 후보 랭킹에 쓰는 물체 정보 (DetectedObject에서 그대로 옮겨온 값) -----------
+# control은 /world_state를 구독하지 않는다. 랭킹이 "파지점이 물체 중심에서 얼마나
+# 벗어났는지", "지지면을 뚫지 않는지"를 보려면 그 값들이 goal에 실려 와야 한다.
+geometry_msgs/Point object_center_mm   # DetectedObject.position_base_mm (base, mm)
+float32 object_height_mm               # DetectedObject.height_mm. 0이면 미상 — 지지면 검사를 건너뛴다
+float32 depth_valid_ratio              # DetectedObject.depth_valid_ratio. 낮으면 좌표 신뢰도가 낮다
+
 int32 max_retries
 ---
 # --- Result ---
@@ -17,7 +33,14 @@ string REASON_NO_CONTACT=no_contact
 string REASON_GRASP_FAILED=grasp_failed
 string REASON_UNREACHABLE=unreachable
 string REASON_COLLISION_EXPECTED=collision_expected
+# 실행 전 후보 검사에서 **전부 탈락**해 로봇을 아예 움직이지 않은 경우.
+# unreachable(움직이다 실패)과 구분해야 한다 — 이쪽은 그리퍼도 팔도 그대로다.
+string REASON_NO_FEASIBLE_GRASP=no_feasible_grasp
 string failure_reason
+
+# 실제로 실행한 후보의 GraspCandidate.candidate_id. 후보 없이 grasp_pose만 받았거나
+# 하나도 통과하지 못했으면 빈 문자열이다.
+string selected_candidate_id
 
 int32 retries_used
 float32 cycle_time_ms

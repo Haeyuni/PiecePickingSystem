@@ -267,6 +267,12 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
                 "profile": s["profile"],
                 "grasp_pose": s.get("grasp_pose"),
                 "gripper_width_mm": s.get("gripper_width_mm"),
+                # 후보 목록과 물체 정보는 화면에 내보내지 않고 control에 전달만 한다 —
+                # control이 실행 가능한 후보를 고르는 데 쓴다(control/grasp_selection.py).
+                "grasp_candidates": s.get("grasp_candidates") or [],
+                "object_center_mm": s.get("object_center_mm"),
+                "object_height_mm": s.get("object_height_mm"),
+                "depth_valid_ratio": s.get("depth_valid_ratio"),
                 "status": "pending",
                 "phase": None,
             }
@@ -400,6 +406,34 @@ def _object_bottom_offset_mm(world_state: dict, steps: list, index: int) -> floa
     return None
 
 
+def _record_selected_candidate(step: dict, result) -> None:
+    """control이 **실제로 실행한** 후보를 스텝에 반영한다.
+
+    planner가 채워 보낸 `grasp_pose`는 1순위 후보인데, control은 개폭·IK·관절·안전을 보고
+    다른 후보를 고를 수 있다(control/grasp_selection.py). 그 경우 스텝에 1순위가 그대로
+    남아 있으면 두 군데가 틀어진다:
+
+    - **place가 놓는 높이** — `_object_bottom_offset_mm`이 직전 pick 스텝의 `grasp_pose`로
+      "물체가 TCP보다 얼마나 내려와 있는지"를 계산한다. 실제로 문 자세가 아니면 그 값이
+      틀리고, 물체를 바구니 바닥에 찍거나 너무 높은 데서 놓는다.
+    - **실행 로그(DB)** — 나중에 파지 오차를 분석할 때 실행하지 않은 자세를 보게 된다.
+
+    선택 결과를 못 받았거나(구 control) 후보 목록에서 못 찾으면 그대로 둔다.
+    """
+    selected_id = getattr(result, "selected_candidate_id", "") or ""
+    if not selected_id:
+        return
+    for candidate in step.get("grasp_candidates") or []:
+        if candidate.get("candidate_id") == selected_id:
+            step["grasp_pose"] = candidate.get("pose")
+            step["gripper_width_mm"] = candidate.get("gripper_width_mm")
+            step["selected_candidate_id"] = selected_id
+            return
+    logger.warning("control이 고른 후보 %s를 계획 후보 목록에서 못 찾았다 — "
+                   "grasp_pose를 1순위인 채로 둔다 (object=%s)",
+                   selected_id, step.get("object_id"))
+
+
 async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | None:
     """스텝을 순서대로 실행한다. 실패하면 previous_failure 형태로 반환."""
     class_map = store.object_class_map(world_state)
@@ -419,6 +453,10 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             profile=step["profile"],
             grasp_pose=step.get("grasp_pose"),
             gripper_width_mm=step.get("gripper_width_mm"),
+            grasp_candidates=step.get("grasp_candidates") or [],
+            object_center_mm=step.get("object_center_mm"),
+            object_height_mm=step.get("object_height_mm"),
+            depth_valid_ratio=step.get("depth_valid_ratio"),
             bin_id=step.get("bin_id"),
             object_bottom_offset_mm=bottom_offset,
         )
@@ -428,6 +466,7 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
 
         if step["skill"] == "pick":
             result = await executor.call_pick(goal, on_feedback)
+            _record_selected_candidate(step, result)
         else:
             result = await executor.call_place_into(goal, on_feedback)
             for retry in range(1, MAX_PLACE_RETRIES + 1):

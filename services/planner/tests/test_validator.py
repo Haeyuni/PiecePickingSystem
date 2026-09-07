@@ -130,6 +130,24 @@ class TestPhysicalLimits(unittest.TestCase):
             validate(pick_place(), world(obj), BINS)
         self.assertIn("작업반경", str(ctx.exception))
 
+    def test_only_the_unreachable_candidate_is_dropped(self):
+        """1순위가 팔 밖이어도 닿는 후보가 있으면 물체를 거부하지 않는다.
+
+        예전에는 점수 최고 후보 하나만 보고 작업반경을 판정해서, 그 하나가 벗어나면
+        나머지가 멀쩡해도 물체 전체가 거부됐다.
+        """
+        obj = make_object()
+        obj["grasp_candidates"][0]["score"] = 0.99
+        obj["grasp_candidates"][0]["pose"]["position"] = {"x": 1200.0, "y": 400.0, "z": 300.0}
+        obj["grasp_candidates"].append({
+            "pose": {"position": {"x": 450.0, "y": 0.0, "z": 80.0},
+                     "orientation": {"x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0}},
+            "score": 0.4, "strategy": "graspnet_baseline", "candidate_id": "obj_001#1",
+        })
+        steps = validate(pick_place(), world(obj), BINS)
+        self.assertEqual(len(steps[0].grasp_candidates), 1)
+        self.assertEqual(steps[0].grasp_pose.position["x"], 450.0)
+
     def test_bin_outside_workspace_is_rejected(self):
         with self.assertRaises(Rejected):
             validate(pick_place(bin_id="far_box"), world(make_object()), BINS)
@@ -170,3 +188,55 @@ class TestProfileForcing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCandidateListReachesControl(unittest.TestCase):
+    """후보를 하나로 좁히지 않고 전부 넘기는지 — 최종 선택은 control이 한다."""
+
+    def _object_with_two_candidates(self):
+        obj = make_object()
+        obj["position_base_mm"] = {"x": 450.0, "y": 0.0, "z": 100.0}
+        obj["height_mm"] = 40.0
+        obj["depth_valid_ratio"] = 0.87
+        obj["grasp_candidates"][0].update({"candidate_id": "obj_001#0",
+                                           "gripper_width_mm": 30.0,
+                                           "grasp_depth_mm": 8.0})
+        obj["grasp_candidates"].append({
+            "pose": {"position": {"x": 460.0, "y": 0.0, "z": 80.0},
+                     "orientation": {"x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0}},
+            "score": 0.99, "strategy": "graspnet_baseline",
+            "candidate_id": "obj_001#1", "gripper_width_mm": 55.0, "grasp_depth_mm": 12.0,
+        })
+        return obj
+
+    def test_all_reachable_candidates_are_passed_in_score_order(self):
+        steps = validate(pick_place(), world(self._object_with_two_candidates()), BINS)
+        candidates = steps[0].grasp_candidates
+        self.assertEqual([c.candidate_id for c in candidates], ["obj_001#1", "obj_001#0"])
+        self.assertEqual([c.gripper_width_mm for c in candidates], [55.0, 30.0])
+        self.assertEqual([c.grasp_depth_mm for c in candidates], [12.0, 8.0])
+
+    def test_grasp_pose_still_holds_the_top_candidate(self):
+        """후보 목록을 못 읽는 경로(로그·DB·구 control)를 위해 1순위는 그대로 남는다."""
+        steps = validate(pick_place(), world(self._object_with_two_candidates()), BINS)
+        self.assertEqual(steps[0].grasp_pose.position["x"], 460.0)
+        self.assertEqual(steps[0].gripper_width_mm, 55.0)
+
+    def test_object_context_for_ranking_is_carried(self):
+        """control은 /world_state를 안 보므로 물체 중심·높이·depth 신뢰도가 실려 가야 한다."""
+        steps = validate(pick_place(), world(self._object_with_two_candidates()), BINS)
+        self.assertEqual(steps[0].object_center_mm, {"x": 450.0, "y": 0.0, "z": 100.0})
+        self.assertEqual(steps[0].object_height_mm, 40.0)
+        self.assertEqual(steps[0].depth_valid_ratio, 0.87)
+
+    def test_place_step_carries_no_candidates(self):
+        steps = validate(pick_place(), world(self._object_with_two_candidates()), BINS)
+        self.assertEqual(steps[1].grasp_candidates, [])
+        self.assertIsNone(steps[1].object_center_mm)
+
+    def test_missing_object_context_stays_none(self):
+        """height_mm/중심을 perception이 못 낸 물체 — 0을 실어 보내 '있는 척'하지 않는다."""
+        steps = validate(pick_place(), world(make_object()), BINS)
+        self.assertIsNone(steps[0].object_center_mm)
+        self.assertIsNone(steps[0].object_height_mm)
+        self.assertIsNone(steps[0].depth_valid_ratio)
