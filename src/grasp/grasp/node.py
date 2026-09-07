@@ -405,11 +405,11 @@ class GraspNode(Node):
 
     # 손끝이 지지면(작업대) 아래로 내려가지 않게 남겨두는 여유(mm). 0이면 지지면에
     # 정확히 닿는 높이까지 허용한다 — 얇은 물체는 실제로 그 높이에서 물어야 한다.
-    _SUPPORT_CLEARANCE_MM = 1.0
-    # 물체 높이의 몇 %를 목표 파지 높이로 삼는가. 0.5 = 중간 높이.
-    # 평행 그리퍼로 물건을 집을 때의 표준 선택이고, 위로 치우치면 미끄러지고 아래로
-    # 치우치면 작업대를 건드린다.
-    _GRASP_HEIGHT_FRACTION = 0.5
+    _SUPPORT_CLEARANCE_MM = 0.0
+    # 손가락이 물체를 감쌀 수 있는 유효 길이(mm). RG2 inner_finger 메쉬 전체 길이가
+    # 57.8mm이고 그중 뿌리 쪽은 관절부라, 실제로 무는 구간을 보수적으로 45mm로 본다.
+    # **추정값이다** — 큰 물체에서 그리퍼 몸통이 물체 윗면에 닿으면 줄일 것.
+    _FINGER_REACH_MM = 45.0
 
     def _fit_grasp_depth(self, candidate: dict, obj) -> dict:
         """파지 깊이를 **실측 물체 높이**에 맞춘다 — 너무 얕으면 내리고, 지지면 아래는 막는다.
@@ -450,10 +450,16 @@ class GraspNode(Node):
 
         support_z = float(obj.position_base_mm.z) - height_mm
         floor_z = support_z + self._SUPPORT_CLEARANCE_MM
+        top_z = float(obj.position_base_mm.z)
         current_z = float(position["z"])
-        # 중간 높이까지만 내린다(이미 더 깊으면 그대로), 그리고 바닥 위로 올린다.
-        target_z = max(min(current_z, support_z + height_mm * self._GRASP_HEIGHT_FRACTION),
-                       floor_z)
+        # **손끝(tip)을 지지면 가까이 내린다.** 후보 지점은 손가락 *맨 끝*이 갈 자리인데,
+        # 예전처럼 물체 중간높이를 노리면 짧은 물체는 위쪽 절반만 손가락 사이에 들어간다
+        # (2026-09-07 실물: 높이 18.1mm 물체에서 tip이 작업대 9mm 위 → 헛무름).
+        # 다만 키 큰 물체까지 바닥으로 내리면 그리퍼 몸통이 물체 윗면에 닿으므로,
+        # 윗면에서 손가락 유효 길이보다 더 깊이는 내려가지 않는다.
+        target_z = max(floor_z, top_z - self._FINGER_REACH_MM)
+        # 전략이 이미 그보다 깊게 잡았으면 그 판단을 존중한다(단, 바닥은 지킨다).
+        target_z = max(min(current_z, target_z), floor_z)
         if abs(target_z - current_z) < 0.5:
             return candidate
 
@@ -468,6 +474,7 @@ class GraspNode(Node):
             f"[파지깊이] {obj.object_id} 물체높이 {height_mm:.1f}mm "
             f"(지지면 {support_z:.1f} ~ 윗면 {float(obj.position_base_mm.z):.1f}) "
             f"| 후보 z={current_z:.1f} → {target_z:.1f} "
+            f"(바닥 {floor_z:.1f}, 윗면-손가락 {top_z - self._FINGER_REACH_MM:.1f}) "
             f"({'더 깊게' if target_z < current_z else '지지면 보호'}, "
             f"접근축 따라 {float(np.linalg.norm(moved - np.array([position['x'], position['y'], current_z]))):.1f}mm)",
             throttle_duration_sec=5.0)

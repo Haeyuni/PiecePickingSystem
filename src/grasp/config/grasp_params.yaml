@@ -130,7 +130,7 @@ graspnet_baseline:
   device: "cuda:0"
   num_points: 20000
   min_points: 80
-  max_candidates: 5
+  max_candidates: 50
   # 1회용 경로는 호출마다 컨테이너 기동 + 모델 로드를 다시 해서 이만큼 필요하다
   # (60s가 두 번 연속 초과됨, 2026-09-05). 상주 서버를 쓰면 endpoint_timeout_s가 쓰인다.
   timeout_s: 180.0
