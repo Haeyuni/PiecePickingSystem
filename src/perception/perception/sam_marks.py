@@ -22,6 +22,24 @@ COLORS = [(0, 200, 255), (0, 255, 120), (255, 120, 0), (255, 0, 200),
           (60, 60, 255), (255, 255, 0), (180, 0, 255), (0, 140, 255)]
 
 
+def _release_cuda_cache() -> None:
+    """추론에 쓴 GPU 캐시를 드라이버에 돌려준다.
+
+    아래 두 함수는 SAM 모델을 매 호출 새로 만든다(오래 들고 있지 않음 — 관측 사이에는
+    아무것도 GPU에 안 남기려는 의도). 그런데 함수가 끝나도 PyTorch의 caching allocator는
+    한 번 받은 GPU 메모리를 드라이버에 곧바로 돌려주지 않고 재사용을 위해 쥐고 있다.
+    이 프로세스만 쓰면 문제가 안 되지만, graspnet_baseline이 **같은 8GB GPU**를 나눠
+    쓰고 있어(compose가 GPU를 분리하지 않는다) 관측을 반복할수록(온디맨드라 명령마다
+    최소 1회) 이 프로세스가 캐시로 쥔 양이 계속 늘어난다. 2026-09-08 실측: 재시작 전
+    7.6GB, 재시작 후 1.4GB — 그 차이가 전부 이 캐시였고, 그동안 graspnet_baseline은
+    256MiB를 못 늘려 CUDA OOM으로 매번 추론에 실패했다(파지 후보 0개).
+    """
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def segment_everything(image_bgr, weights: str, device: str | None = None,
                        points_stride: int = 16, min_area: float = 0.002,
                        max_area: float = 0.35, max_marks: int = 20):
@@ -36,34 +54,42 @@ def segment_everything(image_bgr, weights: str, device: str | None = None,
     predictor = SAMPredictor(overrides=dict(
         conf=0.25, task="segment", mode="predict", imgsz=1024,
         model=weights, device=device, verbose=False, save=False))
-    predictor.set_image(image_bgr)
-    started = time.perf_counter()
-    result = predictor(points_stride=points_stride, crop_n_layers=0)[0]
-    elapsed = time.perf_counter() - started
-    predictor.reset_image()
-    if result.masks is None:
-        return [], elapsed
+    result = None
+    try:
+        predictor.set_image(image_bgr)
+        started = time.perf_counter()
+        result = predictor(points_stride=points_stride, crop_n_layers=0)[0]
+        elapsed = time.perf_counter() - started
+        predictor.reset_image()
+        if result.masks is None:
+            return [], elapsed
 
-    masks = result.masks.data.cpu().numpy() > 0.5
-    height, width = image_bgr.shape[:2]
-    total_px = height * width
-    areas = masks.reshape(len(masks), -1).sum(1)
-    order = np.argsort(-areas)                      # 큰 것부터 — 겹칠 때 큰 쪽을 남긴다
+        masks = result.masks.data.cpu().numpy() > 0.5
+        height, width = image_bgr.shape[:2]
+        total_px = height * width
+        areas = masks.reshape(len(masks), -1).sum(1)
+        order = np.argsort(-areas)                  # 큰 것부터 — 겹칠 때 큰 쪽을 남긴다
 
-    kept: list[np.ndarray] = []
-    for index in order:
-        area = int(areas[index])
-        if not (min_area * total_px <= area <= max_area * total_px):
-            continue
-        mask = masks[index]
-        # 이미 남긴 것과 사실상 같은 마스크는 버린다. 조금 겹치는 것(뚜껑/몸통)은 남겨
-        # 두고 VLM의 part_of로 묶는다.
-        if any((mask & k).sum() / max(1, min(area, int(k.sum()))) > 0.9 for k in kept):
-            continue
-        kept.append(mask)
-        if len(kept) >= max_marks:
-            break
-    return kept, elapsed
+        kept: list[np.ndarray] = []
+        for index in order:
+            area = int(areas[index])
+            if not (min_area * total_px <= area <= max_area * total_px):
+                continue
+            mask = masks[index]
+            # 이미 남긴 것과 사실상 같은 마스크는 버린다. 조금 겹치는 것(뚜껑/몸통)은 남겨
+            # 두고 VLM의 part_of로 묶는다.
+            if any((mask & k).sum() / max(1, min(area, int(k.sum()))) > 0.9 for k in kept):
+                continue
+            kept.append(mask)
+            if len(kept) >= max_marks:
+                break
+        return kept, elapsed
+    finally:
+        # predictor/result가 들고 있는 GPU 텐서 참조를 끊어야 아래 empty_cache()가
+        # 실제로 회수할 게 생긴다 — 참조가 남아 있으면 caching allocator가 계속 쥔다.
+        del predictor
+        del result
+        _release_cuda_cache()
 
 
 def mark_anchor(mask: np.ndarray) -> tuple[int, int]:
@@ -181,22 +207,30 @@ def segment_at_boxes(image_bgr, weights: str, boxes: list[list[int]],
         return [], 0.0
 
     model = SAM(weights)
-    started = time.perf_counter()
-    result = model.predict(image_bgr, bboxes=boxes, device=device, verbose=False)[0]
-    elapsed = time.perf_counter() - started
-    height, width = image_bgr.shape[:2]
-    if result.masks is None:
-        return [np.zeros((height, width), dtype=bool) for _ in boxes], elapsed
+    result = None
+    try:
+        started = time.perf_counter()
+        result = model.predict(image_bgr, bboxes=boxes, device=device, verbose=False)[0]
+        elapsed = time.perf_counter() - started
+        height, width = image_bgr.shape[:2]
+        if result.masks is None:
+            return [np.zeros((height, width), dtype=bool) for _ in boxes], elapsed
 
-    masks = result.masks.data.cpu().numpy() > 0.5
-    if masks.shape[1:] != (height, width):     # 추론 해상도로 나오면 원본으로 되돌린다
-        import cv2
+        masks = result.masks.data.cpu().numpy() > 0.5
+        if masks.shape[1:] != (height, width):     # 추론 해상도로 나오면 원본으로 되돌린다
+            import cv2
 
-        masks = np.stack([
-            cv2.resize(m.astype(np.uint8), (width, height),
-                       interpolation=cv2.INTER_NEAREST).astype(bool) for m in masks])
-    out = list(masks)
-    # 박스 수와 마스크 수가 어긋나면 짝이 밀려 엉뚱한 라벨이 붙는다 — 빈 마스크로 채운다.
-    while len(out) < len(boxes):
-        out.append(np.zeros((height, width), dtype=bool))
-    return out[:len(boxes)], elapsed
+            masks = np.stack([
+                cv2.resize(m.astype(np.uint8), (width, height),
+                           interpolation=cv2.INTER_NEAREST).astype(bool) for m in masks])
+        out = list(masks)
+        # 박스 수와 마스크 수가 어긋나면 짝이 밀려 엉뚱한 라벨이 붙는다 — 빈 마스크로 채운다.
+        while len(out) < len(boxes):
+            out.append(np.zeros((height, width), dtype=bool))
+        return out[:len(boxes)], elapsed
+    finally:
+        # segment_everything과 같은 이유(모듈 상단 _release_cuda_cache 참조) —
+        # model/result의 GPU 텐서 참조를 끊어야 empty_cache()가 실제로 회수한다.
+        del model
+        del result
+        _release_cuda_cache()
