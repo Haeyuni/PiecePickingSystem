@@ -46,10 +46,10 @@ async def stop(request: Request):
             "cancelled_trace_ids": cancelled_traces}
 
 
-async def _run_home(executor) -> None:
+async def _run_home(executor, open_gripper: bool = False) -> None:
     """홈 이동을 끝까지 수행하고 이력을 남긴다. 백그라운드 태스크로 실행된다."""
     try:
-        await executor.home()
+        await executor.home(open_gripper=open_gripper)
         store.insert_execution_log(skill_name="home", result="success")
     except Exception as e:
         logger.exception("홈 이동 실패")
@@ -58,7 +58,7 @@ async def _run_home(executor) -> None:
 
 
 @router.post("/api/robot/home")
-async def home(request: Request):
+async def home(request: Request, open_gripper: bool = False):
     """동작 중 홈이동은 위험하므로 idle·error일 때만 허용한다(2.1절과 같은 차단 규칙).
 
     **error도 허용한다**: pick/place 실패 시 `RobotStateStore.set_error()`(control/
@@ -87,6 +87,8 @@ async def home(request: Request):
                                "message": f"로봇이 {mode} 상태라 홈 이동할 수 없습니다"}},
         )
 
-    asyncio.create_task(_run_home(executor))
+    asyncio.create_task(_run_home(executor, open_gripper=open_gripper))
     return JSONResponse(status_code=202,
-                        content={"schema_version": "1.0.0", "status": "moving_home"})
+                        content={"schema_version": "1.0.0",
+                                 "status": "moving_home_and_opening_gripper"
+                                 if open_gripper else "moving_home"})

@@ -54,11 +54,11 @@ bins:
     # 2026-09-06 요청: 이 목적지만 안전 여유를 10mm 올린다(공용 30.0 → 40.0).
     # 물체 높이 보정이 들어온 뒤에도 유지한다 — 이 바구니가 왼쪽보다 10mm 낮게 실측돼
     # 있어서(pose.z 173.4 vs 183.8) 같은 여유를 줘도 실제 여유는 더 적기 때문이다.
-    # skill_params.yaml의 motion.release_clearance_mm(공용 30.0)를 이 목적지에 한해
-    # 덮어쓴다 — place_server.execute_callback이 목적지별 값을 먼저 본다.
+    # 2026-09-08: 공용값이 70.0으로 올라 이 목적지도 함께 70.0으로 높인다
+    # (skill_params.yaml의 motion.release_clearance_mm 참조). place_server는
+    # 목적지별 값이 있으면 그것을, 없으면 공용값을 쓴다.
     # **pose.z를 올리지 않은 이유**: pose는 캘리브레이션으로 실측한 바구니의 실제
     # 위치라 "놓는 높이가 낮다"는 이유로 바꾸면 안 된다(다음 재측정 때 혼란). 놓는
     # 높이는 그 위에 얼마나 여유를 둘지의 문제이므로 여유값 쪽을 바꾼다.
-    # 결과: 놓는 지점 z = 173.369 + 40.0 = 213.369mm (기존 203.369mm).
-    # 접근/물러나기 지점은 그 위 approach_height_mm(80mm)이므로 함께 10mm 올라간다.
-    release_clearance_mm: 40.0
+    # 접근/물러나기 지점은 그 위 approach_height_mm(80mm)이므로 함께 올라간다.
+    release_clearance_mm: 70.0

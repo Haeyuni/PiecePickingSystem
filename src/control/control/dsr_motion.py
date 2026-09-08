@@ -193,7 +193,7 @@ def get_tool_force(client, ref: int = 0, timeout_s: float = 1.0) -> list[float] 
     읽는다. `ref`: DR_BASE(0, 기본)/DR_TOOL(1)/DR_WORLD(2). 무응답/실패면 None.
 
     place_server.py의 순응 하강(compliance.py 참조)이 여기 앞 3축(힘, N)을 쓴다 —
-    skill_params.yaml의 profiles.<profile>.contact_threshold_n이 같은 단위(N)다.
+    skill_params.yaml의 compliance.contact_threshold_n이 같은 단위(N)다.
     """
     from dsr_msgs2.srv import GetToolForce
 

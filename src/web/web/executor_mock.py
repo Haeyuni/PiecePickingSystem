@@ -36,6 +36,7 @@ class MockExecutor:
         self._mode = "idle"
         self._current_skill = "none"
         self._current_request_id: str | None = None
+        self._gripper_width_mm = 0.0
         self._cancelled: set[str] = set()
         self._on_event: Callable[[dict], Awaitable[None]] | None = None
         # observe()가 찍는다. 픽스처 파일 자체는 고정 스냅샷이라 stamp가 안 바뀌므로(예:
@@ -78,7 +79,8 @@ class MockExecutor:
             "schema_version": "1.0.0",
             "mode": self._mode,
             "current_skill": self._current_skill,
-            "gripper_width_mm": 0.0 if self._current_skill == "none" else 42.0,
+            "gripper_width_mm": (self._gripper_width_mm
+                                  if self._current_skill == "none" else 42.0),
         }
 
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
@@ -175,11 +177,14 @@ class MockExecutor:
         logger.info("mock 정지 요청 (취소 대상=%s)", cancelled)
         return cancelled
 
-    async def home(self) -> None:
+    async def home(self, open_gripper: bool = False) -> None:
         self._mode = "busy"
         self._current_skill = "home"
         await self._emit_state()
         await asyncio.sleep(PHASE_DELAY_S * 2)
+        if open_gripper:
+            await asyncio.sleep(PHASE_DELAY_S)
+            self._gripper_width_mm = 110.0
         self._mode = "idle"
         self._current_skill = "none"
         await self._emit_state()

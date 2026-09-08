@@ -25,6 +25,9 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from dsr_msgs2.action import MovejH2r
+from onrobot_rg_msgs.msg import OnRobotRGInput
+from onrobot_rg_msgs.srv import SetCommand
+from sensor_msgs.msg import JointState
 from sort_msgs.action import Home
 
 from . import dsr_motion
@@ -41,6 +44,16 @@ def load_home_params(path: pathlib.Path | None = None) -> dict:
     with path.open(encoding="utf-8") as f:
         config = yaml.safe_load(f) or {}
     return config.get("home") or {}
+
+
+def load_gripper_params(path: pathlib.Path | None = None) -> tuple[float, float]:
+    path = path or skill_params_path()
+    with path.open(encoding="utf-8") as f:
+        config = yaml.safe_load(f) or {}
+    motion = config.get("motion") or {}
+    gripper = config.get("gripper") or {}
+    return (float(motion.get("gripper_open_m", 0.110)),
+            float(gripper.get("open_force_n", 40.0)))
 
 
 class HomeServer(Node):
@@ -61,6 +74,15 @@ class HomeServer(Node):
         self._acc_deg_s2 = float(home.get("acc_deg_s2", 20.0))
         self._movej_client = ActionClient(self, MovejH2r, dsr_motion.MOVEJ_ACTION,
                                           callback_group=callbacks)
+        self._gripper_open_m, self._gripper_open_force_n = load_gripper_params()
+        self._gripper_cmd_client = self.create_client(
+            SetCommand, dsr_motion.GRIPPER_COMMAND_SERVICE, callback_group=callbacks)
+        self._gripper_joint_angle: float | None = None
+        self._gripper_status: tuple[float, int, float] | None = None
+        self.create_subscription(JointState, dsr_motion.GRIPPER_JOINT_STATES_TOPIC,
+                                 self._on_gripper_state, 5, callback_group=callbacks)
+        self.create_subscription(OnRobotRGInput, dsr_motion.GRIPPER_STATUS_TOPIC,
+                                 self._on_gripper_status, 5, callback_group=callbacks)
         # 컨트롤러가 "이 목표는 못 간다"고 내는 알람을 지켜본다 — 없으면 movel이
         # goal을 accept한 채 아무것도 안 하는 경우가 60초 타임아웃을 다 채운다
         # (dsr_motion.MotionErrorMonitor 참조).
@@ -69,6 +91,13 @@ class HomeServer(Node):
         self.get_logger().info(
             f"home 액션 서버 준비 ({'fake' if is_fake_robot() else '실물'} 모드, "
             f"관절각={self._joint_deg} deg)")
+
+    def _on_gripper_state(self, msg: JointState) -> None:
+        if msg.position:
+            self._gripper_joint_angle = msg.position[0]
+
+    def _on_gripper_status(self, msg: OnRobotRGInput) -> None:
+        self._gripper_status = (time.monotonic(), int(msg.gsta), float(msg.gwdf) / 10.0)
 
     def _cancel_callback(self, goal_handle):
         self.get_logger().warning("home 취소 요청 수신")
@@ -108,6 +137,24 @@ class HomeServer(Node):
                     return self._result(False, Home.Result.REASON_NONE, started)
                 raise RuntimeError("movej_h2r 실패")
 
+            if goal.open_gripper:
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    return self._result(False, Home.Result.REASON_NONE, started)
+                feedback.phase = Home.Feedback.PHASE_OPENING_GRIPPER
+                goal_handle.publish_feedback(feedback)
+                if is_fake_robot():
+                    time.sleep(FAKE_PHASE_DURATION_S)
+                elif not self._open_gripper_real(goal_handle):
+                    if goal_handle.is_cancel_requested:
+                        goal_handle.canceled()
+                        return self._result(False, Home.Result.REASON_NONE, started)
+                    raise RuntimeError("그리퍼 열기 실패")
+                if goal_handle.is_cancel_requested:
+                    goal_handle.canceled()
+                    return self._result(False, Home.Result.REASON_NONE, started)
+                store.set_gripper(width_mm=self._gripper_open_m * 1000.0, closed=False)
+
             result = self._result(True, Home.Result.REASON_NONE, started)
             self._cache.put(goal.request_id, result)
             goal_handle.succeed()
@@ -128,6 +175,15 @@ class HomeServer(Node):
                                      self._vel_deg_s, self._acc_deg_s2,
                                      logger=self.get_logger(),
                                      error_monitor=self._motion_errors)
+
+    def _open_gripper_real(self, goal_handle) -> bool:
+        command = dsr_motion.gripper_width_command(
+            self._gripper_open_m, self._gripper_open_force_n)
+        if not dsr_motion.send_gripper_command(self._gripper_cmd_client, command):
+            return False
+        return dsr_motion.wait_gripper_settled(
+            lambda: self._gripper_joint_angle, goal_handle,
+            get_status=lambda: self._gripper_status) is not None
 
     def _result(self, success, reason, started):
         result = Home.Result()

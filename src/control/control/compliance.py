@@ -14,7 +14,7 @@
 
 **하강 중 실제로 멈추는 쪽(place_into 하강)**은 `contact_exceeded`가 맡는다. 이건
 `GetExternalTorque`가 아니라 `GetToolForce`를 쓴다 — skill_params.yaml의
-`profiles.<profile>.contact_threshold_n`이 이미 N(뉴턴) 단위로 정의돼 있어(관절
+`compliance.contact_threshold_n`이 이미 N(뉴턴) 단위로 정의돼 있어(관절
 토크 Nm이 아니라 툴에 걸리는 힘) 단위를 맞춰야 하기 때문이다. **기본은 꺼져 있다**
 (`compliance.place_descent_enabled: false`, skill_params.yaml) — 임계값도 이 서비스도
 실물로 검증하지 못했으니, 켜기 전에 실물에서 낮은 속도로 먼저 확인할 것.

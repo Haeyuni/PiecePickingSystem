@@ -132,13 +132,10 @@ class PlaceServer(Node):
         compliance_cfg = params.get("compliance") or {}
         self._place_descent_enabled = bool(compliance_cfg.get("place_descent_enabled", False))
         self._place_descent_step_mm = float(compliance_cfg.get("place_descent_step_mm", 5.0))
-        # profile별 접촉 임계값(N) — pick_server._profile_force_n과 같은 이유로 이름→값
-        # 딕셔너리로 미리 만들어 둔다. 0/미설정이면 그 profile은 순응 하강을 건너뛴다
-        # (임계값 없이 "접촉했다"고 판단할 기준이 없다).
-        self._profile_contact_threshold_n = {
-            name: float((spec or {}).get("contact_threshold_n", 0.0) or 0.0)
-            for name, spec in (params.get("profiles") or {}).items()
-        }
+        # 접촉 임계값(N) — place_into는 물체별 grip_level을 받지 않으므로(PlaceInto.action
+        # 참조) profile/grip_level별로 나누지 않고 고정값 하나만 쓴다. 0/미설정이면
+        # 순응 하강을 건너뛴다(임계값 없이 "접촉했다"고 판단할 기준이 없다).
+        self._place_contact_threshold_n = float(compliance_cfg.get("contact_threshold_n", 0.0) or 0.0)
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
         # 컨트롤러가 "이 목표는 못 간다"고 내는 알람을 지켜본다 — 없으면 movel이
@@ -293,7 +290,7 @@ class PlaceServer(Node):
                     self._publish_phase(goal_handle, phase)
                     time.sleep(FAKE_PHASE_DURATION_S)
             else:
-                if self._place_real(goal_handle, target_posx, goal.profile) is None:
+                if self._place_real(goal_handle, target_posx) is None:
                     goal_handle.canceled()
                     return self._result(False, PlaceInto.Result.REASON_NO_CONTACT, started)
 
@@ -389,18 +386,18 @@ class PlaceServer(Node):
         feedback.phase = phase
         goal_handle.publish_feedback(feedback)
 
-    def _place_real(self, goal_handle, target_posx, profile: str = "") -> bool | None:
+    def _place_real(self, goal_handle, target_posx) -> bool | None:
         """계획된 TCP posx로 위치제어 place를 수행한다.
 
         geometry mode에서는 frozen pick orientation과 box 계산 좌표이고, legacy mode에서는
         기존 taught bin pose에 높이 보정을 더한 좌표다.
         성공 True, 취소 None, 그 외 실패는 RuntimeError.
 
-        `profile`이 순응 하강 여부를 정한다 — place_descent_enabled가 켜져 있고 그
-        profile에 contact_threshold_n(N)이 설정돼 있을 때만 마지막 하강(바구니 접근
-        높이 → 목표 높이)을 스텝으로 쪼개 GetToolForce로 접촉을 확인한다. 나머지
-        구간(안전고도 이동, 물러나기)은 그대로 위치제어다 — 접촉 위험이 있는 구간은
-        바구니 안으로 들어가는 그 한 구간뿐이다.
+        순응 하강 여부는 self._place_descent_enabled/self._place_contact_threshold_n
+        (skill_params.yaml compliance 블록의 고정값)이 정한다 — 켜져 있고 임계값이
+        설정돼 있을 때만 마지막 하강(바구니 접근 높이 → 목표 높이)을 스텝으로 쪼개
+        GetToolForce로 접촉을 확인한다. 나머지 구간(안전고도 이동, 물러나기)은 그대로
+        위치제어다 — 접촉 위험이 있는 구간은 바구니 안으로 들어가는 그 한 구간뿐이다.
         """
         target_posx = list(target_posx)
         approach_posx = list(target_posx)
@@ -591,10 +588,9 @@ class PlaceServer(Node):
             raise RuntimeError("접근 위치로 이동 실패")
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_INSERTING)
-        threshold_n = self._profile_contact_threshold_n.get(profile, 0.0)
-        if self._place_descent_enabled and threshold_n > 0.0:
+        if self._place_descent_enabled and self._place_contact_threshold_n > 0.0:
             insert_ok, insert_pose, contact_stopped = descend_compliant(
-                approach_xyz, approach_pose, target_xyz[2], threshold_n,
+                approach_xyz, approach_pose, target_xyz[2], self._place_contact_threshold_n,
                 self._place_descent_step_mm)
         else:
             insert_posx = next_target(target_xyz, approach_pose)

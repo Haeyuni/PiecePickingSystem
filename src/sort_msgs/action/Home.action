@@ -12,6 +12,7 @@
 # --- Goal ---
 string schema_version
 string request_id
+bool open_gripper
 ---
 # --- Result ---
 bool success
@@ -25,4 +26,5 @@ float32 cycle_time_ms
 ---
 # --- Feedback ---
 string PHASE_MOVING=moving
+string PHASE_OPENING_GRIPPER=opening_gripper
 string phase

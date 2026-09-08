@@ -72,6 +72,10 @@ export function homeRobot() {
   return request<{ status: string }>('/api/robot/home', { method: 'POST' })
 }
 
+export function homeAndOpenGripper() {
+  return request<{ status: string }>('/api/robot/home?open_gripper=true', { method: 'POST' })
+}
+
 /** 개발용 상태 확인. 아직 /world_state 전용 엔드포인트가 없어 /health가 요약을 준다. */
 export function getHealth() {
   return request<{
