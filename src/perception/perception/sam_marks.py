@@ -108,19 +108,29 @@ def draw_marks(image_bgr, masks: list[np.ndarray]):
     import cv2
 
     canvas = image_bgr.copy()
+    # 번호 크기를 이미지 해상도에 맞춘다 — 원래 고정 픽셀값(font_scale=1.0, 여백=12px)은
+    # 1280x720 기준이라, 그보다 작은 사진(예: 402x228)에서는 번호가 물체를 통째로
+    # 가려서 VLM이 마스크를 못 알아본다.
+    reference_dim = 720
+    scale = min(canvas.shape[0], canvas.shape[1]) / reference_dim
+    scale = max(0.35, min(1.0, scale))
+    font_scale = 1.0 * scale
+    text_thickness = max(1, round(3 * scale))
+    contour_thickness = max(1, round(3 * scale))
+    pad = max(4, round(12 * scale))
     for number, mask in enumerate(masks, 1):
         color = COLORS[(number - 1) % len(COLORS)]
         canvas[mask] = (canvas[mask] * 0.82 + np.array(color, np.float32) * 0.18).astype(np.uint8)
         contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL,
                                        cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(canvas, contours, -1, color, 3)
+        cv2.drawContours(canvas, contours, -1, color, contour_thickness)
         x, y = mark_anchor(mask)
         label = str(number)
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3)
-        cv2.circle(canvas, (x, y), max(tw, th) // 2 + 12, (255, 255, 255), -1)
-        cv2.circle(canvas, (x, y), max(tw, th) // 2 + 12, color, 3)
+        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_thickness)
+        cv2.circle(canvas, (x, y), max(tw, th) // 2 + pad, (255, 255, 255), -1)
+        cv2.circle(canvas, (x, y), max(tw, th) // 2 + pad, color, contour_thickness)
         cv2.putText(canvas, label, (x - tw // 2, y + th // 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 3, cv2.LINE_AA)
+                    cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), text_thickness, cv2.LINE_AA)
     return canvas
 
 
