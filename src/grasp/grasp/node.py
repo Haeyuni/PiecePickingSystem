@@ -648,14 +648,8 @@ class GraspNode(Node):
             cv2.line(vis, (trx, try_), (brx, bry), marker_color, thickness)  # 오른손가락
             cv2.circle(vis, (tlx, tly), 4 + thickness - 2, marker_color, -1)
             cv2.circle(vis, (trx, try_), 4 + thickness - 2, marker_color, -1)
-            if rank == 0 or is_selected:
-                # **숫자는 찍지 않는다**(2026-09-07 요구사항: score/width를 화면에 표시하면
-                # 화면이 지저분해진다). 전략명만 남긴다 — heuristic_pca 결과가 GraspNet처럼
-                # 보이면 안 되기 때문이다(2026-09-05, 데이터 출처 오인 방지).
-                # score/width/후보 판정은 메시지·로그에 그대로 있으므로 필요할 때 거기서 본다.
-                cv2.putText(vis, f"[{candidate.strategy}]",
-                           (cx + 12, cy - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                           marker_color, 2, cv2.LINE_AA)
+            # 전략명(예: [graspnet_baseline]) 라벨은 화면을 깨끗하게 유지하려고 뺐다
+            # (2026-09-08 요구사항). score/width/전략은 메시지·로그에 그대로 있다.
 
     def _project_points(self, points_base: list[np.ndarray],
                         camera2base: np.ndarray) -> list[tuple[int, int]] | None:
