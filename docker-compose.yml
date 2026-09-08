@@ -180,6 +180,12 @@ services:
       - ./src/control/config/bins.yaml:/config/bins.yaml:ro
       # 캘리브레이션 결과 등 공용 데이터 (개발계획.md D-2)
       - ./data:/data:ro
+      # 라벨링 결과 데이터셋(app._save_dataset_items)은 유일하게 쓰기가 필요한 경로다 —
+      # perception의 unknown_crops와 같은 이유로 /data 전체가 아니라 이 아래만 rw로 연다.
+      # web_ros는 ./data:/data:ro로 같은 파일을 읽어 화면에 낸다(routers/datasets.py의
+      # FileResponse가 planner가 기록한 절대경로를 그대로 연다 — 두 컨테이너에서 경로가
+      # 같아야 하므로 양쪽 다 /data 아래여야 한다).
+      - ./data/datasets:/data/datasets:rw
     ports:
       - "8100:8100"
     healthcheck:

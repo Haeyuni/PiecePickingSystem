@@ -18,5 +18,10 @@ numpy
 # CPU INT8 양자화로 돌아간다 — web 컨테이너에는 GPU를 안 준다.
 faster-whisper
 
+# /api/stt가 녹음 파일을 multipart로 받는다(routers/stt.py의 UploadFile). FastAPI는 이게
+# 없으면 라우터 등록 시점에 RuntimeError로 죽는다 — 요청이 올 때가 아니라 **기동 즉시**다.
+# services/planner/requirements.txt가 /internal/label-marks 때문에 같은 줄을 갖고 있다.
+python-multipart
+
 # 주의: rclpy는 여기에 없다. ROS2 환경(ros:jazzy 베이스)에서만 제공되며,
 # MOCK_MODE=0일 때 ros_bridge.py에서만 import된다 (web/Dockerfile 참조).

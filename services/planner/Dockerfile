@@ -22,7 +22,8 @@ ENV PYTHONUNBUFFERED=1 \
     MIGRATIONS_DIR=/migrations \
     OBJECTS_YAML=/config/objects.yaml \
     BINS_YAML=/config/bins.yaml \
-    MOCK_DIR=/data/mock
+    MOCK_DIR=/data/mock \
+    DATASETS_DIR=/data/datasets
 
 EXPOSE 8100
 CMD ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8100"]
