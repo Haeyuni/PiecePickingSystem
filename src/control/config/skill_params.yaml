@@ -3,10 +3,13 @@
 # 단위: 길이 mm, 힘 N (인터페이스_정의서.md 1.1절). approach_speed 단위는 objects.yaml의 TODO 참조
 # TODO: 값 확정 (시스템명세서 미확정 항목 참조)
 #
+
 # 파지력 5단계: 1=가장 강하게(40N) ~ 5=가장 약하게(20N), 5N 간격.
-# pick/place 실물 1단계(2026-09-04, 위치제어만)는 이 중 max_grip_force_n만 쓴다
 # (그리퍼의 힘 제한 close, dsr_motion.move_gripper 참조) — approach_speed·
-# contact_threshold_n은 compliance.py(순응제어, 아직 미구현)가 붙는 2단계의 몫이다.
+# pick은 max_grip_force_n만 쓴다(그리퍼의 힘 제한 close, dsr_motion.gripper_width_command
+# 참조). contact_threshold_n은 place_into 하강의 순응 정지(compliance.contact_exceeded,
+# 아래 compliance 블록 참조)가 쓴다 — 기본은 꺼져 있다. approach_speed는 아직 아무도
+# 안 쓴다(접근 자체의 속도 프로파일링은 여전히 미구현).
 
 grip_levels:
   1: { max_grip_force_n: 40.0, approach_speed: 0.25, contact_threshold_n: 8.0 }  # 매우 강하게
@@ -300,6 +303,21 @@ grasp_selection:
     approach_angle: 0.10    # 수직에 가까운 접근인가
     approach_travel: 0.05   # 지금 자세에서 접근 지점까지 얼마나 움직여야 하나
 
+
+compliance:
+  # place_into가 바구니 안으로 내려갈 때(approach_height_mm 구간), 물체/바닥에 닿았다고
+  # 판단되면 목표 높이까지 안 가고 그 자리에서 멈춘다 — 깨지기 쉬운 물체를 계산된
+  # 목표 z까지 위치제어로 밀어붙이면, 목표가 실제보다 낮게 잡혔을 때 눌러 찍는다.
+  #
+  # **기본은 꺼져 있다.** 이 저장소엔 dsr_msgs2가 컨테이너에 마운트로만 존재해서
+  # (docker-entrypoint.sh 참조) GetToolForce 서비스도 profiles.*.contact_threshold_n
+  # 임계값도 실물로 검증한 적이 없다. 켜기 전에 저속·안전한 물체로 먼저 확인할 것 —
+  # 임계값이 너무 낮으면 정상 마찰에도 일찍 멈춰 물체가 목표보다 높이 뜬 채로 놓이고,
+  # 너무 높으면 이 기능이 없는 것과 같아진다(그냥 끝까지 눌러붙인다).
+  place_descent_enabled: false
+  # 하강을 이 간격(mm)으로 쪼개 매 스텝 사이에 GetToolForce를 확인한다. 작을수록 접촉을
+  # 빨리 감지하지만 movel 호출이 늘어 사이클이 느려진다.
+  place_descent_step_mm: 5.0
 
 visual_verification:
   wrist_camera_offset_mm: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정). 단위 mm
