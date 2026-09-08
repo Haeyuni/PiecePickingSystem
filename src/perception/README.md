@@ -55,6 +55,11 @@ DATABASE_URL=postgresql://... .venv/bin/python -m perception.node
 들어가기 때문이다 — `get_current_posx` 서비스를 부른다. `DATABASE_URL`은 없어도 동작하며,
 그때는 `objects.yaml` seed 값을 쓴다.
 
+**`detector:=vlm_sam`은 `objects.yaml`도 DB도 보지 않는다.** 이름과 속성(무게·파손위험·
+변형·투명)과 파지 프로파일을 사진을 본 VLM이 함께 답하고 그 값이 그대로 발행된다
+(`attr_source=llm_suggested`). 위 두 문단은 `detector:=yolo`(기본값) 이야기다 —
+`docs/vlm_sam_pipeline.md`의 [클래스 어휘를 주지 않는다] 참조.
+
 주요 파라미터: `conf`(0.25), `period_s`(0.5), `min_depth_valid_ratio`(0.35),
 `pose_max_age_s`(1.0), `require_robot_pose`(true).
 

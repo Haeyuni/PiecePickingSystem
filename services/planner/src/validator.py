@@ -19,7 +19,7 @@ WORKSPACE_RADIUS_MM = 900.0
 # 그리퍼(SG2/RG2) 자중을 뺀 실효 가반하중. 실측 전까지 보수적으로 잡는다.
 MAX_PAYLOAD_G = 5000.0
 
-# 신규 클래스(미확인)에 강제하는 프로파일 (FR-05, NFR-03a)
+# 프로파일 값을 못 읽었을 때의 기본 (FR-05, NFR-03a) — resolve_profile 참조
 FALLBACK_PROFILE = "fragile"
 
 
@@ -47,11 +47,19 @@ def check_safety_gate(active_safety_events: list[dict]) -> None:
 def resolve_profile(obj: dict) -> str:
     """물체에 적용할 제어 프로파일을 결정한다.
 
-    미확인 신규 클래스는 VLM이 무엇을 제안했든 fallback(fragile)로 강제한다 —
-    사진 기반 추정치가 파지력·속도에 직접 반영되어서는 안 된다(NFR-03a, FR-05b).
+    **예전에는 미확인(needs_confirmation) 물체를 무조건 fallback(fragile)로 강제했다.**
+    등록 클래스 표(objects.yaml)로 아는 물체만 제 프로파일을 쓰고 나머지는 전부 조심스럽게
+    다루자는 규칙이었다(NFR-03a, FR-05b).
+
+    SAM+VLM 경로가 어휘 없이 돌기 시작하면서 그 규칙이 성립하지 않는다 — 그 경로의 물체는
+    **전부** 미확인이므로 강제가 걸리면 치약이든 우산이든 5N·최저속도가 되어 프로파일이라는
+    구분 자체가 사라진다. 그래서 지금은 **값이 유효하면 그대로 쓴다**. 그 값이 사진을 본
+    모델의 판단이라는 뜻이고, 프로파일을 조심스러운 쪽으로 미는 책임은 인지 단계로 옮겼다
+    (`vlm_detect.SYSTEM_PROMPT_MARKS`의 [profile], `_normalize_marks`의 fragile 강제).
+
+    값이 없거나 모르는 값이면 여전히 fragile이다 — 여기서 아는 것이 없을 때의 기본은
+    조심스러운 쪽이어야 한다.
     """
-    if obj.get("needs_confirmation"):
-        return FALLBACK_PROFILE
     profile = obj.get("profile")
     if profile not in ("normal", "fragile", "deformable"):
         return FALLBACK_PROFILE

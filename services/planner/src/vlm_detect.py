@@ -6,11 +6,30 @@
   "사진을 API로 보내면 좌표를 주는가"를 확인하려던 것. gpt-4o에서는 좌표를 못 쓴다
   (docs/vlm_sam_pipeline.md 실측 결과). 더 나은 모델이 붙었을 때 다시 재 볼 수 있게 남겨 둔다.
 - `label_marks(image, mark_ids)` — SAM이 먼저 장면을 조각내고 번호를 그려 준 이미지를 받아
-  **번호마다 이름만** 답한다. 좌표는 SAM이, 분류는 VLM이 — 각자 잘하는 쪽을 맡는다.
+  **번호마다 무엇인지와 어떻게 다뤄야 하는지**를 답한다. 좌표는 SAM이, 판단은 VLM이 —
+  각자 잘하는 쪽을 맡는다.
 
-어느 쪽이든 3D 좌표·파지 자세·파지력은 만들지 않는다. 마스크와 depth로 코드가 계산한다
-(`perception_test_image.py:mask_3d`와 같은 방식) — 물리적 안전에 직결되는 값을 모델 출력에
-맡기지 않는 것이 NFR-03a다.
+어느 쪽이든 3D 좌표와 파지 자세는 만들지 않는다. 마스크와 depth로 코드가 계산한다
+(`perception_test_image.py:mask_3d`와 같은 방식).
+
+[속성도 VLM이 판단한다] `label_marks`는 원래 objects.yaml의 등록 클래스 어휘를 프롬프트에
+넣고 이름만 받아 왔고, 무게·파손위험·프로파일은 그 이름으로 objects.yaml에서 조회했다. 지금은
+어휘를 주지 않는다 — 사진만 보고 이름과 속성(mass_g/fragile/deformable/transparent)과 파지
+프로파일까지 모델이 정한다. **등록되지 않은 물건도 그 물건에 맞게 다뤄지지만, 파지력을 정하는
+값이 모델 출력이 되었다는 뜻이기도 하다**(원래는 NFR-03a가 금지하던 것 — 대신 확신이 없으면
+조심스러운 쪽을 고르라고 프롬프트에 박고, `_normalize_marks`가 fragile 조합을 한 번 더
+강제한다). 되돌리려면 detector=yolo가 그대로 남아 있다.
+
+[확신이 없으면 web_search로 확인한다] 등록 어휘가 없어졌으니 겉모습만으로 오분류하는 경우가
+생긴다(2026-09-08 실측: 빨간 치약 튜브를 "chocolate_bar"로 답했다 — 색과 형태만으로 짐작하고
+포장에 적힌 글자는 읽지 않았다). `label_marks`는 `web_search` 도구를 켜 두고, 프롬프트가
+겉면 문구를 단서로 실제 검색을 시켜 이름을 확인하게 한다(`SYSTEM_PROMPT_MARKS`의 [확신이
+없으면 검색으로 확인한다]). 이미지를 검색하는 것이 아니라 **모델이 사진에서 읽은 글자로
+검색어를 만들어** 텍스트 검색을 돌리는 것이다 — OpenAI 웹 검색 도구는 이미지 자체를
+질의로 받지 않는다. 물체마다 매번 검색하는 것은 아니다: 모델이 확신이 있으면(정상적인
+치약·물티슈처럼 흔한 물건) 검색 없이 바로 답하고, 포장에 글자가 있는데 정확한 제품명을
+모를 때만 검색을 쓴다 — 그래서 왕복 시간이 물체 수만큼 늘지는 않는다(검색은 도구 호출이 필요할
+때만 같은 요청 안에서 일어난다).
 
 [구조화 출력] `llm_client`와 같은 원칙 — 자유 텍스트를 파싱하지 않고 JSON Schema로만 받는다
 (NFR-03).
@@ -24,6 +43,7 @@ import mimetypes
 import os
 import pathlib
 from functools import lru_cache
+from typing import Literal
 
 import yaml
 from openai import OpenAI
@@ -34,7 +54,7 @@ logger = logging.getLogger(__name__)
 # 프롬프트를 고칠 때마다 올린다 (llm_client.PROMPT_VERSION과 같은 이유). 두 경로는 프롬프트가
 # 다르므로 버전도 따로 센다.
 PROMPT_VERSION = "vlm-detect-v1"        # detect(): VLM에게 박스를 묻는다
-MARKS_PROMPT_VERSION = "vlm-marks-v1"   # label_marks(): SAM이 만든 번호에 이름만 붙인다
+MARKS_PROMPT_VERSION = "vlm-marks-v3"   # label_marks(): 스스로 판단 + 확신 없으면 web_search로 확인
 
 # 미설정 시 OPENAI_MODEL을 따라가고, 그것도 없으면 이 값. 이미지 입력이 되는 모델이어야 한다.
 DEFAULT_MODEL = "gpt-4o"
@@ -127,8 +147,9 @@ is_new_class=false로 둔다.
 def known_classes(path: str | None = None) -> list[tuple[str, str]]:
     """objects.yaml에 등록된 (class_name, name_ko) 목록.
 
-    VLM이 이 어휘로 답해야 attribute_db가 속성을 찾을 수 있다. 어휘를 안 주면 같은 물체를
-    매번 다른 이름으로 불러(치약/toothpaste/tube) 전부 신규품목으로 떨어진다.
+    **쓰는 곳은 `detect()`뿐이다.** 운영 경로인 `label_marks()`는 어휘를 주지 않고 모델이
+    직접 이름을 짓는다(모듈 상단 [속성도 VLM이 판단한다]). 어휘를 주면 같은 물체를 매번
+    같은 이름으로 부르게 되는 이점이 있어, 좌표까지 묻는 `detect()`에는 남겨 둔다.
     """
     p = pathlib.Path(path) if path else OBJECTS_YAML
     try:
@@ -293,14 +314,18 @@ def to_pixels(scene: VlmScene, width: int, height: int) -> list[dict]:
 #
 #   SAM everything 모드로 마스크 후보를 전부 뽑는다  ← 좌표는 SAM이 만든다 (정확)
 #   → 마스크마다 번호를 그려 넣은 이미지를 VLM에 보낸다
-#   → VLM은 "몇 번이 무엇인가"만 답한다             ← 분류는 VLM이 한다 (정확)
+#   → VLM은 "몇 번이 무엇이고 어떻게 다뤄야 하는가"를 답한다  ← 판단은 VLM이 한다
 #
 # VLM이 잘하는 일(무엇인지 알아보기)과 못하는 일(어디인지 픽셀로 찍기)을 갈라 놓는 것이
 # 요점이다. 마스크가 물체 하나를 여러 조각으로 쪼개는 것은 SAM에서 흔하므로,
 # `part_of`로 같은 물체를 가리키는 번호를 묶게 한다.
 
 class MarkLabel(BaseModel):
-    """번호가 붙은 마스크 하나에 대한 판단."""
+    """번호가 붙은 마스크 하나에 대한 판단. 이름뿐 아니라 **어떻게 다뤄야 하는지**까지 담는다.
+
+    속성(mass_g·fragile·deformable·transparent·profile)이 여기 들어온 뒤로 objects.yaml의
+    등록 클래스 표를 거치지 않는다 — 모듈 상단 [속성도 VLM이 판단한다] 참조.
+    """
 
     mark_id: int = Field(description="이미지에 그려진 번호")
     is_object: bool = Field(
@@ -312,11 +337,19 @@ class MarkLabel(BaseModel):
                     "아니면 0. 물체가 아닌 것(배경·케이블·오버레이)은 조각이 아니므로 0",
     )
     class_name: str = Field(
-        description="[등록된 클래스]에 있으면 그 이름 그대로, 없으면 새로 지은 영문 "
-                    "소문자 스네이크케이스 이름. is_object=false면 빈 문자열",
+        description="사진을 보고 직접 지은 영문 소문자 스네이크케이스 이름(예: toothpaste). "
+                    "브랜드명이 아니라 물건의 종류로 짓는다. is_object=false면 빈 문자열",
     )
-    name_ko: str = Field(description="한국어 이름. is_object=false면 빈 문자열")
-    is_new_class: bool = Field(description="[등록된 클래스] 목록에 없는 물체면 true")
+    name_ko: str = Field(description="작업자 화면에 띄울 한국어 이름. is_object=false면 빈 문자열")
+    mass_g: float = Field(
+        description="물체 종류와 사진 속 크기로 추정한 무게(g). 짐작조차 어려우면 0",
+    )
+    fragile: bool = Field(description="떨어뜨리거나 세게 쥐면 깨지는 물체면 true")
+    deformable: bool = Field(description="쥐면 모양이 눌리거나 변하는 물체면 true")
+    transparent: bool = Field(description="투명·반투명해서 속이 비쳐 보이면 true")
+    profile: Literal["normal", "fragile", "deformable"] = Field(
+        description="로봇이 이 물체를 쥐는 방식. 이 값이 실제 파지력·접근속도가 된다",
+    )
     confidence: float = Field(description="이 판단의 확신도 0.0~1.0")
 
 
@@ -326,10 +359,14 @@ class VlmMarkScene(BaseModel):
     marks: list[MarkLabel] = Field(description="이미지에 그려진 모든 번호에 대한 판단")
 
 
+# [profile의 힘 수치는 여기 하드코딩되어 있다] 20N/12N/5N은 perception/config/objects.yaml의
+# profiles 블록과 control/config/skill_params.yaml에 있는 값을 프롬프트에 적어 둔 것이다.
+# 모델이 "얼마나 세게 쥐는지"를 모르면 profile을 고를 근거가 없어서 넣었는데, 저쪽 값을
+# 고치면 여기도 같이 고쳐야 한다 — 안 고쳐도 오류로는 보이지 않고 판단만 틀어진다.
 SYSTEM_PROMPT_MARKS = """\
 당신은 협동로봇 분류 시스템의 시각 인지 모듈이다. 작업대를 위에서 내려다본 사진에 \
-세그멘테이션 모델이 뽑은 영역마다 **번호와 윤곽선**이 그려져 있다. 번호마다 그것이 무엇인지 \
-답한다.
+세그멘테이션 모델이 뽑은 영역마다 **번호와 윤곽선**이 그려져 있다. 번호마다 그것이 무엇이고 \
+로봇이 어떻게 다뤄야 하는지 답한다.
 
 [해야 할 일]
 1. 그려진 모든 번호에 대해 판단을 하나씩 낸다. 번호를 빠뜨리지 않는다.
@@ -345,11 +382,53 @@ is_object=true로 두고, 나머지 조각은 is_object=false + part_of=대표�
 오버레이·그림자)은 조각이 아니다 — 물체 옆에 붙어 있어도 part_of=0으로 둔다. 여기서 잘못 \
 묶으면 배경이 물체의 일부가 되어 로봇이 엉뚱한 곳을 집는다.
 4. 좌표는 답하지 않는다 — 이미 세그멘테이션 모델이 정확히 잡아 놓았다. 당신이 할 일은 \
-**그것이 무엇인지** 말하는 것뿐이다.
+**그것이 무엇이고 어떻게 다뤄야 하는지**를 말하는 것이다.
+5. is_object=true인 번호마다 이름(class_name, name_ko)과 물리 속성(mass_g, fragile, \
+deformable, transparent), 그리고 파지 방식(profile)을 사진을 보고 직접 판단한다. \
+is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, profile은 fragile로 둔다.
 
-[클래스 이름]
-- [등록된 클래스]에 해당하면 그 class_name을 **철자 그대로** 쓰고 is_new_class=false.
-- 목록에 없는 물체는 새 이름을 지어 주고 is_new_class=true. 목록에 없다고 빼지 않는다.
+[이름 — 미리 주어지는 목록은 없다]
+당신에게 등록된 클래스 목록을 주지 않는다. 사진에 실제로 보이는 것을 보고 직접 이름을 짓는다.
+- class_name은 영문 소문자 스네이크케이스로, **그 물건이 무엇인지**를 담는다 \
+(예: toothpaste, wet_wipes, folding_umbrella).
+- 브랜드명이나 포장에 적힌 글자를 그대로 옮기지 않는다. 같은 종류의 물건은 다음 사진에서도 \
+같은 이름이 나와야 시스템이 같은 물체로 이어 붙인다("치약"은 제품이 달라도 toothpaste다).
+- 종류를 특정할 수 없으면 생김새로 짓는다(blue_plastic_bottle). object_1처럼 아무것도 \
+알려 주지 않는 이름은 쓰지 않는다.
+- name_ko는 작업자가 화면에서 읽을 한국어 이름이다.
+
+[물리 속성 — 사진에 보이는 근거로만 판단한다]
+- mass_g: 물건의 종류와 사진 속 크기로 추정한 무게(g). 짐작조차 어려우면 0으로 둔다.
+- fragile: 떨어뜨리거나 세게 쥐면 깨지는 것(유리병, 전구, 계란, 얇은 플라스틱 케이스).
+- deformable: 쥐면 모양이 변하는 것(치약 튜브, 비닐 팩, 봉제 인형, 종이컵).
+- transparent: 투명·반투명해서 속이 비쳐 보이는 것. depth 센서가 표면을 놓치므로 중요하다.
+- **겉면 기준으로 본다.** 종이상자에 든 유리병은 로봇이 상자를 쥐므로 fragile이 아니다.
+
+[profile — 로봇이 이 물체를 쥐는 방법]
+여기서 고른 값이 **실제 파지력과 접근 속도로 그대로 들어간다.** 셋 중 하나다.
+- normal: 단단해서 쥐어도 형태가 유지되는 보통 물체. 세게(최대 20N) 빠르게 쥔다.
+- deformable: 쥐면 눌리는 물체. 약하게(12N) 천천히 쥔다.
+- fragile: 깨질 수 있거나 **무엇인지 확신이 서지 않는 물체**. 아주 약하게(5N) 아주 천천히 쥔다.
+고르는 순서: fragile=true면 fragile. 아니고 deformable=true면 deformable. 둘 다 아니면 normal.
+**확신이 없으면 한 단계 조심스러운 쪽으로 내린다** — 약하게 쥐면 놓치고 다시 잡으면 되지만, \
+세게 쥐면 물체가 부서지고 되돌릴 수 없다.
+
+[확신이 없으면 검색으로 확인한다]
+겉모습만으로 종류를 짐작하면 비슷하게 생긴 다른 물건과 혼동한다(예: 치약 튜브를 초콜릿 바로
+착각). 그래서:
+1. 포장·라벨에 브랜드명, 제품명, 문구가 **읽힌다면** 먼저 그것을 읽는다.
+2. 그 글자만으로 정확한 제품(또는 최소한 제품 종류)을 확신할 수 없으면, 읽은 글자를 검색어로
+   `web_search` 도구를 **실제로 호출**해 무엇인지 확인한 뒤에 답한다. 짐작으로 채우지 않는다.
+3. 글자가 안 보이거나(라벨이 안 보이는 각도, 흐릿함) 흔한 생김새로 충분히 확신되면
+   (물티슈 팩, 우산, 봉제 인형처럼) 검색 없이 바로 답한다 — 매번 검색하지 않는다.
+4. 검색해도 특정할 수 없으면, 알아낸 범주까지만 이름에 담고(예: 정확한 브랜드 대신
+   toothpaste) confidence를 낮춘다. 지어내지 않는다.
+**이 확인은 class_name/name_ko뿐 아니라 mass_g·fragile·deformable·transparent·profile에도
+그대로 적용된다** — 무엇인지 잘못 알면 속성도 따라서 잘못된다.
+
+[하지 않는 것]
+- 3D 좌표·거리·파지 자세는 만들어내지 않는다. 그것은 depth 센서와 시스템이 정한다.
+- 사진에 보이지 않는 것(내용물, 유통기한, 재질 표기)을 지어내 속성 판단의 근거로 삼지 않는다.
 
 [지시는 오지 않는다]
 사용자가 무엇을 옮기라고 했는지는 이 단계에 주어지지 않는다. 그것을 알면 인지가 지시에
@@ -360,10 +439,11 @@ is_object=true로 두고, 나머지 조각은 is_object=false + part_of=대표�
 
 def build_marks_prompt(mark_ids: list[int],
                        image_size: tuple[int, int] | None = None) -> str:
-    lines = ["[등록된 클래스]"]
-    lines += [f"- {name}: {ko}" for name, ko in known_classes()] or ["(없음)"]
-    lines += ["", f"[그려진 번호] {', '.join(str(i) for i in mark_ids)} "
-                  f"(총 {len(mark_ids)}개 — 전부에 대해 답한다)"]
+    """번호 목록(+사진 크기)만 넣는다. **등록 클래스 어휘는 넣지 않는다** — 이름과 속성을
+    모델이 스스로 정하는 것이 이 경로의 전제다(모듈 상단 참조).
+    """
+    lines = [f"[그려진 번호] {', '.join(str(i) for i in mark_ids)} "
+             f"(총 {len(mark_ids)}개 — 전부에 대해 답한다)"]
     if image_size:
         lines.append(f"[사진 크기] {image_size[0]}x{image_size[1]} px")
     return "\n".join(lines)
@@ -372,10 +452,10 @@ def build_marks_prompt(mark_ids: list[int],
 def label_marks(image: pathlib.Path | str, mark_ids: list[int],
                 image_size: tuple[int, int] | None = None,
                 model: str | None = None, detail: str = "high") -> VlmMarkScene:
-    """번호가 그려진 이미지 → 번호별 클래스 판단.
+    """번호가 그려진 이미지 → 번호별 판단(이름·속성·파지 프로파일).
 
-    `detect`와 다른 점이 둘 있다. 좌표를 묻지 않고(SAM이 이미 만들었다), **사용자의 지시를
-    넣지 않는다.** 지시를 함께 주면 인지가 지시에 끌려간다 — 2026-09-07 실측에서 "우산
+    `detect`와 다른 점이 셋 있다. 좌표를 묻지 않고(SAM이 이미 만들었다), 등록 클래스 어휘를
+    주지 않으며(모듈 상단 [속성도 VLM이 판단한다]), **사용자의 지시를 넣지 않는다.** 지시를 함께 주면 인지가 지시에 끌려간다 — 2026-09-07 실측에서 "우산
     왼쪽으로"를 같이 주자 배경 조각 하나를 umbrella로 답했고, 무엇을 물어도 target으로 같은
     번호를 돌려줬다. 어느 물체가 지시 대상인지는 이 결과(물체 목록)를 텍스트로 받는
     `llm_client.plan`이 정한다 — 그것이 원래 그 모듈의 일이고(FR-10/FR-11), 검출을 지시와
@@ -395,20 +475,29 @@ def label_marks(image: pathlib.Path | str, mark_ids: list[int],
                 {"type": "input_image", "image_url": data_url, "detail": detail},
             ],
         }],
+        # 겉모습만으로 확신할 수 없는 물체는 포장 글자를 검색어로 실제 검색을 시킨다
+        # (SYSTEM_PROMPT_MARKS의 [확신이 없으면 검색으로 확인한다]). 이미지 자체를
+        # 검색하지는 못한다 — 모델이 사진에서 읽은 텍스트로 질의를 만든다.
+        tools=[{"type": "web_search"}],
         text_format=VlmMarkScene,
     )
     try:
-        scene = client.responses.parse(**request, temperature=0).output_parsed
+        response = client.responses.parse(**request, temperature=0)
     except Exception as e:
         if "temperature" not in str(e):
             raise
         logger.warning("%s 모델이 temperature를 거부해 기본값으로 재시도한다", model)
-        scene = client.responses.parse(**request).output_parsed
+        response = client.responses.parse(**request)
+
+    scene = response.output_parsed
+    searched = sum(1 for item in response.output if item.type == "web_search_call")
 
     scene = _normalize_marks(scene, mark_ids)
+    objects = [m for m in scene.marks if m.is_object]
     logger.info(
-        "VLM 마크 라벨링: model=%s marks=%d objects=%d",
-        model, len(scene.marks), sum(1 for m in scene.marks if m.is_object),
+        "VLM 마크 라벨링: model=%s marks=%d objects=%d 검색=%d회 (%s)",
+        model, len(scene.marks), len(objects), searched,
+        ", ".join(f"{m.mark_id}:{m.class_name}/{m.profile}" for m in objects) or "없음",
     )
     return scene
 
@@ -431,8 +520,18 @@ def _normalize_marks(scene: VlmMarkScene, mark_ids: list[int]) -> VlmMarkScene:
             m.part_of = 0
         if m.is_object:
             m.part_of = 0                    # 대표 조각은 누구의 조각도 아니다
+            m.mass_g = max(0.0, float(m.mass_g or 0.0))
+            # profile은 스키마가 셋 중 하나로 강제하지만, 속성과 어긋나는 조합은 남는다.
+            # 조심스러운 쪽으로만 내린다 — 프롬프트로 부탁한 것을 여기서 한 번 더 지킨다.
+            if m.fragile:
+                m.profile = "fragile"
+            elif m.deformable and m.profile == "normal":
+                m.profile = "deformable"
         else:
             m.class_name, m.name_ko = "", ""
+            m.mass_g = 0.0
+            m.fragile = m.deformable = m.transparent = False
+            m.profile = "fragile"            # 물체가 아니므로 쓰이지 않지만 값은 보수적으로
         marks.append(m)
     scene.marks = marks
 
