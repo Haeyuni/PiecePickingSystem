@@ -11,8 +11,11 @@ import threading
 
 import rclpy
 from rclpy.node import Node
+from sensor_msgs.msg import JointState
 
 from sort_msgs.msg import RobotState
+
+from . import dsr_motion
 
 SCHEMA_VERSION = "1.0.0"
 PUBLISH_PERIOD_S = 0.2
@@ -43,6 +46,22 @@ class RobotStateStore:
             self._mode = RobotState.MODE_ERROR
             self._current_skill = "none"
 
+    def set_estopped(self) -> None:
+        """safety_monitor가 e_stop/collision(안전정지)을 감지했을 때 부른다."""
+        with self._lock:
+            self._mode = RobotState.MODE_ESTOPPED
+            self._current_skill = "none"
+
+    def clear_estopped(self) -> None:
+        """safety_monitor가 감지 조건이 풀렸음을 확인했을 때 부른다.
+
+        **estopped일 때만 idle로 되돌린다** — 그 사이 다른 노드가 busy/error로 바꿔
+        놨다면(안전정지 중엔 실제로 일어날 수 없지만) 그 값을 덮어쓰지 않는다.
+        """
+        with self._lock:
+            if self._mode == RobotState.MODE_ESTOPPED:
+                self._mode = RobotState.MODE_IDLE
+
     def set_gripper(self, width_mm: float, closed: bool) -> None:
         with self._lock:
             self._gripper_width_mm = width_mm
@@ -71,11 +90,22 @@ class RobotStatePublisherNode(Node):
     def __init__(self):
         super().__init__('robot_state_publisher_node')
         self._pub = self.create_publisher(RobotState, '/control/robot_state', 10)
+        # 그리퍼 상태(gripper_width_mm/closed)는 이미 store가 갖고 있다 — pick/place
+        # 액션 서버가 매 사이클 store.set_gripper()로 써 넣는다. 여기서 새로 받는 건
+        # 팔 관절 상태뿐이다(driver → 이 노드 → RobotState.joint_state, 다른 곳이 안 쓰는
+        # 값이라 store를 거치지 않고 직접 들고 있는다 — RobotStateStore 클래스 docstring 참조,
+        # store는 "액션 서버가 쓰고 이 노드가 읽는" 상태만 위한 것이다).
+        self._joint_state: JointState | None = None
+        if not is_fake_robot():
+            self.create_subscription(JointState, dsr_motion.ARM_JOINT_STATES_TOPIC,
+                                     self._on_joint_state, 5)
         self.create_timer(PUBLISH_PERIOD_S, self._publish)
         self.get_logger().info(
             f"robot_state 발행 시작 ({'fake' if is_fake_robot() else '실물'} 모드)"
         )
-        # TODO(실물): 조인트 상태·그리퍼 상태를 doosan-robot2 드라이버에서 받아 store에 반영
+
+    def _on_joint_state(self, msg: JointState) -> None:
+        self._joint_state = msg
 
     def _publish(self) -> None:
         state = store.snapshot()
@@ -86,6 +116,8 @@ class RobotStatePublisherNode(Node):
         msg.current_skill = state["current_skill"]
         msg.gripper_width_mm = state["gripper_width_mm"]
         msg.gripper_closed = state["gripper_closed"]
+        if self._joint_state is not None:
+            msg.joint_state = self._joint_state
         self._pub.publish(msg)
 
 

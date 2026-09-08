@@ -1,4 +1,7 @@
-"""pick 액션 서버. compliance(토크 판정) AND visual_verification 통과 시에만 success=true.
+"""pick 액션 서버. compliance(토크 판정) AND visual_verification 통과 시에만 success=true
+— 가 인터페이스 문서의 목표고, **지금 실물 성공 판정은 RG2 'Grip detected' 비트로 한다**
+(아래 _pick_real 주석 참조). compliance.py는 진단용 torque_trace_summary만 채우고
+visual_verification.py는 아직 스텁이다.
 
 참조: 인터페이스_정의서.md 4.1절 (Pick.action)
 
@@ -26,7 +29,7 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from dsr_msgs2.action import MovelH2r
-from dsr_msgs2.srv import Fkin, GetCurrentPosx, GetCurrentSolutionSpace, Ikin
+from dsr_msgs2.srv import Fkin, GetCurrentPosx, GetCurrentSolutionSpace, GetExternalTorque, Ikin
 from onrobot_rg_msgs.msg import OnRobotRGInput
 from onrobot_rg_msgs.srv import GripperPose, SetCommand
 from rclpy.qos import DurabilityPolicy, QoSProfile
@@ -34,7 +37,7 @@ from sensor_msgs.msg import JointState
 from sort_msgs.action import Pick
 from sort_msgs.msg import SelectedGrasp
 
-from . import dsr_motion, grasp_selection
+from . import compliance, dsr_motion, grasp_selection
 from .config_paths import skill_params_path
 from .request_cache import RequestCache
 from .robot_state_publisher import is_fake_robot, store
@@ -175,6 +178,9 @@ class PickServer(Node):
             SetCommand, dsr_motion.GRIPPER_COMMAND_SERVICE, callback_group=callbacks)
         self._gripper_pose_client = self.create_client(
             GripperPose, "/onrobot/pose", callback_group=callbacks)
+        # compliance.py 진단(torque_trace_summary)용 — 판정에는 안 쓴다(compliance.py 참조).
+        self._torque_client = self.create_client(
+            GetExternalTorque, dsr_motion.GET_EXTERNAL_TORQUE_SERVICE, callback_group=callbacks)
         self._gripper_joint_angle: float | None = None
         self.create_subscription(JointState, dsr_motion.GRIPPER_JOINT_STATES_TOPIC,
                                  self._on_gripper_state, 5, callback_group=callbacks)
@@ -414,7 +420,9 @@ class PickServer(Node):
                     self._cache.put(goal.request_id, result)
                     goal_handle.succeed()
                     return result
-                visual_passed, torque = False, []
+                # torque는 compliance.py가 모은 진단값(판정에는 안 쓴다) — visual_verification은
+                # 아직 스텁이라 visual_passed는 항상 False다.
+                visual_passed, torque = False, evidence.get("torque_trace_summary", [])
 
             if self._injected_failure(goal.object_id):
                 self.get_logger().warning(
@@ -673,8 +681,10 @@ class PickServer(Node):
         self._selected_pub.publish(msg)
 
     def _pick_real(self, goal_handle, goal, selected, wrist_pose) -> tuple[float, float] | None:
-        """위치제어만으로 실물 pick을 수행한다 (1단계 — compliance.py/visual_verification.py가
-        아직 빈 스텁이라 접촉감지·파지확인 없이 grasp_pose를 그대로 믿고 움직인다).
+        """위치제어만으로 실물 pick을 수행한다 (1단계 — visual_verification.py가 아직 빈
+        스텁이라 grasp_pose를 그대로 믿고 움직인다. compliance.py는 외부토크를 진단용으로만
+        기록한다 — 접근을 멈추거나 파지를 판정하지 않는다, 판정은 RG2 'Grip detected'
+        비트가 한다).
 
         grasp_pose 바로 위(approach_height_mm)에서 한 번 멈췄다 내려가 그리퍼를 닫고
         다시 들어올린다. 힘(N)은 profile별 max_grip_force_n을 정확히 넣지 못한다 —
@@ -841,12 +851,17 @@ class PickServer(Node):
         except _Canceled:
             return None
 
+        # 진단용 외부토크 기록(compliance.py) — 판정에는 안 쓴다. 서비스가 무응답이면
+        # sample()이 조용히 건너뛰므로 이 사이클 전체를 막지 않는다.
+        torque_trace = compliance.TorqueTrace()
+
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_APPROACHING)
         approach_ok, approach_pose = move(approach_posx)
         if not approach_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("접근 위치로 이동 실패")
+        torque_trace.sample(self._torque_client, "approach")
 
         descend_posx = next_target(target_xyz, approach_pose)
         if descend_posx is None:
@@ -908,6 +923,7 @@ class PickServer(Node):
             raise RuntimeError("파지 위치의 실제 TCP를 읽지 못해 snapshot을 만들 수 없다")
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_CONTACT_DETECTED)
+        torque_trace.sample(self._torque_client, "contact")
 
         # **목표 개폭으로 닫는다 — 'c'(완전 닫기)로 닫으면 파지 판정이 성립하지 않는다.**
         # 'c'는 손가락이 맞닿을 때까지 민다. 그러면 빈 그리퍼에서도 손가락끼리 부딪혀
@@ -950,6 +966,7 @@ class PickServer(Node):
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("그리퍼가 닫히는 동안 응답이 없다")
+        torque_trace.sample(self._torque_client, "close")
 
         # 그리퍼가 실제로 닫힌 개폭 — 들어올리기가 이후에 실패해도 "물었는지 여부"는
         # 이미 정해져 있다. 이 뒤의 실패는 grasp_failed가 아니라 별도로 구분해 보고한다.
@@ -983,14 +1000,19 @@ class PickServer(Node):
             if goal_handle.is_cancel_requested:
                 return None
             raise _LiftFailedError("들어올리기 실패", width_mm)
+        torque_trace.sample(self._torque_client, "lift")
         lift_evidence = self._gripper_evidence(since=lift_started)
         lift_width_mm = dsr_motion.gripper_width_mm(
             self._gripper_pose_client, self._gripper_joint_angle)
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_VERIFYING)
+        if torque_trace.summary():
+            self.get_logger().info(
+                f"[COMPLIANCE] request_id={goal.request_id} 외부토크(Nm) {torque_trace.log_line()} "
+                "— 진단용, 파지 판정에는 안 씀(Grip detected 비트가 판정한다)")
         self.get_logger().warning(
-            "위치제어만으로 pick 완료 — compliance/visual_verification 미구현이라 "
-            "실제 파지 여부는 확인되지 않았다")
+            "위치제어만으로 pick 완료 — visual_verification 미구현이라 손목 카메라로는 "
+            "확인되지 않았다(파지 판정 자체는 Grip detected 비트로 한다)")
         # **반드시 2-튜플로 돌려준다.** execute_callback이
         # `width_mm, close_target_mm = pick_result`로 푼다 — close_target_mm은 파지 판정에
         # 필요하다('c'로 완전히 닫은 경우 Grip detected 비트를 믿으면 안 되는데, 그 구분이
@@ -1003,6 +1025,7 @@ class PickServer(Node):
             "post": post_evidence,
             "lift": lift_evidence,
             "lift_width_mm": lift_width_mm,
+            "torque_trace_summary": torque_trace.summary(),
         }
 
     @staticmethod
