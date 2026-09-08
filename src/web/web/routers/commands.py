@@ -41,6 +41,17 @@ async def create_command(body: CommandRequest, request: Request):
             content={"schema_version": "1.0.0", "error": {"code": code, "message": message}},
         )
 
+    # 승인 대기는 로봇의 mode가 아니다(orchestrator.has_pending_approval 참조) — 로봇은
+    # 가만히 있지만, 이전 명령의 승인이 안 끝났으면 다음 명령을 계획하지 않는다(명령
+    # 1건당 승인 1회 원칙이 겹치면 어느 쪽을 승인한 것인지 알 수 없다).
+    if orchestrator.has_pending_approval():
+        return JSONResponse(
+            status_code=409,
+            content={"schema_version": "1.0.0",
+                     "error": {"code": "AWAITING_APPROVAL",
+                               "message": "이전 명령의 승인 대기 중입니다"}},
+        )
+
     trace_id = f"tr-{uuid.uuid4().hex[:12]}"
     logger.info("명령 접수 trace=%s: %s", trace_id, body.command_text)
     orchestrator.start_command(trace_id, body.command_text, executor)

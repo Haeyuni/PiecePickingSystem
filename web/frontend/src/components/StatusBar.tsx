@@ -6,11 +6,12 @@ const MODE_LABEL: Record<string, string> = {
 }
 
 export default function StatusBar({
-  robot, connected, warning,
+  robot, connected, warning, awaitingApproval,
 }: {
   robot: RobotState
   connected: boolean
   warning: SafetyEvent | null
+  awaitingApproval?: boolean
 }) {
   return (
     <div className="statusbar">
@@ -23,6 +24,8 @@ export default function StatusBar({
           ? `현재 스킬: ${robot.current_skill}`
           : '현재 스킬 없음'}
       </span>
+      {/* 로봇 mode와는 별개다 — 승인 대기는 로봇이 아니라 사람을 기다리는 상태다 */}
+      {awaitingApproval && <span className="warn-chip">⏸ 승인 대기 중</span>}
       {/* warning 등급은 배너로 키우지 않고 작게 상시 노출한다 (2.2.3) */}
       {warning && <span className="warn-chip">⚠ {warning.description}</span>}
       <span className="spacer" />

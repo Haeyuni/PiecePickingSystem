@@ -108,6 +108,23 @@ export interface ObjectConfirmation {
   created_at: string
 }
 
+/** 실행 전 승인 대기(명령 1건당 1회). 검증을 통과해도 이 이벤트를 받은 뒤에야 로봇이
+ * 움직인다 — approve/reject/correct_label 중 하나로 응답해야 한다. */
+export interface ApprovalNeededEvent {
+  type: 'execution_approval_needed'
+  trace_id: string
+  sequence_id: string | null
+  validation_status: 'approved' | 'rejected' | null
+  validation_reason: string | null
+  steps: TraceStep[]
+  objects: DetectedObject[]
+}
+
+export type ApprovalAction =
+  | { action: 'approve' }
+  | { action: 'reject' }
+  | { action: 'correct_label'; object_id: string; class_name?: string; name_ko?: string }
+
 /** /ws/live 이벤트 (4절). 단일 채널이라 type으로 구분한다. */
 export type LiveEvent =
   | ({ type: 'robot_state' } & RobotState)
@@ -116,3 +133,4 @@ export type LiveEvent =
   | ({ type: 'safety_event' } & SafetyEvent)
   | { type: 'object_confirmation_needed'; class_name: string }
   | ({ type: 'world_state' } & WorldState)
+  | ApprovalNeededEvent

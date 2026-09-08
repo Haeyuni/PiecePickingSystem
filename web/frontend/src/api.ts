@@ -1,5 +1,5 @@
 /** web 백엔드 호출 (웹_인터페이스_정의서.md 2절). */
-import type { ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
+import type { ApprovalAction, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
 
 export interface ApiError {
   code: string
@@ -84,4 +84,11 @@ export function getHealth() {
 
 export function getWorldState() {
   return request<WorldState>('/api/world-state')
+}
+
+export function submitApproval(traceId: string, body: ApprovalAction) {
+  return request<{ trace_id: string; accepted: boolean }>(
+    `/api/executions/${traceId}/approval`,
+    { method: 'POST', body: JSON.stringify({ schema_version: '1.0.0', ...body }) },
+  )
 }

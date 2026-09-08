@@ -1,8 +1,10 @@
-"""명령 1건의 수명주기: 계획 → 검증 결과 확인 → 순차 실행 → 실패 시 재계획.
+"""명령 1건의 수명주기: 계획 → 검증 결과 확인 → 실행 전 승인 대기 → 순차 실행 → 실패 시 재계획.
 
-검증을 통과한 시퀀스는 **사람 승인 없이 자동 실행된다**(웹_인터페이스_정의서.md 1절).
-브라우저는 진행 상황을 볼 뿐 실행을 막는 승인 버튼이 없으므로, 여기서 실행 전 확인해야 할
-것은 `validation_status`뿐이다 — rejected면 어떤 액션도 호출하지 않는다.
+**검증을 통과한 시퀀스도 실행 전에 브라우저의 승인을 한 번 받는다**(명령 1건당 1회,
+`_await_approval` 참조). SAM+VLM 경로가 어휘 없이 물체 속성(파지력에 직결되는 profile
+포함)까지 스스로 판단하게 되면서(vlm_detect.py 상단 참조), 검증기를 지났다는 것만으로
+그대로 실행하기보다 사람이 한 번 보게 하기로 정책을 바꿨다. `validation_status`가
+rejected면 승인 단계까지 가지 않고 그대로 끝난다 — 이 부분은 이전과 같다.
 """
 import asyncio
 import dataclasses
@@ -50,6 +52,11 @@ WORLD_STATE_RELAY_TIMEOUT_S = float(os.environ.get("WORLD_STATE_RELAY_TIMEOUT_S"
 
 # trace_id → 스냅샷. WebSocket 재연결 시 GET /api/traces/{trace_id}로 돌려줄 현재 상태.
 traces: dict[str, dict] = {}
+
+# trace_id → 승인 대기 큐. approvals.py가 여기 넣고(POST), 아래 _await_approval이 여기서
+# 받는다(GET). _running_tasks와 같은 자리에 두는 이유도 같다 — 진행 중인 명령 하나당
+# 하나씩만 있어야 한다.
+_pending_approvals: dict[str, asyncio.Queue] = {}
 
 # trace_id → 실행 중인 asyncio.Task. Stop이 "지금 활성 ROS goal"뿐 아니라 이 태스크
 # 자체도 취소해야 한다 — 안 그러면 두 액션 스텝 사이(재계획 대기·planner 호출 등,
@@ -308,27 +315,29 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
             })
             return
 
-        steps = result.get("steps", [])
-        trace["steps"] = [
-            {
-                "request_id": f"rq-{uuid.uuid4().hex[:8]}",
-                "skill": s["skill"],
-                "object_id": s["object_id"],
-                "bin_id": s.get("bin_id"),
-                "profile": s["profile"],
-                "grasp_pose": s.get("grasp_pose"),
-                "gripper_width_mm": s.get("gripper_width_mm"),
-                # 후보 목록과 물체 정보는 화면에 내보내지 않고 control에 전달만 한다 —
-                # control이 실행 가능한 후보를 고르는 데 쓴다(control/grasp_selection.py).
-                "grasp_candidates": s.get("grasp_candidates") or [],
-                "object_center_mm": s.get("object_center_mm"),
-                "object_height_mm": s.get("object_height_mm"),
-                "depth_valid_ratio": s.get("depth_valid_ratio"),
-                "status": "pending",
-                "phase": None,
-            }
-            for s in steps
-        ]
+        trace["steps"] = _build_steps(result.get("steps", []))
+
+        trace["objects"] = world_state.get("objects", [])
+        decision = await _await_approval(trace, world_state, command_text,
+                                         previous_failure, executor)
+        if decision is None:
+            if trace["validation_status"] == "rejected":
+                # correct_label로 재계획했는데 이번엔 검증을 못 지났다 — 사용자 거부가
+                # 아니라 검증 거부다(위 306행과 같은 사유 표시).
+                logger.info("재계획이 거부됨 (trace=%s): %s", trace_id, trace["validation_reason"])
+                await hub.broadcast({
+                    "type": "execution_result", "trace_id": trace_id, "request_id": "",
+                    "success": False, "failure_reason": "rejected",
+                    "validation_reason": trace["validation_reason"],
+                })
+            else:
+                logger.info("사용자가 실행을 거부함 (trace=%s)", trace_id)
+                await hub.broadcast({
+                    "type": "execution_result", "trace_id": trace_id, "request_id": "",
+                    "success": False, "failure_reason": "user_rejected",
+                })
+            return
+        world_state, trace["steps"] = decision
 
         failure = await _execute_steps(trace, world_state, executor)
         if failure is None:
@@ -455,6 +464,117 @@ def _object_bottom_offset_mm(world_state: dict, steps: list, index: int) -> floa
         # 측정이 튄 경우이므로 쓰지 않는다.
         return offset if offset > 0.0 else None
     return None
+
+
+def _build_steps(steps: list[dict]) -> list[dict]:
+    """planner의 steps 응답 → trace가 들고 있을 스텝 목록. 최초 계획과 라벨 수정 후
+    재계획이 같은 모양을 만들어야 하므로 함수로 뽑아 둔다."""
+    return [
+        {
+            "request_id": f"rq-{uuid.uuid4().hex[:8]}",
+            "skill": s["skill"],
+            "object_id": s["object_id"],
+            "bin_id": s.get("bin_id"),
+            "profile": s["profile"],
+            "grasp_pose": s.get("grasp_pose"),
+            "gripper_width_mm": s.get("gripper_width_mm"),
+            # 후보 목록과 물체 정보는 화면에 내보내지 않고 control에 전달만 한다 —
+            # control이 실행 가능한 후보를 고르는 데 쓴다(control/grasp_selection.py).
+            "grasp_candidates": s.get("grasp_candidates") or [],
+            "object_center_mm": s.get("object_center_mm"),
+            "object_height_mm": s.get("object_height_mm"),
+            "depth_valid_ratio": s.get("depth_valid_ratio"),
+            "status": "pending",
+            "phase": None,
+        }
+        for s in steps
+    ]
+
+
+async def _broadcast_approval_needed(trace: dict) -> None:
+    await hub.broadcast({
+        "type": "execution_approval_needed",
+        "trace_id": trace["trace_id"],
+        "sequence_id": trace["sequence_id"],
+        "validation_status": trace["validation_status"],
+        "validation_reason": trace["validation_reason"],
+        "steps": trace["steps"],
+        "objects": trace["objects"],
+    })
+
+
+def _apply_label_correction(world_state: dict, message: dict) -> None:
+    """라벨 수정 요청을 world_state에 그대로 반영한다. 이 world_state가 재계획의 입력이 된다."""
+    object_id = message.get("object_id")
+    for obj in world_state.get("objects", []):
+        if obj.get("object_id") != object_id:
+            continue
+        if message.get("class_name"):
+            obj["class_name"] = message["class_name"]
+        if message.get("name_ko"):
+            obj["name_ko"] = message["name_ko"]
+        return
+    logger.warning("라벨 수정 대상 object_id를 world_state에서 못 찾음: %s", object_id)
+
+
+async def _await_approval(trace: dict, world_state: dict, command_text: str,
+                          previous_failure, executor) -> tuple[dict, list[dict]] | None:
+    """계획된 시퀀스를 실행하기 전에 브라우저의 승인을 기다린다(명령 1건당 1회 원칙).
+
+    라벨 수정(`correct_label`)이 오면 world_state를 고쳐 재계획하고, 그 결과를 다시
+    승인 화면으로 내보낸다 — 승인은 한 번에 끝나지 않고 사용자가 만족할 때까지 반복될
+    수 있다. 큐를 쓰는 이유는 `run_command`의 `CancelledError` 처리(위 참조)가
+    `await queue.get()` 대기 중에도 그대로 적용되어, Stop이 승인 대기 구간도 끊을 수
+    있게 하기 위해서다 — 별도 취소 처리를 만들 필요가 없다.
+    """
+    trace_id = trace["trace_id"]
+    queue: asyncio.Queue = asyncio.Queue()
+    _pending_approvals[trace_id] = queue
+    try:
+        while True:
+            await _broadcast_approval_needed(trace)
+            message = await queue.get()
+            action = message.get("action")
+
+            if action == "approve":
+                return world_state, trace["steps"]
+            if action == "reject":
+                return None
+            if action != "correct_label":
+                logger.warning("알 수 없는 승인 액션 %r — 무시 (trace=%s)", action, trace_id)
+                continue
+
+            _apply_label_correction(world_state, message)
+            result = await _plan_with_grasp_retry(
+                trace_id, command_text, world_state, previous_failure, executor)
+            trace["sequence_id"] = result.get("sequence_id")
+            trace["validation_status"] = result.get("validation_status")
+            trace["validation_reason"] = result.get("validation_reason")
+            if result.get("validation_status") != "approved":
+                # 승인 화면에 계속 보여줄 스텝이 없다 — 호출자가 validation_status로
+                # "검증 거부"와 "사용자 거부"를 가른다(위 _run_command_body 참조).
+                trace["steps"] = []
+                return None
+            trace["steps"] = _build_steps(result.get("steps", []))
+            trace["objects"] = world_state.get("objects", [])
+    finally:
+        _pending_approvals.pop(trace_id, None)
+
+
+def has_pending_approval() -> bool:
+    """commands.py가 새 명령을 막을지 판단하는 데 쓴다. 승인 대기는 로봇의 실제 상태(ROS가
+    보고하는 mode)와 무관하다 — 로봇은 가만히 있으므로 robot_state().mode를 흉내 내는 대신
+    이 큐의 존재 여부로 직접 판단한다."""
+    return bool(_pending_approvals)
+
+
+def resolve_approval(trace_id: str, message: dict) -> bool:
+    """approvals 라우터가 부른다. 대기 중인 큐가 없으면(이미 끝났거나 잘못된 trace_id) False."""
+    queue = _pending_approvals.get(trace_id)
+    if queue is None:
+        return False
+    queue.put_nowait(message)
+    return True
 
 
 def _record_selected_candidate(step: dict, result) -> None:
