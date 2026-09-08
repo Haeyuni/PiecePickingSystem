@@ -7,7 +7,13 @@
 import { useRef, useState } from 'react'
 import { sendCommand, transcribeAudio } from '../api'
 import type { ApiError } from '../api'
+import { useWakeWord } from '../hooks/useWakeWord'
 import type { RobotMode } from '../types'
+
+const WAKE_PHRASE = 'hello rokey'
+// 웨이크워드 감지 후 명령을 녹음할 고정 길이. 무음 감지 대신 단순 타이머로 자른다 —
+// push-to-talk(수동 토글)과 달리 언제 끝났는지 판단할 신호가 없다.
+const WAKE_RECORD_MS = 4000
 
 const DISABLED_REASON: Record<string, string> = {
   busy: '로봇이 동작 중입니다 — 완료 후 다시 시도하세요',
@@ -106,6 +112,17 @@ export default function CommandInput({
     }
   }
 
+  // "Hello Rokey" 감지 시 자동으로 녹음을 시작하고 고정 시간 뒤 스스로 끊는다 — 이미
+  // 녹음/변환/전송 중이거나 명령을 받을 수 없는 상태면 무시한다(중복 트리거 방지).
+  const handleWakeDetected = () => {
+    if (recording || transcribing || blocked || sending) return
+    void startRecording()
+    window.setTimeout(stopRecording, WAKE_RECORD_MS)
+  }
+
+  const { enabled: wakeEnabled, setEnabled: setWakeEnabled, supported: wakeSupported } =
+    useWakeWord(WAKE_PHRASE, handleWakeDetected)
+
   return (
     <div>
       <div className="scenarios">
@@ -120,6 +137,17 @@ export default function CommandInput({
             {s.label}
           </button>
         ))}
+        <button
+          type="button"
+          className={wakeEnabled ? 'wake-armed' : undefined}
+          disabled={!wakeSupported}
+          title={wakeSupported
+            ? `켜면 "${WAKE_PHRASE}"라고 말했을 때 자동으로 녹음을 시작합니다 — 상시 마이크 대기`
+            : '이 브라우저는 지원하지 않습니다 (Chrome/Edge 권장)'}
+          onClick={() => setWakeEnabled(!wakeEnabled)}
+        >
+          {wakeEnabled ? `🔴 "${WAKE_PHRASE}" 대기 중` : `🎙️ "${WAKE_PHRASE}" 켜기`}
+        </button>
       </div>
       <div className="command">
         <input
