@@ -151,6 +151,7 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                 "profile": o.profile,
                 "attr_source": o.attr_source,
                 "needs_confirmation": o.needs_confirmation,
+                "reasoning": o.reasoning,
                 "grasp_candidates": [
                     {
                         "pose": {

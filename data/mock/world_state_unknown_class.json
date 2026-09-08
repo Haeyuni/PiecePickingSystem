@@ -68,6 +68,7 @@
       "profile": "fragile",
       "attr_source": "llm_suggested",
       "needs_confirmation": true,
+      "reasoning": "등록된 물건과 다른 낯선 형태 — 겉면 재질로 보아 깨지기 쉬울 것으로 판단",
       "grasp_candidates": [
         {
           "pose": {

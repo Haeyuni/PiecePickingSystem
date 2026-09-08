@@ -15,6 +15,14 @@ const DISABLED_REASON: Record<string, string> = {
   estopped: '비상정지 상태입니다 — 수동 리셋이 필요합니다',
 }
 
+// 시나리오별 계획 능력을 보여주는 테스트용 원클릭 명령. 인지 로직은 바꾸지 않고
+// 기존 /api/commands 파이프라인에 미리 정해 둔 문구를 그대로 보낸다.
+const SCENARIOS: { label: string; text: string }[] = [
+  { label: '가정', text: '생활용품 왼쪽으로' },
+  { label: '약국', text: '머리가 아플 때 먹는 약 줘' },
+  { label: '재활용', text: '플라스틱 왼쪽, 캔 오른쪽' },
+]
+
 export default function CommandInput({
   mode, onAccepted,
 }: {
@@ -26,8 +34,7 @@ export default function CommandInput({
   const [sending, setSending] = useState(false)
   const blocked = mode !== 'idle'
 
-  const submit = async () => {
-    const commandText = text.trim()
+  const submit = async (commandText: string = text.trim()) => {
     if (!commandText) return
     setSending(true)
     setError(null)
@@ -42,8 +49,26 @@ export default function CommandInput({
     }
   }
 
+  const runScenario = (scenarioText: string) => {
+    setText(scenarioText)
+    submit(scenarioText)
+  }
+
   return (
     <div>
+      <div className="scenarios">
+        {SCENARIOS.map((s) => (
+          <button
+            key={s.label}
+            type="button"
+            disabled={blocked || sending}
+            title={s.text}
+            onClick={() => runScenario(s.text)}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
       <div className="command">
         <input
           value={text}
@@ -53,7 +78,7 @@ export default function CommandInput({
           disabled={blocked || sending}
         />
         {/* 마이크 버튼은 6단계(STT)에서 붙인다 — 2.2.9절 */}
-        <button disabled={blocked || sending || !text.trim()} onClick={submit}>
+        <button disabled={blocked || sending || !text.trim()} onClick={() => submit()}>
           {sending ? '전송 중…' : '전송'}
         </button>
       </div>

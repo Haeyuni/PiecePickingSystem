@@ -662,6 +662,8 @@ class PerceptionNode(Node):
             obj.profile = attributes["profile"]
             obj.attr_source = attributes["attr_source"]
             obj.needs_confirmation = attributes["needs_confirmation"]
+            # YOLO 경로(objects.yaml 조회)는 이 키가 없다 — 판단 근거를 낸 것은 VLM뿐이다.
+            obj.reasoning = attributes.get("reasoning", "")
             obj.grasp_candidates = []      # grasp가 채운다 (2.0절)
             world.objects.append(obj)
 

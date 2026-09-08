@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 # 프롬프트를 고칠 때마다 올린다 (llm_client.PROMPT_VERSION과 같은 이유). 두 경로는 프롬프트가
 # 다르므로 버전도 따로 센다.
 PROMPT_VERSION = "vlm-detect-v1"        # detect(): VLM에게 박스를 묻는다
-MARKS_PROMPT_VERSION = "vlm-marks-v3"   # label_marks(): 스스로 판단 + 확신 없으면 web_search로 확인
+MARKS_PROMPT_VERSION = "vlm-marks-v4"   # label_marks(): 스스로 판단 + 확신 없으면 web_search로 확인 + reasoning
 
 # 미설정 시 OPENAI_MODEL을 따라가고, 그것도 없으면 이 값. 이미지 입력이 되는 모델이어야 한다.
 DEFAULT_MODEL = "gpt-4o"
@@ -351,6 +351,10 @@ class MarkLabel(BaseModel):
         description="로봇이 이 물체를 쥐는 방식. 이 값이 실제 파지력·접근속도가 된다",
     )
     confidence: float = Field(description="이 판단의 확신도 0.0~1.0")
+    reasoning: str = Field(
+        description="이름·속성·profile 판단의 근거를 한 문장으로. 예: '포장 글자로 확인함' "
+                    "/ '흔한 물티슈 포장 형태'. is_object=false면 빈 문자열",
+    )
 
 
 class VlmMarkScene(BaseModel):
@@ -386,6 +390,9 @@ is_object=true로 두고, 나머지 조각은 is_object=false + part_of=대표�
 5. is_object=true인 번호마다 이름(class_name, name_ko)과 물리 속성(mass_g, fragile, \
 deformable, transparent), 그리고 파지 방식(profile)을 사진을 보고 직접 판단한다. \
 is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, profile은 fragile로 둔다.
+6. is_object=true인 번호마다 reasoning에 판단 근거를 한 문장 적는다(예: "포장에 적힌 \
+글자로 확인함", "흔한 물티슈 포장 형태와 크기로 판단"). 작업자가 화면에서 왜 이렇게 \
+판단했는지 바로 알 수 있어야 한다 — "물체로 보임" 같은 동어반복은 쓰지 않는다.
 
 [이름 — 미리 주어지는 목록은 없다]
 당신에게 등록된 클래스 목록을 주지 않는다. 사진에 실제로 보이는 것을 보고 직접 이름을 짓는다.
@@ -528,7 +535,7 @@ def _normalize_marks(scene: VlmMarkScene, mark_ids: list[int]) -> VlmMarkScene:
             elif m.deformable and m.profile == "normal":
                 m.profile = "deformable"
         else:
-            m.class_name, m.name_ko = "", ""
+            m.class_name, m.name_ko, m.reasoning = "", "", ""
             m.mass_g = 0.0
             m.fragile = m.deformable = m.transparent = False
             m.profile = "fragile"            # 물체가 아니므로 쓰이지 않지만 값은 보수적으로

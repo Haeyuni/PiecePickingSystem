@@ -8,6 +8,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { getConfirmations, getRecentTraces, getTrace, getWorldState } from '../api'
+import ApprovalModal from '../components/ApprovalModal'
 import CameraViews from '../components/CameraViews'
 import CommandInput from '../components/CommandInput'
 import ConfirmModal from '../components/ConfirmModal'
@@ -18,7 +19,7 @@ import SafetyBanner from '../components/SafetyBanner'
 import StatusBar from '../components/StatusBar'
 import TaskProgress from '../components/TaskProgress'
 import { useLive } from '../hooks/useLive'
-import type { DetectedObject, LiveEvent, ObjectConfirmation, RobotState, SafetyEvent, Trace, WorldState } from '../types'
+import type { ApprovalNeededEvent, DetectedObject, LiveEvent, ObjectConfirmation, RobotState, SafetyEvent, Trace, WorldState } from '../types'
 
 const INITIAL_ROBOT: RobotState = { mode: 'idle', current_skill: 'none', gripper_width_mm: 0 }
 
@@ -33,6 +34,7 @@ export default function ControlPage() {
   const [warning, setWarning] = useState<SafetyEvent | null>(null)
   const [pending, setPending] = useState<ObjectConfirmation[]>([])
   const [modalClass, setModalClass] = useState<string | null>(null)
+  const [approval, setApproval] = useState<ApprovalNeededEvent | null>(null)
 
   const refreshWorld = useCallback(async () => {
     try {
@@ -105,6 +107,11 @@ export default function ControlPage() {
         void refreshTrace(event.trace_id)
         break
 
+      case 'execution_approval_needed':
+        // 라벨 수정 후 재계획이면 같은 trace로 다시 온다 — 그냥 내용을 갱신한다.
+        setApproval(event)
+        break
+
       case 'object_confirmation_needed':
         void refreshPending()
         break
@@ -171,7 +178,7 @@ export default function ControlPage() {
         <Link to="/history">이력 보기 →</Link>
       </div>
 
-      <StatusBar robot={robot} connected={connected} warning={warning} />
+      <StatusBar robot={robot} connected={connected} warning={warning} awaitingApproval={approval !== null} />
       {critical && <SafetyBanner event={critical} />}
 
       <div className="grid">
@@ -210,6 +217,10 @@ export default function ControlPage() {
             void refreshWorld()
           }}
         />
+      )}
+
+      {approval && (
+        <ApprovalModal event={approval} onResolved={() => setApproval(null)} />
       )}
     </div>
   )

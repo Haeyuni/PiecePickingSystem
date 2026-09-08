@@ -46,5 +46,6 @@ string SOURCE_USER=user_confirmed
 string attr_source
 
 bool needs_confirmation        # true면 신규 클래스, 사람 확인 대기 (5단계)
+string reasoning                # attr_source=llm_suggested일 때만 값 있음. VLM의 판단 근거 한 줄
 
 GraspCandidate[] grasp_candidates   # grasp 노드가 채워넣음. planner는 이미 채워진 것만 받음
