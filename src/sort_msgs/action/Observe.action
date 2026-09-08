@@ -16,6 +16,10 @@ string schema_version
 string trace_id
 string request_id
 
+# 시나리오 도메인(가정/약국/재활용, 기본 "general"). MODE_FULL 관측 때 VLM 프롬프트의
+# [장면 맥락]에 들어가 도메인별 분기 인지를 한다 (sam_vlm._label → planner /internal/label-marks).
+string domain
+
 uint8 MODE_FULL=0
 uint8 MODE_REPROMPT=1
 uint8 mode

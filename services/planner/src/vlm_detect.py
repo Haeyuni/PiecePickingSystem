@@ -54,10 +54,38 @@ logger = logging.getLogger(__name__)
 # 프롬프트를 고칠 때마다 올린다 (llm_client.PROMPT_VERSION과 같은 이유). 두 경로는 프롬프트가
 # 다르므로 버전도 따로 센다.
 PROMPT_VERSION = "vlm-detect-v1"        # detect(): VLM에게 박스를 묻는다
-MARKS_PROMPT_VERSION = "vlm-marks-v4"   # label_marks(): 스스로 판단 + 확신 없으면 web_search로 확인 + reasoning
+MARKS_PROMPT_VERSION = "vlm-marks-v5"   # label_marks(): 도메인(가정/약국/재활용)별 이름 규칙 + 스스로 판단 + 확신 없으면 web_search로 확인 + reasoning
 
 # 미설정 시 OPENAI_MODEL을 따라가고, 그것도 없으면 이 값. 이미지 입력이 되는 모델이어야 한다.
 DEFAULT_MODEL = "gpt-4o"
+
+# 시나리오 도메인의 한국어 표기. 프롬프트의 [장면 맥락]에 넣어 VLM이 도메인에 맞게 답하게 한다.
+# 도메인별 **이름 규칙** — build_marks_prompt가 [장면 맥락]으로 넣는다 (vlm-detect, label_marks).
+# `home`(가정)은 special 규칙이 없어 general과 같으므로 별도 도메인이 아니다 — 가정 버튼도
+# general로 온다.
+# 같은 물체도 도메인에 따라 이름에 담아야 하는 정보가 다르다:
+# - 약국: 어떤 약인지가 중요하므로 **정확한 약품명**(성분/제품명)을 읽어 쓴다.
+# - 재활용: 어느 재질로 분리할지가 중요하므로 **재질이 이름에 드러나야** 한다.
+# 지시(command_text)는 여기 오지 않는다 — 도메인은 시나리오 컨텍스트일 뿐이다(D-1).
+DOMAIN_CONTEXT_MARKS = {
+    "pharmacy": """\
+이 사진은 **약국** 시나리오다.
+- 이름은 **정확한 약품명**이어야 한다. 포장·포일·설명서·병 라벨에 적힌 성분명/제품명을 \
+읽어 class_name과 name_ko에 그대로 쓴다 (예: ibuprofen / '이부프로펜정', tylenol / \
+'타이레놀정').
+- '약', '알약', 'painkiller'처럼 **종류로 얼버무리지 않는다** — 어느 약인지가 분류의 대상이다.
+- 포장 글자가 흐려 못 읽으면 `web_search`로 확인한 뒤 확정한다. 그래도 특정할 수 없으면 \
+'unknown_medicine'처럼 보수적인 이름 + 낮은 confidence로 답한다.
+- 포장 형태(블리스터·병·봉투)나 재질은 이름 대신 속성으로 답한다.""",
+    "recycle": """\
+이 사진은 **재활용(분리수거)** 시나리오다.
+- 이름에 **재질이 반드시 드러나야** 한다. 재질 + 형태 조합으로 지는다 \
+(예: pet_plastic_bottle, aluminum_can, glass_bottle, paper_box, hdpe_container, can).
+- name_ko도 재질을 담는다 (예: 'PET 페트병', '알루미늄 캔', '유리병', '종이 상자').
+- 재질 표시(플라스틱 재질 번호, 캔·병 각인)를 읽고 판단한다. 모르면 `web_search`로 확인한다.
+- 재질을 특정할 수 없으면 unknown_material 같은 보수적인 이름 + 낮은 confidence로 답한다 — \
+지어내지 않는다.""",
+}
 
 OBJECTS_YAML = pathlib.Path(
     os.environ.get("OBJECTS_YAML")
@@ -483,20 +511,30 @@ is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, grip_level
 
 
 def build_marks_prompt(mark_ids: list[int],
-                       image_size: tuple[int, int] | None = None) -> str:
-    """번호 목록(+사진 크기)만 넣는다. **등록 클래스 어휘는 넣지 않는다** — 이름과 속성을
-    모델이 스스로 정하는 것이 이 경로의 전제다(모듈 상단 참조).
+                       image_size: tuple[int, int] | None = None,
+                       domain: str = "general") -> str:
+    """번호 목록(+사진 크기, 도메인)을 넣는다. **등록 클래스 어휘는 넣지 않는다** — 이름과
+    속성을 모델이 스스로 정하는 것이 이 경로의 전제다(모듈 상단 참조).
+
+    도메인은 지시와 다르다. 도메인은 "이 장면이 어느 시나리오(가정/약국/재활용)인가"라는
+    컨텍스트일 뿐 사용자가 어떤 물체를 옮기라고 했는지는 담지 않는다 — 그래서 [지시 없는
+    인지] 원칙을 깨지 않으면서, 같은 물건이라도 도메인에 맞는 이름·속성으로 답하게 한다.
     """
     lines = [f"[그려진 번호] {', '.join(str(i) for i in mark_ids)} "
              f"(총 {len(mark_ids)}개 — 전부에 대해 답한다)"]
     if image_size:
         lines.append(f"[사진 크기] {image_size[0]}x{image_size[1]} px")
+    if domain and domain != "general":
+        context = DOMAIN_CONTEXT_MARKS.get(domain)
+        if context:
+            lines.append("[장면 맥락(도메인)]\n" + context)
     return "\n".join(lines)
 
 
 def label_marks(image: pathlib.Path | str, mark_ids: list[int],
                 image_size: tuple[int, int] | None = None,
-                model: str | None = None, detail: str = "high") -> VlmMarkScene:
+                model: str | None = None, detail: str = "high",
+                domain: str = "general") -> VlmMarkScene:
     """번호가 그려진 이미지 → 번호별 판단(이름·속성·파지 단계).
 
     `detect`와 다른 점이 셋 있다. 좌표를 묻지 않고(SAM이 이미 만들었다), 등록 클래스 어휘를
@@ -505,6 +543,10 @@ def label_marks(image: pathlib.Path | str, mark_ids: list[int],
     번호를 돌려줬다. 어느 물체가 지시 대상인지는 이 결과(물체 목록)를 텍스트로 받는
     `llm_client.plan`이 정한다 — 그것이 원래 그 모듈의 일이고(FR-10/FR-11), 검출을 지시와
     분리해 두면 같은 프레임에 다른 지시를 여러 번 물어도 인지 결과가 흔들리지 않는다.
+
+    `domain`은 지시가 아니라 **시나리오 컨텍스트**(가정/약국/재활용)다. build_marks_prompt가
+    이걸 [장면 맥락]으로 넣어, 같은 물건이라도 도메인에 맞는 이름으로 답하게 한다 — 지시를
+    넣는 것과는 다르다(사용자가 옮기라고 한 대상은 여기서 정하지 않는다).
     """
     data_url = image if isinstance(image, str) and image.startswith("data:") else encode_image(image)
     client = _client()
@@ -516,7 +558,7 @@ def label_marks(image: pathlib.Path | str, mark_ids: list[int],
             "role": "user",
             "content": [
                 {"type": "input_text",
-                 "text": build_marks_prompt(mark_ids, image_size)},
+                 "text": build_marks_prompt(mark_ids, image_size, domain)},
                 {"type": "input_image", "image_url": data_url, "detail": detail},
             ],
         }],

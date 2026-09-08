@@ -47,7 +47,7 @@ class SamVlmDetector:
         return f"{self.weights} → {self.planner_url}/internal/label-marks"
 
     def detect(self, color_bgr: np.ndarray, trace_id: str = "",
-               on_phase=None) -> tuple[list[dict], np.ndarray | None]:
+               on_phase=None, domain: str = "general") -> tuple[list[dict], np.ndarray | None]:
         if on_phase:
             on_phase("segmenting")
         masks, elapsed = sam_marks.segment_everything(
@@ -64,7 +64,7 @@ class SamVlmDetector:
         if on_phase:
             on_phase("labeling")
         labels = self._label(marked, list(range(1, len(masks) + 1)), trace_id, masks,
-                             original_bgr=color_bgr)
+                             original_bgr=color_bgr, domain=domain)
 
         def rejected(piece, parent):
             self._log.warning(f"마크 {piece}는 {parent}의 조각으로 보기 어렵다 — 합치지 않는다")
@@ -81,12 +81,16 @@ class SamVlmDetector:
 
     def _label(self, marked_bgr: np.ndarray, mark_ids: list[int], trace_id: str,
                masks: list[np.ndarray] | None = None,
-               original_bgr: np.ndarray | None = None) -> list[dict]:
+               original_bgr: np.ndarray | None = None,
+               domain: str = "general") -> list[dict]:
         """번호를 그린 프레임을 planner로 보내 번호별 판단을 받는다.
 
         masks를 넘기면 각 마스크의 윤곽선 좌표를 JSON으로 직렬화해 함께 보낸다 —
         planner가 YOLO 학습용 라벨을 만들 때 쓴다. original_bgr를 넘기면 오버레이가
         없는 원본 프레임을 함께 보내 planner가 학습용 원본 이미지로 저장하게 한다.
+
+        domain은 planner /internal/label-marks의 [장면 맥락]으로 전달되어 도메인별
+        VLM 프롬프트 분기를 낸다(가정/약국/재활용).
         """
         import cv2
         import httpx
@@ -103,6 +107,7 @@ class SamVlmDetector:
         payload: dict = {
             "mark_ids": ",".join(str(i) for i in mark_ids),
             "trace_id": trace_id,
+            "domain": domain,
         }
         if masks:
             import json

@@ -73,7 +73,8 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
         t = trace()
         ws = world_state()
 
-        async def fake_replan(trace_id, command_text, world_state_arg, previous_failure, executor):
+        async def fake_replan(trace_id, command_text, world_state_arg, previous_failure,
+                              executor, domain="general"):
             self.assertEqual(world_state_arg["objects"][0]["class_name"], "wet_wipes")
             return {
                 "sequence_id": "seq-2", "validation_status": "approved",

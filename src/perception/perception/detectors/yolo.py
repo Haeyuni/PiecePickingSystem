@@ -27,7 +27,7 @@ class YoloDetector:
         return f"{self.model_path} (task={self._model.task}, names={self._model.names})"
 
     def detect(self, color_bgr: np.ndarray, trace_id: str = "",
-               on_phase=None) -> tuple[list[dict], np.ndarray | None]:
+               on_phase=None, domain: str = "general") -> tuple[list[dict], np.ndarray | None]:
         if on_phase:
             on_phase("segmenting")
         result = self._model.predict(color_bgr, conf=self._conf, imgsz=self._imgsz,

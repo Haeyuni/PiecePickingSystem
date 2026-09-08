@@ -296,6 +296,8 @@ class PerceptionNode(Node):
         # stamp는 촬영 시각이고, observation_id는 이 Observe 호출의 불변 식별자다.
         # 동시에 하나의 Observe만 허용하므로 publish 경로에서 안전하게 공유할 수 있다.
         self._active_observation_id = goal.request_id or trace_id
+        # 시나리오 도메인(가정/약국/재활용). MODE_FULL의 VLM 프롬프트 분기에 쓴다.
+        self._active_domain = getattr(goal, "domain", "") or "general"
 
         try:
             if goal_handle.is_cancel_requested:
@@ -309,11 +311,13 @@ class PerceptionNode(Node):
 
             if self._detector_name != "vlm_sam":
                 # yolo는 이미 빠르다 — 두 모드를 가를 이유가 없다. 매번 새로 찍고 새로 본다.
-                outcome = self._observe_instant(goal_handle, trace_id, feedback)
+                outcome = self._observe_instant(goal_handle, trace_id, feedback,
+                                                domain=self._active_domain)
             elif goal.mode == Observe.Goal.MODE_REPROMPT:
                 outcome = self._observe_reprompt(goal_handle, trace_id, feedback)
             else:
-                outcome = self._observe_full(goal_handle, trace_id, feedback)
+                outcome = self._observe_full(goal_handle, trace_id, feedback,
+                                             domain=self._active_domain)
 
             success, reason, count, stamp = outcome
             if success:
@@ -365,7 +369,7 @@ class PerceptionNode(Node):
         stamp = self._color_stamp or self.get_clock().now().to_msg()
         return self._color, self._depth, base2gripper, stamp
 
-    def _observe_instant(self, goal_handle, trace_id: str, feedback):
+    def _observe_instant(self, goal_handle, trace_id: str, feedback, domain: str = "general"):
         """detector=yolo. 두 모드가 같다 — 이미 수십 ms라 재관측 트릭이 필요 없다."""
         reason = self._frame_failure_reason()
         if reason:
@@ -374,7 +378,8 @@ class PerceptionNode(Node):
         feedback(Observe.Feedback.PHASE_CAPTURING)
         color, depth, base2gripper, stamp = self._capture()
         raw, debug_bgr = self._detector.detect(
-            color, trace_id, on_phase=lambda p: feedback(self._phase_token(p)))
+            color, trace_id, on_phase=lambda p: feedback(self._phase_token(p)),
+            domain=domain)
         detections = self._enrich(raw, color, depth, base2gripper)
 
         feedback(Observe.Feedback.PHASE_PUBLISHING)
@@ -383,7 +388,7 @@ class PerceptionNode(Node):
             self._publish_debug_image(debug_bgr, stamp, trace_id)
         return True, Observe.Result.REASON_NONE, count, stamp
 
-    def _observe_full(self, goal_handle, trace_id: str, feedback):
+    def _observe_full(self, goal_handle, trace_id: str, feedback, domain: str = "general"):
         """detector=vlm_sam, MODE_FULL. 프레임 A로 everything+VLM 라벨링(수 초~10초) →
         끝나면 프레임 B를 새로 찍어 재투영 박스로 SAM 1패스(D-8) → B의 stamp로 발행.
 
@@ -400,7 +405,8 @@ class PerceptionNode(Node):
         color_a, depth_a, base2gripper_a, stamp_a = self._capture()
 
         raw_a, debug_bgr_a = self._detector.detect(
-            color_a, trace_id, on_phase=lambda p: feedback(self._phase_token(p)))
+            color_a, trace_id, on_phase=lambda p: feedback(self._phase_token(p)),
+            domain=domain)
         detections_a = self._enrich(raw_a, color_a, depth_a, base2gripper_a)
 
         if goal_handle.is_cancel_requested:

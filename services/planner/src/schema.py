@@ -23,6 +23,8 @@ SkillName = Literal["pick", "place_into"]
 # LLM은 단계만 고르고 단계→힘 매핑은 control/config/skill_params.yaml이 소유한다.
 GripLevel = Literal[1, 2, 3, 4, 5]
 ValidationStatus = Literal["approved", "rejected"]
+# 시나리오 도메인. 동일한 명령이라도 도메인마다 VLM 프롬프트가 달라진다.
+Domain = Literal["general", "pharmacy", "recycle"]
 
 
 # --- LLM 출력 (구조화 출력 스키마) -------------------------------------------
@@ -101,6 +103,9 @@ class PlanRequest(BaseModel):
     schema_version: str = SCHEMA_VERSION
     trace_id: str
     command_text: str
+    # 시나리오 도메인 (가정/약국/재활용). 일반 명령은 "general". 관측·계획 단계에서
+    # 도메인별 VLM 프롬프트를 고르는 데 쓴다.
+    domain: Domain = "general"
     world_state: dict
     previous_failure: PreviousFailure | None = None
     # 활성 안전 이벤트. FR-12의 게이트 조건이지만 planner는 ROS2를 모르므로 web이 실어 보낸다.

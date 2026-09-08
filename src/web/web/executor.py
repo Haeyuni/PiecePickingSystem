@@ -98,7 +98,7 @@ class Executor(Protocol):
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
         """robot_state / safety_event 변화를 web으로 밀어 올리는 콜백을 등록한다."""
 
-    async def observe(self, trace_id: str, mode: str = "full") -> dict | None:
+    async def observe(self, trace_id: str, mode: str = "full", domain: str = "general") -> dict | None:
         """온디맨드 관측을 트리거한다 (docs/on-demand-perception.md). perception은 더
         이상 주기 발행하지 않으므로, `/world_state`를 새로 채우려면 이 호출이 있어야 한다.
 
@@ -107,6 +107,8 @@ class Executor(Protocol):
         "reprompt"(직전 관측이 남긴 물체들을 재투영 박스로 SAM만 1패스 돌린다. VLM은
         안 부른다. pick/place_into 스텝 사이처럼 자주 불러도 되는 쪽). ROS의
         `Observe.Goal.MODE_*`와 뜻이 같다 — web이 그 enum을 몰라도 되게 문자열로 받는다.
+
+        domain: 시나리오 도메인(가정/약국/재활용). VLM 프롬프트 분기에 쓰인다.
 
         반환은 `{"success", "failure_reason", "object_count", "cycle_time_ms",
         "cancelled"}` 또는 액션 자체에 접수되지 못했으면 None. **성공해도 `/world_state`가

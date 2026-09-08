@@ -15,7 +15,7 @@ class FakeDetector:
     def __init__(self, items):
         self._items = items
 
-    def detect(self, color_bgr, trace_id="", on_phase=None):
+    def detect(self, color_bgr, trace_id="", on_phase=None, domain="general"):
         return list(self._items), None
 
 

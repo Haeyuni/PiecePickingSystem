@@ -96,7 +96,7 @@ class MockExecutor:
     def latest_depth_jpeg(self) -> bytes | None:
         return None
 
-    async def observe(self, trace_id: str, mode: str = "full") -> dict | None:
+    async def observe(self, trace_id: str, mode: str = "full", domain: str = "general") -> dict | None:
         """SAM·VLM 없이 신선도만 흉내 낸다 — 픽스처 내용(물체 목록)은 그대로 두고
         stamp만 지금 시각으로 찍는다. orchestrator는 "새 관측이 왔는가"만 보므로 이걸로
         충분하고, 실물처럼 초 단위로 기다리게 하면 mock의 존재 이유(로봇·GPU 없이 빠르게
@@ -107,7 +107,8 @@ class MockExecutor:
         self._trace_id = trace_id
         world = self.get_latest_world_state()
         object_count = len((world or {}).get("objects", []))
-        logger.info("mock 관측 트리거 (mode=%s, trace=%s) — 물체 %d개", mode, trace_id, object_count)
+        logger.info("mock 관측 트리거 (mode=%s, domain=%s, trace=%s) — 물체 %d개",
+                    mode, domain, trace_id, object_count)
         return {"success": True, "failure_reason": "none", "object_count": object_count,
                 "observation_id": self._observation_id, "stamp": self._stamp_override,
                 "cycle_time_ms": 0.0, "cancelled": False}
