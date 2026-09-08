@@ -4,7 +4,8 @@
  */
 
 export type RobotMode = 'idle' | 'busy' | 'error' | 'estopped'
-export type Profile = 'normal' | 'fragile' | 'deformable'
+/** 파지력 5단계: 1=가장 강하게(40N) ~ 5=가장 약하게(20N), 5N 간격. */
+export type GripLevel = 1 | 2 | 3 | 4 | 5
 
 export interface RobotState {
   mode: RobotMode
@@ -34,7 +35,7 @@ export interface DetectedObject {
   object_id: string
   class_name: string
   name_ko: string
-  profile: Profile
+grip_level: GripLevel
   graspable: boolean
   not_graspable_reason: string
   needs_confirmation: boolean
@@ -84,7 +85,7 @@ export interface ExecutionLog {
   object_id: string | null
   class_name: string | null
   skill_name: 'pick' | 'place_into' | 'stop' | 'home'
-  profile_used: Profile | null
+  grip_level_used: GripLevel | null
   bin_id: string | null
   grasp_strategy: string | null
   visual_verification_passed: boolean | null
@@ -117,7 +118,7 @@ export interface ObjectConfirmation {
   suggested_fragile: boolean | null
   suggested_deformable: boolean | null
   suggested_transparent: boolean | null
-  suggested_profile: Profile | null
+  suggested_grip_level: GripLevel | null
   suggested_by_model: string | null
   image_ref: string | null
   created_at: string

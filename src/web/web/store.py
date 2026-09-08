@@ -35,7 +35,7 @@ def insert_execution_log(**kw) -> None:
                 """
                 INSERT INTO execution_logs (
                     log_id, sequence_id, trace_id, request_id, object_id, class_name,
-                    skill_name, profile_used, bin_id, grasp_pose, torque_trace,
+                    skill_name, grip_level_used, bin_id, grasp_pose, torque_trace,
                     visual_verification_passed, result, failure_reason,
                     retry_count, cycle_time_ms
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -44,7 +44,7 @@ def insert_execution_log(**kw) -> None:
                     str(uuid.uuid4()),
                     kw.get("sequence_id"), kw.get("trace_id"), kw.get("request_id"),
                     kw.get("object_id"), kw.get("class_name"),
-                    kw["skill_name"], kw.get("profile_used"), kw.get("bin_id"),
+                    kw["skill_name"], kw.get("grip_level_used"), kw.get("bin_id"),
                     json.dumps(kw["grasp_pose"]) if kw.get("grasp_pose") else None,
                     json.dumps(kw["torque_trace"]) if kw.get("torque_trace") else None,
                     kw.get("visual_verification_passed"),
@@ -81,7 +81,7 @@ def query_executions(trace_id: str | None = None, result: str | None = None,
 
     sql = """
         SELECT log_id, trace_id, sequence_id, request_id, object_id, class_name,
-               skill_name, profile_used, bin_id, grasp_strategy,
+               skill_name, grip_level_used, bin_id, grasp_strategy,
                visual_verification_passed, result, failure_reason, retry_count,
                cycle_time_ms, executed_at
         FROM execution_logs
@@ -110,7 +110,7 @@ def pending_confirmations() -> list[dict]:
         cur.execute(
             """
             SELECT class_name, name_ko, mass_g, fragile, deformable, transparent,
-                   profile, suggested_by_model, image_ref, created_at
+                   grip_level, suggested_by_model, image_ref, created_at
             FROM object_attributes
             WHERE is_confirmed = false
             ORDER BY created_at
@@ -127,7 +127,7 @@ def pending_confirmations() -> list[dict]:
             "suggested_fragile": r["fragile"],
             "suggested_deformable": r["deformable"],
             "suggested_transparent": r["transparent"],
-            "suggested_profile": r["profile"],
+            "suggested_grip_level": r["grip_level"],
             "suggested_by_model": r["suggested_by_model"],
             "image_ref": r["image_ref"],
             "created_at": r["created_at"].isoformat(),
@@ -141,7 +141,7 @@ def confirm_object(class_name: str, corrections: dict | None = None) -> bool:
 
     확인 즉시 source='user_confirmed'로 바뀌며, 이때부터 fallback 강제가 풀린다(3.1a절).
     """
-    allowed = {"name_ko", "mass_g", "fragile", "deformable", "transparent", "profile"}
+    allowed = {"name_ko", "mass_g", "fragile", "deformable", "transparent", "grip_level"}
     sets, params = [], []
     for key, value in (corrections or {}).items():
         if key in allowed:

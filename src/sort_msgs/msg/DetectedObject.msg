@@ -35,10 +35,15 @@ bool fragile
 bool deformable
 bool transparent
 
-string PROFILE_NORMAL=normal
-string PROFILE_FRAGILE=fragile
-string PROFILE_DEFORMABLE=deformable
-string profile
+# 파지력 단계: 1(매우 강하게, 40N) ~ 5(매우 약하게, 20N), 5N 간격.
+# 단계→힘 매핑은 control/config/skill_params.yaml의 grip_levels 블록이 소유한다.
+# 0이면 미상 — control은 5(가장 약하게)로 처리한다.
+uint8 GRIP_VERY_STRONG=1
+uint8 GRIP_STRONG=2
+uint8 GRIP_MODERATE=3
+uint8 GRIP_GENTLE=4
+uint8 GRIP_VERY_GENTLE=5
+uint8 grip_level
 
 string SOURCE_YAML=yaml_seed
 string SOURCE_LLM=llm_suggested

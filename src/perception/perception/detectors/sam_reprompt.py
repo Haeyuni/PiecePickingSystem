@@ -108,7 +108,7 @@ class SamRepromptDetector:
         for item, mask in zip(self.expected, masks):
             # 빈 마스크는 mask=None으로 낸다 — 노드가 REASON_NO_MASK로 처리하고, 좌표를
             # 지어내지 않는다. 라벨과 함께 **속성도** 물려받는다: VLM을 다시 부르지
-            # 않으므로 여기서 잃으면 재관측한 물체만 속성 조회 경로로 떨어져 프로파일이
+            # 않으므로 여기서 잃으면 재관측한 물체만 속성 조회 경로로 떨어져 grip_level이
             # 스텝 사이에 달라진다.
             detections.append(detection(item["class_name"], item["confidence"],
                                         mask if mask.any() else None, item.get("attrs")))

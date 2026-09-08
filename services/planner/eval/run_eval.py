@@ -39,7 +39,7 @@ DATASET_VERSION = "eval-v3"
 
 # 기대 결과에서 쓸 수 있는 키. 오타가 조용히 "검사 안 함"이 되지 않도록 화이트리스트로 막는다.
 EXPECT_KEYS = {"status", "pick_objects", "pick_objects_exclude", "pick_objects_include",
-               "bins", "profiles"}
+               "bins", "grip_levels"}
 
 
 def load_cases(path: pathlib.Path) -> list[dict]:
@@ -77,7 +77,7 @@ def validate_cases(cases: list[dict]) -> list[str]:
         # 승인 케이스가 아무 것도 검사하지 않으면 통과가 의미 없다
         if expect.get("status") == "approved" and not (
                 set(expect) & {"pick_objects", "pick_objects_include",
-                               "pick_objects_exclude", "bins", "profiles"}):
+                               "pick_objects_exclude", "bins", "grip_levels"}):
             problems.append(f"{cid}: approved 케이스인데 시퀀스 내용을 하나도 검사하지 않는다")
         if not fixture.is_file():
             continue
@@ -87,7 +87,7 @@ def validate_cases(cases: list[dict]) -> list[str]:
             for oid in expect.get(key) or []:
                 if oid not in known:
                     problems.append(f"{cid}: {key}의 '{oid}'가 픽스처에 없다")
-        for oid in list(expect.get("bins") or {}) + list(expect.get("profiles") or {}):
+        for oid in list(expect.get("bins") or {}) + list(expect.get("grip_levels") or {}):
             if oid not in known:
                 problems.append(f"{cid}: '{oid}'가 픽스처에 없다")
     return problems
@@ -150,10 +150,10 @@ def grade(expect: dict, body: dict) -> list[str]:
         if placed.get(oid) != want_bin:
             fails.append(f"'{oid}'의 목적지가 {placed.get(oid)} (기대 {want_bin})")
 
-    profiles = {s["object_id"]: s.get("profile") for s in steps}
-    for oid, want_profile in (expect.get("profiles") or {}).items():
-        if profiles.get(oid) != want_profile:
-            fails.append(f"'{oid}'의 프로파일이 {profiles.get(oid)} (기대 {want_profile})")
+    grip_levels = {s["object_id"]: s.get("grip_level") for s in steps}
+    for oid, want_level in (expect.get("grip_levels") or {}).items():
+        if grip_levels.get(oid) != want_level:
+            fails.append(f"'{oid}'의 파지력 단계가 {grip_levels.get(oid)} (기대 {want_level})")
 
     # 집었으면 놓아야 한다. 검증기가 막지만, 막혔는지 여기서도 본다.
     for oid in picked_set:
@@ -264,7 +264,7 @@ def main() -> int:
         if body.get("validation_reason"):
             print(f"      사유: {body['validation_reason']}")
         for s in body.get("steps") or []:
-            print(f"      - {s['skill']:11s} {s['object_id']} profile={s['profile']}"
+            print(f"      - {s['skill']:11s} {s['object_id']} grip_level={s['grip_level']}"
                   f" {s.get('bin_id') or ''}")
         for f in fails:
             print(f"      ✗ {f}")

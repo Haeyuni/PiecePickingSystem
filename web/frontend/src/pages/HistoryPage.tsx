@@ -128,7 +128,7 @@ export default function HistoryPage() {
                       <dt>trace_id</dt><dd>{item.trace_id ?? '—'}</dd>
                       <dt>request_id</dt><dd>{item.request_id ?? '—'}</dd>
                       <dt>클래스</dt><dd>{item.class_name ?? '—'}</dd>
-                      <dt>프로파일</dt><dd>{item.profile_used ?? '—'}</dd>
+                      <dt>파지력 단계</dt><dd>{item.grip_level_used != null ? `${item.grip_level_used}단계` : '—'}</dd>
                       <dt>목적지</dt><dd>{item.bin_id ?? '—'}</dd>
                       <dt>실패 사유</dt><dd>{FAILURE_LABEL[item.failure_reason] ?? item.failure_reason}</dd>
                       <dt>재시도</dt><dd>{item.retry_count}회</dd>

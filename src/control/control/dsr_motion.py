@@ -881,7 +881,7 @@ def send_gripper_command(client, command: str, timeout_s: float = 3.0) -> bool:
 
     힘(force)은 이 문자 명령으로 정확한 N값을 지정할 수 없다 — 서버가 내부에 들고 있는
     값에 상대적으로만 ±25씩 조절되는 구조라(onrobot_rg_control의 genCommand 참조),
-    profile별 max_grip_force_n을 여기서 정확히 반영하지 못한다. 서버 기본값(대략 6N
+    grip_level별 max_grip_force_n을 여기서 정확히 반영하지 못한다. 서버 기본값(대략 6N
     상당, 보수적인 축)을 그대로 쓴다 — 1단계 제약 중 하나로 남겨둔다.
     """
     from onrobot_rg_msgs.srv import SetCommand

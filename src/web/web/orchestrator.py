@@ -1,7 +1,7 @@
 """명령 1건의 수명주기: 계획 → 검증 결과 확인 → 실행 전 승인 대기 → 순차 실행 → 실패 시 재계획.
 
 **검증을 통과한 시퀀스도 실행 전에 브라우저의 승인을 한 번 받는다**(명령 1건당 1회,
-`_await_approval` 참조). SAM+VLM 경로가 어휘 없이 물체 속성(파지력에 직결되는 profile
+`_await_approval` 참조). SAM+VLM 경로가 어휘 없이 물체 속성(파지력에 직결되는 grip_level
 포함)까지 스스로 판단하게 되면서(vlm_detect.py 상단 참조), 검증기를 지났다는 것만으로
 그대로 실행하기보다 사람이 한 번 보게 하기로 정책을 바꿨다. `validation_status`가
 rejected면 승인 단계까지 가지 않고 그대로 끝난다 — 이 부분은 이전과 같다.
@@ -562,7 +562,7 @@ def _build_steps(steps: list[dict], world_state: dict) -> list[dict]:
             "skill": s["skill"],
             "object_id": s["object_id"],
             "bin_id": s.get("bin_id"),
-            "profile": s["profile"],
+            "grip_level": s["grip_level"],
             "grasp_pose": s.get("grasp_pose"),
             "gripper_width_mm": s.get("gripper_width_mm"),
             # 후보 목록과 물체 정보는 화면에 내보내지 않고 control에 전달만 한다 —
@@ -767,7 +767,7 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             trace_id=trace["trace_id"],
             request_id=step["request_id"],
             object_id=step["object_id"],
-            profile=step["profile"],
+            grip_level=step["grip_level"],
             source_observation_id=(held_snapshot.observation_id
                                    if step["skill"] == "place_into" and held_snapshot
                                    else step.get("source_observation_id", "")),
@@ -867,7 +867,7 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             object_id=step["object_id"],
             class_name=class_map.get(step["object_id"]),
             skill_name=step["skill"],
-            profile_used=step["profile"],
+            grip_level_used=step["grip_level"],
             bin_id=step.get("bin_id"),
             grasp_pose=step.get("grasp_pose"),
             torque_trace=result.torque_trace,

@@ -142,7 +142,7 @@ def run_execute(harness, candidate_count=3):
                      abort=lambda: setattr(harness, "aborted", True),
                      canceled=lambda: None)
     goal_handle.request = NS(request_id="rq-1", trace_id="tr-1",
-                              object_id="obj_001", profile="normal",
+                              object_id="obj_001", grip_level=3,
                              source_observation_id="obs-1",
                              grasp_candidates=[None] * candidate_count)
     harness._cache = NS(get=lambda rid: harness.cache.get(rid),

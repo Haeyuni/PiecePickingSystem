@@ -11,7 +11,7 @@ UI "치약 왼쪽으로"
   → [1] SAM으로 장면을 조각냄 (everything 모드)      ← 좌표는 SAM이 만든다
   → [2] 조각에 번호를 그려 VLM에 질의                 ← 판단은 VLM이 한다
         · 몇 번이 무엇인가 → class_name / name_ko
-        · 어떻게 다뤄야 하나 → mass_g / fragile / deformable / transparent / profile
+        · 어떻게 다뤄야 하나 → mass_g / fragile / deformable / transparent / grip_level
         · 몇 번은 물체가 아닌가 → 작업대·케이블·그림자
         · 한 물체가 여러 조각이면 → part_of로 묶는다
   → 마스크 + depth → 3D 좌표 (기존 perception 계산 그대로)
@@ -26,7 +26,7 @@ UI "치약 왼쪽으로"
 (gpt-5 계열, Gemini 등)을 쓰게 되면 더 단순하고 빨라서 다시 유리해질 수 있다.
 
 **역할 분리.** 파지 자세와 3D 좌표는 코드가 만든다(마스크 + depth). 파지력·접근속도를
-정하는 `profile`은 **2026-09-08부터 VLM이 고른다** — 아래 [클래스 어휘를 주지 않는다] 참조.
+정하는 `grip_level`(1~5)은 **2026-09-08부터 VLM이 고른다** — 아래 [클래스 어휘를 주지 않는다] 참조.
 
 ### 인지 단계는 지시를 보지 않는다
 
@@ -38,24 +38,26 @@ UI "치약 왼쪽으로"
 ### 클래스 어휘를 주지 않는다 (2026-09-08 변경)
 
 **예전:** 프롬프트에 `src/perception/config/objects.yaml`의 등록 클래스를 함께 넣고 VLM은
-이름만 답했다. 무게·파손위험·프로파일은 그 이름으로 objects.yaml에서 조회했고, 목록에 없는
-물체는 `is_new_class=true`로 신규품목이 되어 fragile 프로파일이 강제됐다(FR-05b).
+이름만 답했다. 무게·파손위험·파지 단계는 그 이름으로 objects.yaml에서 조회했고, 목록에 없는
+물체는 `is_new_class=true`로 신규품목이 되어 fragile(→ 지금의 5단계)이 강제됐다(FR-05b).
 
 **지금:** 어휘를 주지 않는다. VLM이 사진만 보고 이름과 속성(`mass_g` / `fragile` /
-`deformable` / `transparent`)과 파지 프로파일까지 정하고, 그 값이 `attr_source=llm_suggested`,
-`needs_confirmation=true`로 `DetectedObject`에 그대로 실린다. objects.yaml을 지나지 않는다.
+`deformable` / `transparent`)과 파지 단계(`grip_level` 1~5)까지 정하고, 그 값이
+`attr_source=llm_suggested`, `needs_confirmation=true`로 `DetectedObject`에 그대로 실린다.
+objects.yaml을 지나지 않는다.
 
 바꾼 이유는 등록 표가 이 경로의 목적과 맞지 않았기 때문이다. 학습 클래스에 갇히지 않으려고
-VLM을 쓰는데, 어휘를 주면 모델이 그 목록 안에서 답하고 목록 밖 물건은 전부 fragile로
+VLM을 쓰는데, 어휘를 주면 모델이 그 목록 안에서 답하고 목록 밖 물건은 전부 fragile(→ 5단계)로
 떨어져 "무엇이든 알아본다"는 이점이 파지 단계에서 사라졌다.
 
 **맞바꾼 것:** 파지력을 정하는 값이 모델 출력이 되었다. 원래 NFR-03a가 금지하던 것이고,
 받아 낸 대가는 세 겹으로 막는다.
 
-1. 프롬프트가 profile을 고르는 규칙과 각 값의 실제 힘(20N/12N/5N)을 명시하고, 확신이
-   없으면 조심스러운 쪽으로 내리라고 지시한다 (`vlm_detect.SYSTEM_PROMPT_MARKS`).
-2. `vlm_detect._normalize_marks`가 `fragile=true`인데 다른 profile을 답한 조합을 강등한다.
-3. `validator.resolve_profile`은 값이 유효하지 않으면 여전히 fragile로 떨어뜨린다.
+1. 프롬프트가 단계를 고르는 규칙과 각 값의 실제 힘(40N~20N, 5단계)을 명시하고, 확신이
+   없으면 조심스러운 쪽(큰 번호=약하게)으로 내리라고 지시한다 (`vlm_detect.SYSTEM_PROMPT_MARKS`).
+2. `vlm_detect._normalize_marks`가 `fragile=true`인데 5가 아닌 단계를 답한 조합을 **5로**
+   강등하고, `deformable=true`인데 4 미만인 조합도 4로 올린다.
+3. `validator.resolve_grip_level`은 값이 유효하지 않으면(0 또는 1~5 밖) 여전히 5로 떨어뜨린다.
 
 **되돌리려면** `detector:=yolo`가 그대로 남아 있다 — 그 경로는 objects.yaml의
 `model_labels`/`objects`를 예전대로 쓴다.
@@ -234,7 +236,7 @@ everything 모드에서는 오히려 실제 물체(우산·치약)를 통째로 
   발행될 뿐 `object_attributes`에 기록되지 않는다 — 사람이 확인해도 다음 관측에서 다시
   VLM 추정값으로 돌아온다. 확인한 값을 DB에 쓰고 그 클래스만 DB 값을 우선 쓰는 경로가
   아직 없다.
-- **VLM이 고른 `profile`이 실제 파지에서 맞는지 재지 않았다.** 이름을 맞히는 것은
-  2026-09-07에 확인했지만(위 실측), 같은 물체에 대해 profile이 실행마다 같게 나오는지와
+- **VLM이 고른 `grip_level`이 실제 파지에서 맞는지 재지 않았다.** 이름을 맞히는 것은
+  2026-09-07에 확인했지만(위 실측), 같은 물체에 대해 단계가 실행마다 같게 나오는지와
   그 값이 실물에 적절한지는 별개다. `check_label_marks.py`가 같은 프레임을 여러 번 물어
   보는 것으로 재현성부터 확인할 수 있다.

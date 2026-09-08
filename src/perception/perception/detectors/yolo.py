@@ -39,7 +39,7 @@ class YoloDetector:
         for index in range(count):
             # **모델 라벨을 그대로 쓰지 않는다.** objects.yaml의 model_labels 표를 지나야
             # 정식 class_name이 된다 — 안 지나면 네일이 매번 미확인 신규품목으로 떨어지고
-            # fragile 프로파일이 강제된다(src/perception/README.md의 경고).
+            # fragile 프로파일이 강제된다 — 지금은 grip_level 5(가장 약하게)로 강제된다
             model_label = result.names[int(result.boxes.cls[index])]
             class_name = self._attributes.class_name(model_label)
             confidence = float(result.boxes.conf[index])

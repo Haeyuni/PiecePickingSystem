@@ -17,7 +17,7 @@ def trace(trace_id="tr-1"):
         "sequence_id": "seq-1",
         "validation_status": "approved",
         "validation_reason": None,
-        "steps": [{"skill": "pick", "object_id": "obj_001", "profile": "normal"}],
+        "steps": [{"skill": "pick", "object_id": "obj_001", "grip_level": 3}],
         "objects": [{"object_id": "obj_001", "class_name": "toothpaste"}],
     }
 
@@ -78,7 +78,7 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
             return {
                 "sequence_id": "seq-2", "validation_status": "approved",
                 "validation_reason": None,
-                "steps": [{"skill": "pick", "object_id": "obj_001", "profile": "deformable"}],
+                "steps": [{"skill": "pick", "object_id": "obj_001", "grip_level": 4}],
             }
 
         orchestrator._plan_with_grasp_retry = fake_replan
@@ -94,7 +94,7 @@ class ApprovalFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(orchestrator.has_pending_approval())  # 다시 승인 대기 중
         self.assertEqual(t["sequence_id"], "seq-2")
-        self.assertEqual(t["steps"][0]["profile"], "deformable")
+        self.assertEqual(t["steps"][0]["grip_level"], 4)
         self.assertEqual(
             [e["type"] for e in self._broadcasts],
             ["execution_approval_needed", "execution_approval_needed"],

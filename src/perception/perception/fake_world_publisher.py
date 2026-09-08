@@ -70,7 +70,7 @@ def to_msg(fixture: dict) -> WorldState:
         obj.fragile = bool(item.get("fragile", True))
         obj.deformable = bool(item.get("deformable", False))
         obj.transparent = bool(item.get("transparent", False))
-        obj.profile = item.get("profile", "fragile")
+        obj.grip_level = int(item.get("grip_level", 5))
         obj.attr_source = item.get("attr_source", "yaml_seed")
         obj.needs_confirmation = bool(item.get("needs_confirmation", False))
 

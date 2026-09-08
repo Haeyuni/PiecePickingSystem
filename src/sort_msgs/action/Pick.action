@@ -6,7 +6,8 @@ string source_observation_id
 builtin_interfaces/Time source_observation_stamp
 string object_id
 string class_name
-string profile                 # DetectedObject.profile 값을 그대로 전달 (제어 파라미터 결정)
+uint8 grip_level                # DetectedObject.grip_level 값을 그대로 전달 (제어 파라미터 결정).
+                                # 0이면 control은 5(가장 약하게)로 처리한다.
 # planner가 순위대로 고른 1순위 후보. `grasp_candidates`가 비었을 때(구 planner,
 # 직접 goal을 쏘는 도구)의 유일한 파지 자세이기도 하다 — 그 경우 control은 이 하나만
 # 검사하고 실행한다.

@@ -9,10 +9,10 @@
  * 모두에 걸릴 수 있어(여기서도, 확인 대기 목록에서도) 어느 쪽을 눌러도 같은 동작이어야
  * 한다.
  */
-import type { DetectedObject } from '../types'
+import type { DetectedObject, GripLevel } from '../types'
 
-const PROFILE_LABEL: Record<string, string> = {
-  normal: '일반', fragile: '파손위험', deformable: '변형가능',
+const GRIP_LEVEL_LABEL: Record<GripLevel, string> = {
+  1: '매우 강하게', 2: '강하게', 3: '보통', 4: '약하게', 5: '매우 약하게',
 }
 
 export default function ObjectList({
@@ -42,7 +42,9 @@ export default function ObjectList({
               확인 필요
             </span>
           )}
-          <span className={`badge badge-${o.profile}`}>{PROFILE_LABEL[o.profile] ?? o.profile}</span>
+          <span className={`badge badge-g${o.grip_level}`}>
+            {GRIP_LEVEL_LABEL[o.grip_level] ?? `g${o.grip_level}`}
+          </span>
           {o.reasoning && <div className="reasoning muted">{o.reasoning}</div>}
         </div>
       ))}

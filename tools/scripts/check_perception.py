@@ -148,18 +148,22 @@ def main() -> int:
         if o.attr_source == DetectedObject.SOURCE_LLM:
             if not o.needs_confirmation:
                 mismatched.append(f"{o.class_name}: VLM 추정인데 needs_confirmation=false")
-            if o.profile not in (DetectedObject.PROFILE_NORMAL, DetectedObject.PROFILE_FRAGILE,
-                                 DetectedObject.PROFILE_DEFORMABLE):
-                mismatched.append(f"{o.class_name}: 모르는 profile {o.profile!r}")
+            if o.grip_level not in (DetectedObject.GRIP_VERY_STRONG,
+                                    DetectedObject.GRIP_STRONG,
+                                    DetectedObject.GRIP_MODERATE,
+                                    DetectedObject.GRIP_GENTLE,
+                                    DetectedObject.GRIP_VERY_GENTLE):
+                mismatched.append(f"{o.class_name}: 모르는 grip_level {o.grip_level!r}")
             continue
         s = seed_objects.get(o.class_name)
         if s is None:
             if not o.needs_confirmation:
                 mismatched.append(f"{o.class_name}: seed에 없는데 needs_confirmation=false")
             continue
-        if o.name_ko != (s.get("name_ko") or "") or o.profile != s.get("profile"):
-            mismatched.append(f"{o.class_name}: name_ko/profile이 seed와 다름 "
-                              f"({o.name_ko}/{o.profile} vs {s.get('name_ko')}/{s.get('profile')})")
+        if o.name_ko != (s.get("name_ko") or "") or o.grip_level != s.get("grip_level"):
+            mismatched.append(f"{o.class_name}: name_ko/grip_level이 seed와 다름 "
+                              f"({o.name_ko}/{o.grip_level} vs "
+                              f"{s.get('name_ko')}/{s.get('grip_level')})")
     check("속성이 출처와 일치한다 (yaml seed / VLM 추정)", not mismatched,
           "; ".join(sorted(set(mismatched))))
 

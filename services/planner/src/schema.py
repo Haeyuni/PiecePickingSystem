@@ -5,12 +5,12 @@
 
 LLM이 정하는 것과 코드가 정하는 것을 나눈다:
 - LLM: 어떤 물체를(`object_id`) 어디로(`bin_id`) 어떤 순서로
-- 코드: 파지 후보 목록(`grasp_candidates`)과 제어 프로파일(`profile`, 속성 DB 기준).
+- 코드: 파지 후보 목록(`grasp_candidates`)과 파지력 단계(`grip_level`, 속성 DB 기준).
   **실행할 후보 하나를 최종 선택하는 것은 control이다** — 개폭 유효성·IK·관절 한계는
   로봇에 붙어 있어야 답할 수 있고(ikin 서비스), planner는 ROS2를 모르는 별도 서비스다.
   여기서는 작업반경 안에 있는 후보만 점수 순으로 추려서 넘긴다.
 
-파지 자세와 프로파일은 물리적 안전에 직결되므로 LLM 출력에 맡기지 않는다(NFR-03a).
+파지 자세와 파지력 단계는 물리적 안전에 직결되므로 LLM 출력에 맡기지 않는다(NFR-03a).
 """
 from typing import Literal
 
@@ -19,7 +19,9 @@ from pydantic import BaseModel, Field
 SCHEMA_VERSION = "1.0.0"
 
 SkillName = Literal["pick", "place_into"]
-Profile = Literal["normal", "fragile", "deformable"]
+# 파지력 단계(DetectedObject.grip_level): 1=가장 강하게(40N) ~ 5=가장 약하게(20N).
+# LLM은 단계만 고르고 단계→힘 매핑은 control/config/skill_params.yaml이 소유한다.
+GripLevel = Literal[1, 2, 3, 4, 5]
 ValidationStatus = Literal["approved", "rejected"]
 
 
@@ -73,7 +75,7 @@ class GraspCandidateOut(BaseModel):
 class PlanStep(BaseModel):
     skill: SkillName
     object_id: str
-    profile: Profile
+    grip_level: GripLevel
     # 1순위 후보(= grasp_candidates[0]). 후보 목록을 못 읽는 예전 경로와 로그·DB 기록이
     # 그대로 쓴다. **실제로 실행할 후보는 control이 grasp_candidates에서 고른다.**
     grasp_pose: Pose | None = None   # pick일 때만

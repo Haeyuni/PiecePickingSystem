@@ -148,7 +148,7 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                 "fragile": o.fragile,
                 "deformable": o.deformable,
                 "transparent": o.transparent,
-                "profile": o.profile,
+                "grip_level": o.grip_level,
                 "attr_source": o.attr_source,
                 "needs_confirmation": o.needs_confirmation,
                 "reasoning": o.reasoning,
@@ -478,7 +478,7 @@ class RosExecutor:
         msg.source_observation_stamp.nanosec = int(stamp.get("nanosec", 0))
         msg.object_id = goal.object_id
         msg.class_name = goal.class_name
-        msg.profile = goal.profile
+        msg.grip_level = goal.grip_level
         msg.grasp_pose = _pose_to_msg(goal.grasp_pose)
         msg.gripper_width_mm = float(goal.gripper_width_mm or 0.0)
         # 후보 목록과 물체 정보를 그대로 넘긴다 — 실행할 후보는 control이 고른다
@@ -501,7 +501,6 @@ class RosExecutor:
         msg.request_id = goal.request_id
         msg.source_observation_id = goal.source_observation_id
         msg.object_id = goal.object_id
-        msg.profile = goal.profile
         msg.bin_id = goal.bin_id or ""
         msg.use_pose_override = False
         msg.object_bottom_offset_mm = float(goal.object_bottom_offset_mm or 0.0)
@@ -522,7 +521,7 @@ class RosExecutor:
         await _await_ros_future(handle.cancel_goal_async())
         return request_id
 
-    async def home(self) -> None:
+    async def home(self, open_gripper: bool = False) -> None:
         """홈 자세 복귀 (인터페이스_정의서 4.3절 Home.action).
 
         pick/place_into와 같은 `_send`를 지나므로 `_active_goal_handle`에 등록되고,
@@ -534,6 +533,7 @@ class RosExecutor:
         msg = Home.Goal()
         msg.schema_version = SCHEMA_VERSION
         msg.request_id = f"rq-home-{uuid.uuid4().hex[:8]}"
+        msg.open_gripper = open_gripper
 
         async def _ignore_feedback(_request_id: str, _phase: str) -> None:
             """홈이동은 trace에 속하지 않아 중계할 진행률 화면이 없다 (2.6절)."""

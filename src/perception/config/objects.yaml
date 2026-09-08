@@ -3,13 +3,15 @@
 # TODO: approach_speed의 단위가 미확정이다 — mm/s인지 최대속도 대비 비율(0~1)인지 정해야 한다.
 #       mm 통일 결정(1.1절) 이후에도 이 값만 해석이 열려 있으므로 control 착수 전 확정할 것.
 
-profiles:
-  normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
-  fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
-  deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
-# deformable은 치약·물티슈·인형이 쓴다(2026-09-07 7클래스 추가). fragile은 직접 매핑되는
-# 물체가 없지만 지우지 않는다 — 미확인 신규 클래스에 강제되는 프로파일이다(FR-05b).
-# control의 skill_params와도 짝이 맞아야 한다.
+# 파지력 단계(5단계). 단계→힘 매핑은 이 파일과 control/config/skill_params.yaml이 소유한다.
+# 1=매우 강하게(40N) ~ 5=매우 약하게(20N), 5N 간격.
+# approach_speed/contact_threshold_n은 단계별 보간 없이 단순 매핑한다(5단계지만 값은 3種).
+grip_levels:
+  1: { max_grip_force_n: 40.0, approach_speed: 0.25, contact_threshold_n: 8.0 }  # 매우 강하게
+  2: { max_grip_force_n: 35.0, approach_speed: 0.25, contact_threshold_n: 7.0 }  # 강하게
+  3: { max_grip_force_n: 30.0, approach_speed: 0.20, contact_threshold_n: 6.0 }  # 보통
+  4: { max_grip_force_n: 25.0, approach_speed: 0.15, contact_threshold_n: 5.0 }  # 약하게
+  5: { max_grip_force_n: 20.0, approach_speed: 0.08, contact_threshold_n: 3.0 }  # 매우 약하게
 
 # 검출 모델의 클래스명 → 이 파일의 class_name 매핑 (개발계획.md D-7).
 #
@@ -40,7 +42,7 @@ model_labels:
 # **무게는 저울로 잰 값이 아니라 제품 규격에서 잡은 추정치다.** attribute_db는 이 파일의
 # 값을 needs_confirmation=false로 내보내므로 확인된 값처럼 보인다 — 실측하면 고칠 것.
 # 다만 무게가 쓰이는 곳은 planner의 가반하중 검사(5000g, 전부 한참 아래)와 LLM 프롬프트
-# 표시뿐이다. 파지력을 정하는 것은 profile이고, 그쪽은 물체 형태로 판단했다.
+# 표시뿐이다. 파지력을 정하는 것은 grip_level이고, 그쪽은 물체 형태로 판단했다.
 objects:
   toothpaste:
     name_ko: 치약
@@ -48,49 +50,49 @@ objects:
     fragile: false
     deformable: true       # 튜브라 눌린다
     transparent: false
-    profile: deformable
+    grip_level: 4
   wet_wipes:
     name_ko: 물티슈
     mass_g: 120            # 추정
     fragile: false
     deformable: true       # 비닐 팩이라 잡으면 모양이 바뀐다
     transparent: false
-    profile: deformable
+    grip_level: 4          # 비닐 팩이라 잡으면 모양이 바뀐다
   sunscreen:
     name_ko: 선크림
     mass_g: 70             # 추정
     fragile: false
     deformable: false
     transparent: false
-    profile: normal
+    grip_level: 3
   rabbit_doll:
     name_ko: 토끼 인형
     mass_g: 100            # 추정
     fragile: false
     deformable: true       # 봉제 인형 — 잡는 위치마다 두께가 달라진다
     transparent: false
-    profile: deformable
+    grip_level: 4          # 봉제 인형 — 잡는 위치마다 두께가 달라진다
   umbrella:
     name_ko: 접이 우산
     mass_g: 350            # 추정 — 이 목록에서 가장 무겁다
     fragile: false
     deformable: false
     transparent: false
-    profile: normal
+    grip_level: 3          # 접이 우산 — 가장 무겁다
   fabric_spray:
     name_ko: 섬유탈취제
     mass_g: 300            # 추정 (내용물 포함)
     fragile: false
     deformable: false
     transparent: false     # 반투명 용기라 depth가 새면 true로 바꿀 것
-    profile: normal
+    grip_level: 3
   gel_nail:
     name_ko: 젤네일
     mass_g: 30             # 추정
     fragile: false
     deformable: false
     transparent: false
-    profile: normal
+    grip_level: 3
 
   # 아래 3종은 best_v1.pt 어휘다. 현행 모델에는 없지만 롤백 대비로 남겨 둔다.
   # (2026-09-03 트랙 A에서 확정된 사용자 확인값)
@@ -100,25 +102,25 @@ objects:
     fragile: false
     deformable: false
     transparent: false
-    profile: normal
+    grip_level: 3
   nail:
     name_ko: 네일
     mass_g: 150
     fragile: false
     deformable: false
     transparent: false
-    profile: normal
+    grip_level: 3
   tape:
     name_ko: 테이프
     mass_g: 80
     fragile: false
     deformable: false
     transparent: true      # 롤 몸체가 비쳐 보인다 — depth가 표면을 놓칠 수 있다
-    profile: normal
+    grip_level: 3
 
 fallback:            # DB에 없는 신규 클래스에 적용하는 보수적 기본값 (FR-05)
   mass_g: null
   fragile: true
   deformable: false
   transparent: false
-  profile: fragile
+  grip_level: 5        # 미확인 신규 클래스는 가장 약하게(20N)

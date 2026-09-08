@@ -6,9 +6,9 @@
    런타임 마스터다(시스템명세서 2.2절). 여기 있는 값이 최신이다.
 2. **`objects.yaml`** — 초기값(seed). DB에 닿지 못할 때의 대비책이자 `model_labels`의 출처.
 
-DB에도 yaml에도 없는 클래스는 **신규 클래스**로 보고 `fallback`(fragile) 프로파일을 붙이고
-`needs_confirmation=true`로 표시한다. 사진에서 추정한 값을 그대로 파지력에 반영하지 않기
-위한 것이다(NFR-03a) — 확인 전에는 무조건 조심스럽게 다룬다.
+DB에도 yaml에도 없는 클래스는 **신규 클래스**로 보고 `fallback`(grip_level 5=가장 약하게)을
+붙이고 `needs_confirmation=true`로 표시한다. 사진에서 추정한 값을 그대로 파지력에 반영하지
+않기 위한 것이다(NFR-03a) — 확인 전에는 무조건 조심스럽게 다룬다.
 """
 import logging
 import os
@@ -18,14 +18,15 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
-# 신규 클래스에 강제하는 프로파일. yaml의 fallback 블록이 우선이고, 이 값은 최후의 보루다.
+# 신규 클래스에 강제하는 파지력 단계. yaml의 fallback 블록이 우선이고, 이 값은 최후의 보루다.
+# 5 = 가장 약하게(20N) — 미확인 물체는 조심스럽게 다루는 것이 FR-05b의 기본이다.
 HARD_FALLBACK = {
     "name_ko": "",
     "mass_g": 0.0,
     "fragile": True,
     "deformable": False,
     "transparent": False,
-    "profile": "fragile",
+    "grip_level": 5,
 }
 
 
@@ -84,7 +85,7 @@ class AttributeSource:
     def attributes(self, class_name: str) -> dict:
         """`DetectedObject`의 속성 필드를 채울 dict.
 
-        반환 키: name_ko, mass_g, fragile, deformable, transparent, profile,
+        반환 키: name_ko, mass_g, fragile, deformable, transparent, grip_level,
                 attr_source, needs_confirmation
         """
         row = self._from_db(class_name)
@@ -99,7 +100,7 @@ class AttributeSource:
                 "fragile": bool(seed.get("fragile", True)),
                 "deformable": bool(seed.get("deformable", False)),
                 "transparent": bool(seed.get("transparent", False)),
-                "profile": seed.get("profile") or "fragile",
+                "grip_level": int(seed.get("grip_level") or 5),
                 "attr_source": "yaml_seed",
                 "needs_confirmation": False,
             }
@@ -111,7 +112,7 @@ class AttributeSource:
             "fragile": bool(self._fallback.get("fragile", True)),
             "deformable": bool(self._fallback.get("deformable", False)),
             "transparent": bool(self._fallback.get("transparent", False)),
-            "profile": self._fallback.get("profile") or "fragile",
+            "grip_level": int(self._fallback.get("grip_level") or 5),
             "attr_source": "yaml_seed",
             "needs_confirmation": True,
         }
@@ -127,7 +128,7 @@ class AttributeSource:
         try:
             with psycopg.connect(self._database_url, connect_timeout=3) as conn, conn.cursor() as cur:
                 cur.execute(
-                    "SELECT name_ko, mass_g, fragile, deformable, transparent, profile,"
+                    "SELECT name_ko, mass_g, fragile, deformable, transparent, grip_level,"
                     " source, is_confirmed FROM object_attributes WHERE class_name = %s",
                     (class_name,),
                 )
@@ -137,14 +138,14 @@ class AttributeSource:
             return None
         if row is None:
             return None
-        name_ko, mass_g, fragile, deformable, transparent, profile, source, is_confirmed = row
+        name_ko, mass_g, fragile, deformable, transparent, grip_level, source, is_confirmed = row
         return {
             "name_ko": name_ko or "",
             "mass_g": float(mass_g or 0.0),
             "fragile": bool(fragile),
             "deformable": bool(deformable),
             "transparent": bool(transparent),
-            "profile": profile or "fragile",
+            "grip_level": int(grip_level or 5),
             "attr_source": source or "yaml_seed",
             "needs_confirmation": not bool(is_confirmed),
         }

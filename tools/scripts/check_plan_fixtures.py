@@ -48,16 +48,17 @@ def extra_check(name: str, world: dict, steps: list) -> str | None:
             return f"투명한 물체만 집어야 하는데 {sorted(picked)}를 집었다"
     elif name == "fallback_forced":
         # 미확인 신규 클래스도 "전부" 지시에 포함되어야 한다 (FR-05b: 확인 전이라고 빼는 게 아니라,
-        # 보수적 프로파일로 다루는 것이다). 빠지면 아래 프로파일 검사가 헛통과한다.
+        # 보수적(5=가장 약하게)으로 다루는 것이다). 빠지면 아래 grip_level 검사가 헛통과한다.
         touched = {s["object_id"] for s in steps}
         if "obj_004" not in touched:
             return "미확인 클래스 obj_004가 시퀀스에서 통째로 빠졌다 (제외가 아니라 fallback 처리 대상)"
         for s in steps:
-            if s["object_id"] == "obj_004" and s["profile"] != "fragile":
-                return f"미확인 클래스 obj_004의 프로파일이 {s['profile']} (fragile로 강제되어야 함)"
+            if s["object_id"] == "obj_004" and s["grip_level"] != 5:
+                return (f"미확인 클래스 obj_004의 grip_level이 {s['grip_level']} "
+                        "(5=가장 약하게로 강제되어야 함)")
     elif name == "all_three":
         # "전부"는 파지 가능한 물체를 하나도 빠뜨리지 않아야 한다. 조심스러운 속성
-        # (파손위험·투명)은 제외 사유가 아니다 — 프로파일로 다뤄질 뿐이다.
+        # (파손위험·투명)은 제외 사유가 아니다 — 파지 단계로 다뤄질 뿐이다.
         picked = {s["object_id"] for s in steps if s["skill"] == "pick"}
         expected = {o["object_id"] for o in world["objects"] if o.get("graspable", True)}
         if picked != expected:
@@ -94,7 +95,7 @@ def main() -> int:
             print(f"      사유: {body.get('validation_reason')}")
         for s in steps:
             extra = s.get("bin_id") or ("grasp_pose" if s.get("grasp_pose") else "")
-            print(f"      - {s['skill']:11s} {s['object_id']} profile={s['profile']} {extra}")
+            print(f"      - {s['skill']:11s} {s['object_id']} grip_level={s['grip_level']} {extra}")
         if not ok:
             failures.append(f"{fixture}: {detail or f'기대 {expected}, 실제 {actual}'}")
 

@@ -1,16 +1,19 @@
-# profile별 힘/속도 파라미터 + 시각검증 상대이동값
-# 미확정 — perception/config/objects.yaml의 profiles와 일치시켜 관리 (중복 정의 주의)
+# grip_level별 힘/속도 파라미터 + 시각검증 상대이동값
+# 미확정 — perception/config/objects.yaml의 grip_levels와 일치시켜 관리 (중복 정의 주의)
 # 단위: 길이 mm, 힘 N (인터페이스_정의서.md 1.1절). approach_speed 단위는 objects.yaml의 TODO 참조
 # TODO: 값 확정 (시스템명세서 미확정 항목 참조)
 #
+# 파지력 5단계: 1=가장 강하게(40N) ~ 5=가장 약하게(20N), 5N 간격.
 # pick/place 실물 1단계(2026-09-04, 위치제어만)는 이 중 max_grip_force_n만 쓴다
 # (그리퍼의 힘 제한 close, dsr_motion.move_gripper 참조) — approach_speed·
 # contact_threshold_n은 compliance.py(순응제어, 아직 미구현)가 붙는 2단계의 몫이다.
 
-profiles:
-  normal:      { max_grip_force_n: 20.0, approach_speed: 0.25, contact_threshold_n: 8.0 }
-  fragile:     { max_grip_force_n: 5.0,  approach_speed: 0.08, contact_threshold_n: 3.0 }
-  deformable:  { max_grip_force_n: 12.0, approach_speed: 0.20, contact_threshold_n: 5.0 }
+grip_levels:
+  1: { max_grip_force_n: 40.0, approach_speed: 0.25, contact_threshold_n: 8.0 }  # 매우 강하게
+  2: { max_grip_force_n: 35.0, approach_speed: 0.25, contact_threshold_n: 7.0 }  # 강하게
+  3: { max_grip_force_n: 30.0, approach_speed: 0.20, contact_threshold_n: 6.0 }  # 보통
+  4: { max_grip_force_n: 25.0, approach_speed: 0.15, contact_threshold_n: 5.0 }  # 약하게
+  5: { max_grip_force_n: 20.0, approach_speed: 0.08, contact_threshold_n: 3.0 }  # 매우 약하게
 
 # --- Tool reference model (empirical, not independent physical geometry) ---
 tool:
@@ -92,11 +95,11 @@ motion:
   # 이제 물체 높이는 perception이 depth로 실측해(DetectedObject.height_mm) 따로 더하므로,
   # **이 값은 순수한 안전 여유**다 — 물체가 커져도 이 값은 그대로 두면 된다.
   #
-  # TODO: 줄일 여지가 있다. 30mm는 물체 높이 보정이 없던 시절의 값이라, 이제는 보정분과
-  # 겹쳐 실제로 필요한 것보다 높은 데서 놓게 된다. 다만 **줄이는 방향은 충돌 위험 방향**
-  # 이므로, 실물에서 물체별 보정이 제대로 도는 것을 먼저 확인한 뒤 10~15mm 쪽으로
-  # 조금씩 내릴 것. 지금 값을 유지하면 예전보다 항상 더 높게 놓으므로 안전하다.
-  release_clearance_mm: 30.0
+  # 2026-09-08 (요청) 30.0 → 70.0. 실물 시행에서 물체가 바구니 벽/테두리에 걸리는
+  # 모습이 다시 보여 방향을 되돌린다 — "보정분이 이미 더해지니 줄여도 된다"는 논리가
+  # 실물에선 아직 성립하지 않는다. **높이는 충돌 내성이 있는 방향**이므로, 물체별
+  # 높이 보정이 실물에서 반복해서 맞는 것을 확인하기 전까지 이 값을 유지한다.
+  release_clearance_mm: 70.0
   # place_into 접근 이동을 "현재 위치 → 안전고도 → 바구니 상공 → 하강" 3단계로 할 때,
   # 안전고도 = max(현재 z, 바구니 접근 z) + 이 값. 픽 직후 위치와 바구니 접근 높이
   # 둘 중 더 높은 곳보다도 이만큼 더 올라가야 그 사이(작업대·다른 물체·바구니 테두리)를

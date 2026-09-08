@@ -10,7 +10,7 @@
 import unittest
 
 from src.schema import LlmStep
-from src.validator import MAX_PAYLOAD_G, Rejected, resolve_profile, validate
+from src.validator import MAX_PAYLOAD_G, Rejected, resolve_grip_level, validate
 
 BINS = {
     "left_box": {"name_ko": "왼쪽 박스", "pose": {"x": 350, "y": 250, "z": 50}},
@@ -26,7 +26,7 @@ def make_object(object_id="obj_001", **overrides):
         "graspable": True,
         "not_graspable_reason": "",
         "mass_g": 150.0,
-        "profile": "normal",
+        "grip_level": 3,
         "needs_confirmation": False,
         "grasp_candidates": [{
             "pose": {"position": {"x": 450.0, "y": 0.0, "z": 80.0},
@@ -169,33 +169,33 @@ class TestSafetyGate(unittest.TestCase):
         self.assertEqual(len(steps), 2)
 
 
-class TestProfileForcing(unittest.TestCase):
-    """프로파일은 값이 유효하면 그대로 쓴다 (resolve_profile 주석 참조).
+class TestGripLevelForcing(unittest.TestCase):
+    """grip_level은 값이 유효하면 그대로 쓴다 (resolve_grip_level 주석 참조).
 
     예전에는 needs_confirmation=true면 무조건 fragile로 강제했다. SAM+VLM 경로가
     objects.yaml 어휘 없이 돌기 시작하면서 그 경로의 물체가 전부 미확인이 되어,
-    강제가 걸리면 프로파일 구분 자체가 사라진다.
+    강제가 걸리면 grip_level 구분 자체가 사라진다.
     """
 
-    def test_vlm_suggested_profile_is_used(self):
-        obj = make_object(profile="normal", needs_confirmation=True,
+    def test_vlm_suggested_grip_level_is_used(self):
+        obj = make_object(grip_level=3, needs_confirmation=True,
                           attr_source="llm_suggested")
-        self.assertEqual(resolve_profile(obj), "normal")
+        self.assertEqual(resolve_grip_level(obj), 3)
         steps = validate(pick_place(), world(obj), BINS)
-        self.assertTrue(all(s.profile == "normal" for s in steps))
+        self.assertTrue(all(s.grip_level == 3 for s in steps))
 
-    def test_unknown_profile_value_falls_back(self):
+    def test_unknown_grip_level_value_falls_back(self):
         """값을 못 읽으면 아는 것이 없다는 뜻이므로 조심스러운 쪽으로 간다."""
-        self.assertEqual(resolve_profile(make_object(profile="turbo")), "fragile")
+        self.assertEqual(resolve_grip_level(make_object(grip_level=99)), 5)
 
-    def test_missing_profile_falls_back(self):
+    def test_missing_grip_level_falls_back(self):
         obj = make_object()
-        del obj["profile"]
-        self.assertEqual(resolve_profile(obj), "fragile")
+        del obj["grip_level"]
+        self.assertEqual(resolve_grip_level(obj), 5)
 
-    def test_confirmed_class_keeps_its_profile(self):
-        obj = make_object(profile="deformable", needs_confirmation=False)
-        self.assertEqual(resolve_profile(obj), "deformable")
+    def test_confirmed_class_keeps_its_grip_level(self):
+        obj = make_object(grip_level=1, needs_confirmation=False)
+        self.assertEqual(resolve_grip_level(obj), 1)
 
 
 if __name__ == "__main__":

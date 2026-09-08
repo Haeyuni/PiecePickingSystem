@@ -6,7 +6,7 @@
 
     segment_everything()  프롬프트 없이 장면 전체를 조각냄 → 마스크 후보
       → draw_marks()      조각마다 번호를 그린 이미지 → VLM에 보낸다
-      → (VLM 응답)         번호별 is_object / part_of / class_name / 속성 / profile
+      → (VLM 응답)         번호별 is_object / part_of / class_name / 속성 / grip_level
       → merge_marks()     조각을 물체로 합치고 속성을 `attrs`로 묶는다
 
 ROS와 무관하다(numpy + cv2 + ultralytics만 쓴다). perception 노드와
@@ -194,7 +194,7 @@ def merge_marks(marks: list[dict], mark_masks: list[np.ndarray],
     max_growth배 넘게 키우거나 대표 조각보다 크면, 조각이 아니라 다른 영역으로 보고 버린다.
 
     marks는 `{mark_id, is_object, part_of, class_name, name_ko, mass_g, fragile,
-    deformable, transparent, profile, confidence, reasoning}` dict 리스트다
+    deformable, transparent, grip_level, confidence, reasoning}` dict 리스트다
     (planner /internal/label-marks 응답 그대로). 반환값에는 합쳐진 `mask`와, VLM이 판단한
     속성을 `AttributeSource.attributes()`와 같은 모양으로 묶은 `attrs`가 붙는다 —
     node._publish가 둘을 구분 없이 쓰게 하기 위해서다. **object_id는 붙이지 않는다** —
@@ -248,17 +248,19 @@ def mark_attributes(mark: dict) -> dict:
     `attr_source`는 `llm_suggested`이고 `needs_confirmation`은 항상 true다: 값이 있다는 것과
     사람이 확인했다는 것은 다르고, 웹의 확인 대기 목록(FR-05b)이 그 구분으로 돈다.
 
-    `profile`이 셋 중 하나가 아니면 fragile로 떨어뜨린다. planner의 `_normalize_marks`가
+    `grip_level`이 1~5가 아니면 5로 떨어뜨린다. planner의 `_normalize_marks`가
     이미 거르지만, 여기는 스크립트(tools/scripts/vlm_sam_test.py)도 지나는 길이다.
     """
-    profile = mark.get("profile")
+    grip_level = int(mark.get("grip_level") or 0)
+    if grip_level not in (1, 2, 3, 4, 5):
+        grip_level = 5
     return {
         "name_ko": mark.get("name_ko") or "",
         "mass_g": max(0.0, float(mark.get("mass_g") or 0.0)),
         "fragile": bool(mark.get("fragile", True)),
         "deformable": bool(mark.get("deformable", False)),
         "transparent": bool(mark.get("transparent", False)),
-        "profile": profile if profile in ("normal", "fragile", "deformable") else "fragile",
+        "grip_level": grip_level,
         "attr_source": "llm_suggested",
         "needs_confirmation": True,
         "reasoning": mark.get("reasoning") or "",

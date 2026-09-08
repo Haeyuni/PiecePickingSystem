@@ -39,7 +39,7 @@ def seed_object_attributes(conn: psycopg.Connection, config: dict | None = None)
                 """
                 INSERT INTO object_attributes (
                     class_name, name_ko, mass_g, fragile, deformable, transparent,
-                    profile, is_confirmed, source
+                    grip_level, is_confirmed, source
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, true, 'yaml_seed')
                 ON CONFLICT (class_name) DO NOTHING
                 """,
@@ -50,7 +50,7 @@ def seed_object_attributes(conn: psycopg.Connection, config: dict | None = None)
                     attrs.get("fragile", True),
                     attrs.get("deformable", False),
                     attrs.get("transparent", False),
-                    attrs.get("profile", "fragile"),
+                    attrs.get("grip_level", 5),
                 ),
             )
             inserted += cur.rowcount
@@ -59,7 +59,7 @@ def seed_object_attributes(conn: psycopg.Connection, config: dict | None = None)
     return inserted
 
 
-def fallback_profile(config: dict | None = None) -> dict:
+def fallback_attributes(config: dict | None = None) -> dict:
     """DB에 없는 신규 클래스에 강제 적용할 보수적 기본값 (FR-05, NFR-03a).
 
     yaml의 fallback 블록을 그대로 돌려준다 — 값을 코드에 중복 정의하지 않는다.

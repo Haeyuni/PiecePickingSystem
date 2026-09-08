@@ -131,9 +131,11 @@ img.view { width: 100%; height: 100%; object-fit: cover; padding: 0; border-styl
 .badge {
   font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid;
 }
-.badge-normal { color: var(--busy); border-color: var(--busy); }
-.badge-fragile { color: var(--warn); border-color: var(--warn); }
-.badge-deformable { color: var(--deformable); border-color: var(--deformable); }
+.badge-g1 { color: var(--danger); border-color: var(--danger); }
+.badge-g2 { color: var(--danger); border-color: var(--deformable); }
+.badge-g3 { color: var(--busy); border-color: var(--busy); }
+.badge-g4 { color: var(--deformable); border-color: var(--deformable); }
+.badge-g5 { color: var(--warn); border-color: var(--warn); }
 .badge-confirm { color: var(--warn); border-color: var(--warn); cursor: pointer; }
 .badge-nograsp { color: var(--danger); border-color: var(--danger); }
 

@@ -6,7 +6,7 @@
 import { useState } from 'react'
 import { confirmObject } from '../api'
 import type { ApiError } from '../api'
-import type { ObjectConfirmation, Profile } from '../types'
+import type { GripLevel, ObjectConfirmation } from '../types'
 
 export default function ConfirmModal({
   item, onClose, onConfirmed,
@@ -20,7 +20,7 @@ export default function ConfirmModal({
   const [fragile, setFragile] = useState(item.suggested_fragile ?? true)
   const [deformable, setDeformable] = useState(item.suggested_deformable ?? false)
   const [transparent, setTransparent] = useState(item.suggested_transparent ?? false)
-  const [profile, setProfile] = useState<Profile>(item.suggested_profile ?? 'fragile')
+  const [gripLevel, setGripLevel] = useState<GripLevel>(item.suggested_grip_level ?? 5)
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
 
@@ -29,7 +29,7 @@ export default function ConfirmModal({
     setError(null)
     try {
       await confirmObject(item.class_name, {
-        name_ko: nameKo, mass_g: massG, fragile, deformable, transparent, profile,
+        name_ko: nameKo, mass_g: massG, fragile, deformable, transparent, grip_level: gripLevel,
       })
       onConfirmed()
     } catch (e) {
@@ -63,12 +63,14 @@ export default function ConfirmModal({
                  onChange={(e) => setMassG(Number(e.target.value))} />
         </div>
         <div className="field">
-          <label htmlFor="profile">프로파일</label>
-          <select id="profile" value={profile}
-                  onChange={(e) => setProfile(e.target.value as Profile)}>
-            <option value="normal">일반</option>
-            <option value="fragile">파손위험</option>
-            <option value="deformable">변형가능</option>
+          <label htmlFor="grip-level">파지력</label>
+          <select id="grip-level" value={gripLevel}
+                  onChange={(e) => setGripLevel(Number(e.target.value) as GripLevel)}>
+            <option value={1}>1 — 매우 강하게 (40N)</option>
+            <option value={2}>2 — 강하게 (35N)</option>
+            <option value={3}>3 — 보통 (30N)</option>
+            <option value={4}>4 — 약하게 (25N)</option>
+            <option value={5}>5 — 매우 약하게 (20N)</option>
           </select>
         </div>
         <div className="field">

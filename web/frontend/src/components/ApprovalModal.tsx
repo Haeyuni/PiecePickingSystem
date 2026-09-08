@@ -8,11 +8,11 @@
 import { useState } from 'react'
 import { submitApproval } from '../api'
 import type { ApiError } from '../api'
-import type { ApprovalNeededEvent } from '../types'
+import type { ApprovalNeededEvent, GripLevel } from '../types'
 
 const SKILL_LABEL: Record<string, string> = { pick: 'Pick', place_into: 'Place into' }
-const PROFILE_LABEL: Record<string, string> = {
-  normal: '일반', fragile: '파손위험', deformable: '변형가능',
+const GRIP_LEVEL_LABEL: Record<GripLevel, string> = {
+  1: '매우 강하게', 2: '강하게', 3: '보통', 4: '약하게', 5: '매우 약하게',
 }
 
 export default function ApprovalModal({
@@ -83,8 +83,8 @@ export default function ApprovalModal({
                   {obj?.name_ko || step.object_id}
                   {step.bin_id && ` → ${step.bin_id}`}
                   {obj && (
-                    <span className={`badge badge-${obj.profile}`} style={{ marginLeft: 6 }}>
-                      {PROFILE_LABEL[obj.profile] ?? obj.profile}
+                    <span className={`badge badge-g${obj.grip_level}`} style={{ marginLeft: 6 }}>
+                      {GRIP_LEVEL_LABEL[obj.grip_level] ?? `g${obj.grip_level}`}
                     </span>
                   )}
                 </div>

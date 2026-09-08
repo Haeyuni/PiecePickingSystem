@@ -19,8 +19,12 @@ WORKSPACE_RADIUS_MM = 900.0
 # 그리퍼(SG2/RG2) 자중을 뺀 실효 가반하중. 실측 전까지 보수적으로 잡는다.
 MAX_PAYLOAD_G = 5000.0
 
-# 프로파일 값을 못 읽었을 때의 기본 (FR-05, NFR-03a) — resolve_profile 참조
-FALLBACK_PROFILE = "fragile"
+# 파지력 단계 값을 못 읽었을 때의 기본 (FR-05, NFR-03a) — resolve_grip_level 참조.
+# 5 = 가장 약하게(20N). 여기서 아는 것이 없을 때는 조심스러운 쪽이어야 한다.
+FALLBACK_GRIP_LEVEL = 5
+
+
+GRIP_LEVELS = (1, 2, 3, 4, 5)
 
 
 class Rejected(Exception):
@@ -44,26 +48,31 @@ def check_safety_gate(active_safety_events: list[dict]) -> None:
             )
 
 
-def resolve_profile(obj: dict) -> str:
-    """물체에 적용할 제어 프로파일을 결정한다.
+def resolve_grip_level(obj: dict) -> int:
+    """물체에 적용할 파지력 단계(1~5)를 결정한다.
 
     **예전에는 미확인(needs_confirmation) 물체를 무조건 fallback(fragile)로 강제했다.**
     등록 클래스 표(objects.yaml)로 아는 물체만 제 프로파일을 쓰고 나머지는 전부 조심스럽게
     다루자는 규칙이었다(NFR-03a, FR-05b).
 
     SAM+VLM 경로가 어휘 없이 돌기 시작하면서 그 규칙이 성립하지 않는다 — 그 경로의 물체는
-    **전부** 미확인이므로 강제가 걸리면 치약이든 우산이든 5N·최저속도가 되어 프로파일이라는
-    구분 자체가 사라진다. 그래서 지금은 **값이 유효하면 그대로 쓴다**. 그 값이 사진을 본
-    모델의 판단이라는 뜻이고, 프로파일을 조심스러운 쪽으로 미는 책임은 인지 단계로 옮겼다
-    (`vlm_detect.SYSTEM_PROMPT_MARKS`의 [profile], `_normalize_marks`의 fragile 강제).
+    **전부** 미확인이므로 강제가 걸리면 치약이든 우산이든 5단계(20N·최저속도)가 되어
+    grip_level이라는 구분 자체가 사라진다. 그래서 지금은 **값이 유효하면 그대로 쓴다**.
+    그 값이 사진을 본 모델의 판단이라는 뜻이고, 파지력을 조심스러운 쪽으로 미는 책임은
+    인지 단계로 옮겼다 (`vlm_detect.SYSTEM_PROMPT_MARKS`의 [grip_level],
+    `_normalize_marks`의 5 강제).
 
-    값이 없거나 모르는 값이면 여전히 fragile이다 — 여기서 아는 것이 없을 때의 기본은
+    값이 없거나 모르는 값이면 여전히 5(가장 약하게)다 — 여기서 아는 것이 없을 때의 기본은
     조심스러운 쪽이어야 한다.
     """
-    profile = obj.get("profile")
-    if profile not in ("normal", "fragile", "deformable"):
-        return FALLBACK_PROFILE
-    return profile
+    level = obj.get("grip_level")
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 0
+    if level not in GRIP_LEVELS:
+        return FALLBACK_GRIP_LEVEL
+    return level
 
 
 def _reachable_candidates(obj: dict) -> list[dict]:
@@ -128,7 +137,7 @@ def validate(llm_steps: list, world_state: dict, bins: dict,
     for i, step in enumerate(llm_steps):
         where = f"{i + 1}번째 스텝({step.skill})"
         obj = objects[step.object_id]
-        profile = resolve_profile(obj)
+        grip_level = resolve_grip_level(obj)
 
         if step.skill == "pick":
             if held is not None:
@@ -151,7 +160,7 @@ def validate(llm_steps: list, world_state: dict, bins: dict,
             plan.append(PlanStep(
                 skill="pick",
                 object_id=step.object_id,
-                profile=profile,
+                grip_level=grip_level,
                 grasp_pose=Pose(**best["pose"]),
                 gripper_width_mm=best.get("gripper_width_mm") or None,
                 grasp_candidates=[_candidate_out(c) for c in candidates],
@@ -175,7 +184,7 @@ def validate(llm_steps: list, world_state: dict, bins: dict,
             plan.append(PlanStep(
                 skill="place_into",
                 object_id=step.object_id,
-                profile=profile,
+                grip_level=grip_level,
                 bin_id=step.bin_id,
             ))
 

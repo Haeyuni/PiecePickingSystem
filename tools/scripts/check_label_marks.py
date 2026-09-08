@@ -86,11 +86,11 @@ def main() -> int:
         note = (f"{m['class_name']} ({m['name_ko']})" if m["is_object"]
                 else (f"→ {m['part_of']}번의 조각" if m["part_of"] else "물체 아님"))
         # 속성도 VLM이 판단하므로 여기서 눈으로 확인할 수 있어야 한다 — 파지력을 정하는
-        # 값이라, 이름만 맞고 profile이 엉뚱하면 로봇이 물체를 부순다.
+        # 값이라, 이름만 맞고 grip_level이 엉뚱하면 로봇이 물체를 부순다.
         extra = ""
         if m["is_object"]:
             flags = [k for k in ("fragile", "deformable", "transparent") if m.get(k)]
-            extra = (f"  {m['profile']} {m['mass_g']:g}g"
+            extra = (f"  g{m['grip_level']} {m['mass_g']:g}g"
                      + (f" [{','.join(flags)}]" if flags else ""))
         print(f"  [{m['mark_id']}] {note}  conf={m['confidence']:.2f}{extra}")
 
@@ -99,12 +99,12 @@ def main() -> int:
     for m in objects:
         if not m["class_name"]:
             failures.append(f"마크 {m['mark_id']}: is_object인데 class_name이 비었다")
-        if m["profile"] not in ("normal", "fragile", "deformable"):
-            failures.append(f"마크 {m['mark_id']}: 모르는 profile {m['profile']!r} — "
+        if int(m.get("grip_level") or 0) not in (1, 2, 3, 4, 5):
+            failures.append(f"마크 {m['mark_id']}: 모르는 grip_level {m.get('grip_level')!r} — "
                             "이 값이 그대로 파지력이 된다")
-        if m["fragile"] and m["profile"] != "fragile":
-            failures.append(f"마크 {m['mark_id']}: fragile인데 profile={m['profile']} — "
-                            "planner의 _normalize_marks가 걸렀어야 한다")
+        if m["fragile"] and int(m.get("grip_level") or 0) != 5:
+            failures.append(f"마크 {m['mark_id']}: fragile인데 grip_level={m.get('grip_level')} — "
+                            "planner의 _normalize_marks가 5로 걸렀어야 한다")
 
     for f in failures:
         print(f"  실패: {f}", file=sys.stderr)

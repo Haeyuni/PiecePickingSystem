@@ -132,11 +132,12 @@ class PickServer(Node):
         # **고정 mm가 아니라 비율인 이유**: 고정 10mm를 빼면 110mm 물체는 91%(거의 안
         # 조임), 15mm 물체는 33%(과하게 조임)가 되어 물체 크기에 따라 조임 정도가 널뛴다.
         self._grip_close_ratio = float(gripper.get("grip_close_ratio", 0.8))
-        # 프로필별 파지력(N). 2026-09-07 이전에는 이 값이 로봇까지 전달될 방법이 없어
+        # grip_level별 파지력(N). 2026-09-07 이전에는 이 값이 로봇까지 전달될 방법이 없어
         # 선언만 되어 있었다(dsr_motion.gripper_width_command 주석 참조).
-        self._profile_force_n = {
-            name: float((spec or {}).get("max_grip_force_n", 0.0) or 0.0)
-            for name, spec in (params.get("profiles") or {}).items()
+        # 단계 1..5 → 힘 40..20N. 없는/0 단계는 None으로 남겨 _close_grip에서 5로 처리한다.
+        self._grip_level_force_n = {
+            int(level): float((spec or {}).get("max_grip_force_n", 0.0) or 0.0)
+            for level, spec in (params.get("grip_levels") or {}).items()
         }
         # 열 때 쓰는 힘. 닫기에서 낮은 힘(fragile 5N)을 설정한 뒤 그대로 두면 다음 열기가
         # 그 힘으로 나가므로, 열기에는 항상 넉넉한 힘을 명시해 상태 의존을 없앤다.
@@ -335,7 +336,7 @@ class PickServer(Node):
             return cached
 
         self.get_logger().info(
-            f"pick 시작 object={goal.object_id} profile={goal.profile} "
+            f"pick 시작 object={goal.object_id} grip_level={goal.grip_level} "
             f"request={goal.request_id} 후보={len(goal.grasp_candidates) or 1}개")
         store.set_busy("pick")
         started = time.monotonic()
@@ -677,7 +678,7 @@ class PickServer(Node):
         아직 빈 스텁이라 접촉감지·파지확인 없이 grasp_pose를 그대로 믿고 움직인다).
 
         grasp_pose 바로 위(approach_height_mm)에서 한 번 멈췄다 내려가 그리퍼를 닫고
-        다시 들어올린다. 힘(N)은 profile별 max_grip_force_n을 정확히 넣지 못한다 —
+        다시 들어올린다. 힘(N)은 grip_level별 max_grip_force_n으로 정확히 넣지 못한다 —
         `/onrobot/sendCommand`가 문자 명령이라 서버 기본값(보수적인 축, dsr_motion.py
         참조)을 그대로 쓴다. 실패하면 RuntimeError, 취소되면 None — dsr_motion의 각
         호출이 취소 시 False/None을 돌려주므로 여기서 `goal_handle.is_cancel_requested`로
@@ -929,14 +930,15 @@ class PickServer(Node):
                 "grasp_selection.check_width와 실행 경로가 어긋났다")
         close_target_mm = max(candidate_width_mm * self._grip_close_ratio,
                               self._min_grip_width_mm)
-        force_n = self._profile_force_n.get(goal.profile) or None
+        # grip_level이 0(미상)이면 가장 약하게(5)로 처리 — min_readme/FR-05b.
+        force_n = self._grip_level_force_n.get(goal.grip_level or 5) or None
         close_command = dsr_motion.gripper_width_command(
             close_target_mm / 1000.0, force_n)
         self.get_logger().info(
             f"그리퍼 닫기: 목표 {close_target_mm:.1f}mm "
             f"(물체폭 {candidate_width_mm:.1f}mm x {self._grip_close_ratio:.2f}) "
-            + (f"힘 {force_n:.1f}N (profile={goal.profile})" if force_n
-               else f"힘 미지정 (profile={goal.profile}에 max_grip_force_n 없음)"))
+            + (f"힘 {force_n:.1f}N (grip_level={goal.grip_level})" if force_n
+               else f"힘 미지정 (grip_level={goal.grip_level}에 max_grip_force_n 없음)"))
         pre_evidence = self._gripper_evidence()
         close_sent = time.monotonic()
         if not dsr_motion.send_gripper_command(self._gripper_cmd_client, close_command):

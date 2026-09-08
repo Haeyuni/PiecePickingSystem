@@ -659,7 +659,7 @@ class PerceptionNode(Node):
             obj.fragile = attributes["fragile"]
             obj.deformable = attributes["deformable"]
             obj.transparent = attributes["transparent"]
-            obj.profile = attributes["profile"]
+            obj.grip_level = attributes["grip_level"]
             obj.attr_source = attributes["attr_source"]
             obj.needs_confirmation = attributes["needs_confirmation"]
             # YOLO 경로(objects.yaml 조회)는 이 키가 없다 — 판단 근거를 낸 것은 VLM뿐이다.

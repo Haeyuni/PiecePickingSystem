@@ -93,7 +93,7 @@ class PickDepthDiagnosticsTest(unittest.TestCase):
                     _gripper_open_m=0.110, _gripper_open_force_n=40.0,
                     _gripper_width_margin_mm=30.0, _gripper_joint_angle=0.0,
                     _open_width_m=lambda w: 0.050, _publish_phase=phase,
-                    _min_grip_width_mm=5.0, _grip_close_ratio=0.8, _profile_force_n={},
+                    _min_grip_width_mm=5.0, _grip_close_ratio=0.8, _grip_level_force_n={},
                     get_logger=lambda: NS(info=logs.append, warning=logs.append),
                 )
                 namespace = dict(math=math, dsr_motion=motion, _Canceled=type("Canceled", (Exception,), {}),

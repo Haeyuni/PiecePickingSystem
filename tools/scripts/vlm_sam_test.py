@@ -160,7 +160,7 @@ def print_objects(scene: dict) -> None:
         attrs = o.get("attrs")
         if attrs:
             flags = [k for k in ("fragile", "deformable", "transparent") if attrs[k]]
-            note = (f" {attrs['profile']} {attrs['mass_g']:g}g"
+            note = (f" g{attrs['grip_level']} {attrs['mass_g']:g}g"
                     + (f" [{','.join(flags)}]" if flags else ""))
         else:
             note = " [신규클래스]" if o.get("is_new_class") else ""
@@ -232,7 +232,7 @@ def marks_to_objects(labels, masks: list[np.ndarray]) -> tuple[list[dict], list[
             "object_id": f"{class_name}_{counter[class_name]}",
             "class_name": item["class_name"],
             "name_ko": item["name_ko"],
-            # 무게·파손위험·파지 프로파일도 VLM이 답한다 — som 경로는 objects.yaml을
+            # 무게·파손위험·파지 단계도 VLM이 답한다 — som 경로는 objects.yaml을
             # 지나지 않는다(planner/src/vlm_detect.py 상단 [속성도 VLM이 판단한다]).
             "attrs": item["attrs"],
             "confidence": round(item["confidence"], 3),
@@ -374,7 +374,7 @@ def build_world_state(objects: list[dict]) -> dict:
             "fragile": attrs["fragile"],
             "deformable": attrs["deformable"],
             "transparent": attrs["transparent"],
-            "profile": attrs["profile"],
+            "grip_level": attrs["grip_level"],
             "attr_source": attrs["attr_source"],
             "needs_confirmation": attrs["needs_confirmation"],
             "grasp_candidates": [],
@@ -402,7 +402,7 @@ def _yaml_attributes(class_name: str) -> dict:
         "fragile": bool(spec.get("fragile")),
         "deformable": bool(spec.get("deformable")),
         "transparent": bool(spec.get("transparent")),
-        "profile": spec.get("profile", "fragile"),
+        "grip_level": int(spec.get("grip_level") or 5),
         "attr_source": "yaml_seed" if known else "vlm_new_class",
         "needs_confirmation": not known,
     }

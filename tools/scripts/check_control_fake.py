@@ -71,7 +71,7 @@ def pick_goal(request_id):
     g.trace_id = "tr-check-control"
     g.request_id = request_id
     g.object_id = "obj_001"
-    g.profile = "fragile"
+    g.grip_level = 5
     g.grasp_pose = Pose()
     g.grasp_pose.position.x = 412.5   # mm (인터페이스_정의서 1.1절)
     g.grasp_pose.position.y = -38.0
@@ -118,7 +118,6 @@ def main() -> int:
         g.trace_id = "tr-check-control"
         g.request_id = f"rq-bin-{uuid.uuid4().hex[:8]}"
         g.object_id = "obj_001"
-        g.profile = "normal"
         g.bin_id = "없는_박스"
         g.max_retries = 1
         result, _ = send(executor, node.place, g)

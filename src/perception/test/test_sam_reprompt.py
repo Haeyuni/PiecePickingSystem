@@ -23,7 +23,7 @@ def previous(class_name="tape", position=(0.0, 0.0, 500.0), extent=None, **extra
                   (x - 20, y + 15, z), (x + 20, y + 15, z)]
     return {"class_name": class_name, "confidence": 0.9,
             "attrs": {"name_ko": "테이프", "mass_g": 80.0, "fragile": False,
-                      "deformable": False, "transparent": True, "profile": "normal",
+                      "deformable": False, "transparent": True, "grip_level": 3,
                       "attr_source": "llm_suggested", "needs_confirmation": True},
             "position_base_mm": position, "extent_base_mm": extent or [], **extra}
 
@@ -76,13 +76,13 @@ def test_labels_are_inherited_not_recomputed():
     """VLM을 다시 부르지 않는다는 것이 코드로 지켜지는지 (명령당 1회 규칙).
 
     이름뿐 아니라 **속성도** 물려받아야 한다 — 재관측 경로는 VLM도 objects.yaml도 안 부르므로
-    여기서 잃으면 그 물체만 프로파일이 달라진다.
+    여기서 잃으면 그 물체만 grip_level이 달라진다.
     """
     detector = make()
     detector.prime([previous(class_name="toothpaste")], IDENTITY, IDENTITY, INTRINSICS)
 
     assert detector.expected[0]["class_name"] == "toothpaste"
-    assert detector.expected[0]["attrs"]["profile"] == "normal"
+    assert detector.expected[0]["attrs"]["grip_level"] == 3
     assert detector.expected[0]["attrs"]["attr_source"] == "llm_suggested"
 
 

@@ -23,7 +23,7 @@ class SkillGoal:
     trace_id: str
     request_id: str
     object_id: str
-    profile: str
+    grip_level: int = 0
     source_observation_id: str = ""
     source_observation_stamp: dict | None = None
     class_name: str = ""
@@ -122,7 +122,7 @@ class Executor(Protocol):
     async def stop(self) -> str | None:
         """진행 중인 goal을 취소한다. 취소된 request_id, 없으면 None."""
 
-    async def home(self) -> None: ...
+    async def home(self, open_gripper: bool = False) -> None: ...
 
 
 def is_mock() -> bool:

@@ -1,7 +1,7 @@
 """신규 물체 확인 (웹_인터페이스_정의서.md 2.4절, FR-05b).
 
 이건 실행 승인이 아니라 **속성 확정**이다. 확인 대기 중인 물체가 있어도 다른 명령은
-그대로 실행된다 — 다만 그 물체는 확인 전까지 fallback(fragile) 프로파일로만 다뤄진다.
+그대로 실행된다 — 다만 그 물체는 확인 전까지 fallback(grip_level 5=가장 약하게)으로만 다뤄진다.
 """
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
