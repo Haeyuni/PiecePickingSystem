@@ -17,3 +17,11 @@ psycopg[binary]
 
 # objects.yaml 시드 로딩 (planner/src/seed.py)
 pyyaml
+
+# YOLO 학습용 이미지를 원본 PNG→JPEG로 리인코딩 (app.py:_strip_overlay) +
+# 마스크 윤곽선 추출 (vlm_detect.mask_to_polygons).
+# 헤드리스(비 GUI) 이미지 프로세싱만 쓰므로 opencv-python-headless로 배포본을 줄인다.
+opencv-python-headless
+
+# 마스크 윤곽선(polygon) 좌표 계산 (vlm_detect.mask_to_polygons, numpy 배열 연산)
+numpy

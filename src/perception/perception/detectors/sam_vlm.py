@@ -3,7 +3,7 @@
 YOLO와 달리 학습한 클래스에 갇히지 않는다 — 처음 보는 물건도 이름이 붙는다.
 
 **objects.yaml을 지나지 않는다.** 이름뿐 아니라 무게·파손위험·변형·투명 여부와 파지
-프로파일까지 사진을 본 VLM이 답하고, 그 값이 그대로 `DetectedObject`에 실린다
+    단계(grip_level)까지 사진을 본 VLM이 답하고, 그 값이 그대로 `DetectedObject`에 실린다
 (`attr_source=llm_suggested`, `needs_confirmation=true`). 등록되지 않은 물건도 그 물건에
 맞게 다뤄지지만 파지력을 정하는 값이 모델 출력이 되었다는 뜻이기도 하다 —
 `planner/src/vlm_detect.py` 상단의 [속성도 VLM이 판단한다]에 그 맞바꿈을 적어 뒀다.
@@ -63,7 +63,8 @@ class SamVlmDetector:
         marked = sam_marks.draw_marks(color_bgr, masks)
         if on_phase:
             on_phase("labeling")
-        labels = self._label(marked, list(range(1, len(masks) + 1)), trace_id)
+        labels = self._label(marked, list(range(1, len(masks) + 1)), trace_id, masks,
+                             original_bgr=color_bgr)
 
         def rejected(piece, parent):
             self._log.warning(f"마크 {piece}는 {parent}의 조각으로 보기 어렵다 — 합치지 않는다")
@@ -72,25 +73,65 @@ class SamVlmDetector:
         self.last_marks, self.last_objects = masks, objects
         self._log.info(f"VLM 라벨링: 마크 {len(masks)}개 중 물체 {len(objects)}개")
 
-        # attrs가 함께 나간다 — 이 경로에서는 무게·파손위험·파지 프로파일도 VLM이 답한다
+        # attrs가 함께 나간다 — 이 경로에서는 무게·파손위험·파지 단계도 VLM이 답한다
         # (objects.yaml 조회 없음, base.py의 detection() 주석 참조).
         detections = [detection(o["class_name"], o["confidence"], o["mask"], o["attrs"])
                       for o in objects]
         return detections, marked
 
-    def _label(self, marked_bgr: np.ndarray, mark_ids: list[int], trace_id: str) -> list[dict]:
-        """번호를 그린 프레임을 planner로 보내 번호별 판단을 받는다."""
+    def _label(self, marked_bgr: np.ndarray, mark_ids: list[int], trace_id: str,
+               masks: list[np.ndarray] | None = None,
+               original_bgr: np.ndarray | None = None) -> list[dict]:
+        """번호를 그린 프레임을 planner로 보내 번호별 판단을 받는다.
+
+        masks를 넘기면 각 마스크의 윤곽선 좌표를 JSON으로 직렬화해 함께 보낸다 —
+        planner가 YOLO 학습용 라벨을 만들 때 쓴다. original_bgr를 넘기면 오버레이가
+        없는 원본 프레임을 함께 보내 planner가 학습용 원본 이미지로 저장하게 한다.
+        """
         import cv2
         import httpx
 
         ok, buffer = cv2.imencode(".png", marked_bgr)
         if not ok:
             raise RuntimeError("번호 오버레이를 PNG로 인코딩하지 못했다")
+        files = {"image": ("marks.png", buffer.tobytes(), "image/png")}
+        if original_bgr is not None:
+            ok, orig = cv2.imencode(".png", original_bgr)
+            if ok:
+                files["original_image"] = ("original.png", orig.tobytes(), "image/png")
+
+        payload: dict = {
+            "mark_ids": ",".join(str(i) for i in mark_ids),
+            "trace_id": trace_id,
+        }
+        if masks:
+            import json
+            import numpy as np
+
+            h, w = marked_bgr.shape[:2]
+            polys_by_id: dict[int, list] = {}
+            for idx, mask in enumerate(masks):
+                contours, _ = cv2.findContours(
+                    mask.astype(np.uint8).copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+                )
+                polys = []
+                for cnt in contours:
+                    if len(cnt) < 3:
+                        continue
+                    poly = cnt.squeeze(1) if cnt.ndim == 3 else cnt
+                    poly = poly.astype(float)
+                    poly[:, 0] = np.clip(poly[:, 0] / w, 0.0, 1.0)
+                    poly[:, 1] = np.clip(poly[:, 1] / h, 0.0, 1.0)
+                    polys.append(poly.tolist())
+                if polys:
+                    polys_by_id[idx + 1] = polys
+            if polys_by_id:
+                payload["mask_polys"] = json.dumps(polys_by_id)
 
         response = httpx.post(
             f"{self.planner_url}/internal/label-marks",
-            files={"image": ("marks.png", buffer.tobytes(), "image/png")},
-            data={"mark_ids": ",".join(str(i) for i in mark_ids), "trace_id": trace_id},
+            files=files,
+            data=payload,
             timeout=self._timeout_s,
         )
         response.raise_for_status()

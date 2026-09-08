@@ -13,9 +13,9 @@
 (`perception_test_image.py:mask_3d`와 같은 방식).
 
 [속성도 VLM이 판단한다] `label_marks`는 원래 objects.yaml의 등록 클래스 어휘를 프롬프트에
-넣고 이름만 받아 왔고, 무게·파손위험·프로파일은 그 이름으로 objects.yaml에서 조회했다. 지금은
+넣고 이름만 받아 왔고, 무게·파손위험·파지 단계는 그 이름으로 objects.yaml에서 조회했다. 지금은
 어휘를 주지 않는다 — 사진만 보고 이름과 속성(mass_g/fragile/deformable/transparent)과 파지
-프로파일까지 모델이 정한다. **등록되지 않은 물건도 그 물건에 맞게 다뤄지지만, 파지력을 정하는
+단계(grip_level)까지 모델이 정한다. **등록되지 않은 물건도 그 물건에 맞게 다뤄지지만, 파지력을 정하는
 값이 모델 출력이 되었다는 뜻이기도 하다**(원래는 NFR-03a가 금지하던 것 — 대신 확신이 없으면
 조심스러운 쪽을 고르라고 프롬프트에 박고, `_normalize_marks`가 fragile 조합을 한 번 더
 강제한다). 되돌리려면 detector=yolo가 그대로 남아 있다.
@@ -323,7 +323,7 @@ def to_pixels(scene: VlmScene, width: int, height: int) -> list[dict]:
 class MarkLabel(BaseModel):
     """번호가 붙은 마스크 하나에 대한 판단. 이름뿐 아니라 **어떻게 다뤄야 하는지**까지 담는다.
 
-    속성(mass_g·fragile·deformable·transparent·profile)이 여기 들어온 뒤로 objects.yaml의
+    속성(mass_g·fragile·deformable·transparent·grip_level)이 여기 들어온 뒤로 objects.yaml의
     등록 클래스 표를 거치지 않는다 — 모듈 상단 [속성도 VLM이 판단한다] 참조.
     """
 
@@ -347,14 +347,46 @@ class MarkLabel(BaseModel):
     fragile: bool = Field(description="떨어뜨리거나 세게 쥐면 깨지는 물체면 true")
     deformable: bool = Field(description="쥐면 모양이 눌리거나 변하는 물체면 true")
     transparent: bool = Field(description="투명·반투명해서 속이 비쳐 보이면 true")
-    profile: Literal["normal", "fragile", "deformable"] = Field(
-        description="로봇이 이 물체를 쥐는 방식. 이 값이 실제 파지력·접근속도가 된다",
+    grip_level: Literal[1, 2, 3, 4, 5] = Field(
+        description="로봇이 이 물체를 쥐는 파지력 단계(1~5). 1=매우 강하게, 5=매우 약하게. "
+                    "이 값이 실제 파지력·접근속도가 된다",
     )
     confidence: float = Field(description="이 판단의 확신도 0.0~1.0")
     reasoning: str = Field(
-        description="이름·속성·profile 판단의 근거를 한 문장으로. 예: '포장 글자로 확인함' "
+        description="이름·속성·grip_level 판단의 근거를 한 문장으로. 예: '포장 글자로 확인함' "
                     "/ '흔한 물티슈 포장 형태'. is_object=false면 빈 문자열",
     )
+    mask_poly: list[list[list[float]]] = Field(
+        default_factory=list,
+        description="YOLO 학습용 마스크 윤곽선 좌표. 각 요소는 하나의 다각형(polygon), "
+                    "다각형은 [[x1,y1],[x2,y2],...] 형태의 정규화 좌표(0~1). "
+                    "SAM에서 추출 — 응답에만 사용, VLM 판단과 무관",
+    )
+
+
+def mask_to_polygons(mask: "np.ndarray") -> list[list[list[float]]]:
+    """SAM 마스크(bool ndarray) → YOLO 세그멘테이션용 정규화 다각형 좌표.
+
+    각 다각형은 [[x1,y1],[x2,y2],...] 형태로, 좌표는 이미지 크기로 나눠 0~1로 정규화된다.
+    음수 좌표(SAM 경계 오류)는 0으로 클리핑한다.
+    """
+    import cv2
+    import numpy as np
+
+    h, w = mask.shape[:2]
+    contours, _ = cv2.findContours(
+        mask.astype(np.uint8).copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+    )
+    polys = []
+    for cnt in contours:
+        if len(cnt) < 3:
+            continue
+        poly = cnt.squeeze(1) if cnt.ndim == 3 else cnt
+        poly = poly.astype(float)
+        poly[:, 0] = np.clip(poly[:, 0] / w, 0.0, 1.0)
+        poly[:, 1] = np.clip(poly[:, 1] / h, 0.0, 1.0)
+        polys.append(poly.tolist())
+    return polys
 
 
 class VlmMarkScene(BaseModel):
@@ -363,10 +395,11 @@ class VlmMarkScene(BaseModel):
     marks: list[MarkLabel] = Field(description="이미지에 그려진 모든 번호에 대한 판단")
 
 
-# [profile의 힘 수치는 여기 하드코딩되어 있다] 20N/12N/5N은 perception/config/objects.yaml의
-# profiles 블록과 control/config/skill_params.yaml에 있는 값을 프롬프트에 적어 둔 것이다.
-# 모델이 "얼마나 세게 쥐는지"를 모르면 profile을 고를 근거가 없어서 넣었는데, 저쪽 값을
-# 고치면 여기도 같이 고쳐야 한다 — 안 고쳐도 오류로는 보이지 않고 판단만 틀어진다.
+# [grip_level의 단계—힘 매핑은 여기 하드코딩되어 있다] 40/35/30/25/20N은
+# perception/config/objects.yaml의 grip_levels 블록과 control/config/skill_params.yaml에 있는
+# 값을 프롬프트에 적어 둔 것이다. 모델이 "얼마나 세게 쥐는지"를 모르면 단계를 고를 근거가
+# 없어서 넣었는데, 저쪽 값을 고치면 여기도 같이 고쳐야 한다 — 안 고쳐도 오류로는 보이지
+# 않고 판단만 틀어진다. **LLM은 단계만 고르고 단계→힘 변환은 하지 않는다.**
 SYSTEM_PROMPT_MARKS = """\
 당신은 협동로봇 분류 시스템의 시각 인지 모듈이다. 작업대를 위에서 내려다본 사진에 \
 세그멘테이션 모델이 뽑은 영역마다 **번호와 윤곽선**이 그려져 있다. 번호마다 그것이 무엇이고 \
@@ -388,8 +421,8 @@ is_object=true로 두고, 나머지 조각은 is_object=false + part_of=대표�
 4. 좌표는 답하지 않는다 — 이미 세그멘테이션 모델이 정확히 잡아 놓았다. 당신이 할 일은 \
 **그것이 무엇이고 어떻게 다뤄야 하는지**를 말하는 것이다.
 5. is_object=true인 번호마다 이름(class_name, name_ko)과 물리 속성(mass_g, fragile, \
-deformable, transparent), 그리고 파지 방식(profile)을 사진을 보고 직접 판단한다. \
-is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, profile은 fragile로 둔다.
+deformable, transparent), 그리고 파지력 단계(grip_level)를 사진을 보고 직접 판단한다. \
+is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, grip_level은 5로 둔다.
 6. is_object=true인 번호마다 reasoning에 판단 근거를 한 문장 적는다(예: "포장에 적힌 \
 글자로 확인함", "흔한 물티슈 포장 형태와 크기로 판단"). 작업자가 화면에서 왜 이렇게 \
 판단했는지 바로 알 수 있어야 한다 — "물체로 보임" 같은 동어반복은 쓰지 않는다.
@@ -411,14 +444,19 @@ is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, profile은
 - transparent: 투명·반투명해서 속이 비쳐 보이는 것. depth 센서가 표면을 놓치므로 중요하다.
 - **겉면 기준으로 본다.** 종이상자에 든 유리병은 로봇이 상자를 쥐므로 fragile이 아니다.
 
-[profile — 로봇이 이 물체를 쥐는 방법]
-여기서 고른 값이 **실제 파지력과 접근 속도로 그대로 들어간다.** 셋 중 하나다.
-- normal: 단단해서 쥐어도 형태가 유지되는 보통 물체. 세게(최대 20N) 빠르게 쥔다.
-- deformable: 쥐면 눌리는 물체. 약하게(12N) 천천히 쥔다.
-- fragile: 깨질 수 있거나 **무엇인지 확신이 서지 않는 물체**. 아주 약하게(5N) 아주 천천히 쥔다.
-고르는 순서: fragile=true면 fragile. 아니고 deformable=true면 deformable. 둘 다 아니면 normal.
-**확신이 없으면 한 단계 조심스러운 쪽으로 내린다** — 약하게 쥐면 놓치고 다시 잡으면 되지만, \
-세게 쥐면 물체가 부서지고 되돌릴 수 없다.
+[grip_level — 로봇이 이 물체를 쥐는 파지력 단계]
+여기서 고른 값이 **실제 파지력과 접근 속도로 그대로 들어간다.** 1에서 5까지이며, \
+**낮을수록 세게** 쥔다. 힘과 속도의 대략적인 느낌은:
+- 1 (매우 강하게, 약 40N): 엄청 단단하고 무거워서 세게 물어도 안전한 물체.
+- 2 (강하게, 약 35N): 단단한 보통 물체.
+- 3 (보통, 약 30N): 무난한 대부분의 물체. 기본값.
+- 4 (약하게, 약 25N): 쥐면 쉽게 눌리는 물체(치약 튜브, 비닐 팩, 봉제 인형)나 \
+조심해야 하는 물체.
+- 5 (매우 약하게, 약 20N): 깨지기 쉬운 것, 또는 **무엇인지 확신이 서지 않는 물체**.
+고르는 순서: fragile=true거나 확신이 없으면 5. 아니고 deformable=true면 4. 아니면 3.
+**단계만 고르고 힘(N) 값은 직접 말하지 않는다** — 단계→힘 변환은 시스템이 한다. \
+**확신이 없으면 한 단계 조심스러운 쪽(숫자를 더 크게)으로 내린다** — 약하게 쥐면 놓치고 \
+다시 잡으면 되지만, 세게 쥐면 물체가 부서지고 되돌릴 수 없다.
 
 [확신이 없으면 검색으로 확인한다]
 겉모습만으로 종류를 짐작하면 비슷하게 생긴 다른 물건과 혼동한다(예: 치약 튜브를 초콜릿 바로
@@ -430,7 +468,7 @@ is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, profile은
    (물티슈 팩, 우산, 봉제 인형처럼) 검색 없이 바로 답한다 — 매번 검색하지 않는다.
 4. 검색해도 특정할 수 없으면, 알아낸 범주까지만 이름에 담고(예: 정확한 브랜드 대신
    toothpaste) confidence를 낮춘다. 지어내지 않는다.
-**이 확인은 class_name/name_ko뿐 아니라 mass_g·fragile·deformable·transparent·profile에도
+**이 확인은 class_name/name_ko뿐 아니라 mass_g·fragile·deformable·transparent·grip_level에도
 그대로 적용된다** — 무엇인지 잘못 알면 속성도 따라서 잘못된다.
 
 [하지 않는 것]
@@ -459,7 +497,7 @@ def build_marks_prompt(mark_ids: list[int],
 def label_marks(image: pathlib.Path | str, mark_ids: list[int],
                 image_size: tuple[int, int] | None = None,
                 model: str | None = None, detail: str = "high") -> VlmMarkScene:
-    """번호가 그려진 이미지 → 번호별 판단(이름·속성·파지 프로파일).
+    """번호가 그려진 이미지 → 번호별 판단(이름·속성·파지 단계).
 
     `detect`와 다른 점이 셋 있다. 좌표를 묻지 않고(SAM이 이미 만들었다), 등록 클래스 어휘를
     주지 않으며(모듈 상단 [속성도 VLM이 판단한다]), **사용자의 지시를 넣지 않는다.** 지시를 함께 주면 인지가 지시에 끌려간다 — 2026-09-07 실측에서 "우산
@@ -504,7 +542,7 @@ def label_marks(image: pathlib.Path | str, mark_ids: list[int],
     logger.info(
         "VLM 마크 라벨링: model=%s marks=%d objects=%d 검색=%d회 (%s)",
         model, len(scene.marks), len(objects), searched,
-        ", ".join(f"{m.mark_id}:{m.class_name}/{m.profile}" for m in objects) or "없음",
+        ", ".join(f"{m.mark_id}:{m.class_name}/g{m.grip_level}" for m in objects) or "없음",
     )
     return scene
 
@@ -528,17 +566,19 @@ def _normalize_marks(scene: VlmMarkScene, mark_ids: list[int]) -> VlmMarkScene:
         if m.is_object:
             m.part_of = 0                    # 대표 조각은 누구의 조각도 아니다
             m.mass_g = max(0.0, float(m.mass_g or 0.0))
-            # profile은 스키마가 셋 중 하나로 강제하지만, 속성과 어긋나는 조합은 남는다.
-            # 조심스러운 쪽으로만 내린다 — 프롬프트로 부탁한 것을 여기서 한 번 더 지킨다.
+            # grip_level은 스키마가 1~5로 강제하지만, 속성과 어긋나는 조합은 남는다.
+            # 조심스러운 쪽(숫자를 더 큰 쪽)으로만 내린다 — 프롬프트로 부탁한 것을 여기서
+            # 한 번 더 지킨다.
+            grip = int(m.grip_level)
             if m.fragile:
-                m.profile = "fragile"
-            elif m.deformable and m.profile == "normal":
-                m.profile = "deformable"
+                m.grip_level = 5             # 깨질 수 있으면 최대한 약하게
+            elif m.deformable and grip < 4:
+                m.grip_level = 4             # 눌리는 물체는 약하게
         else:
             m.class_name, m.name_ko, m.reasoning = "", "", ""
             m.mass_g = 0.0
             m.fragile = m.deformable = m.transparent = False
-            m.profile = "fragile"            # 물체가 아니므로 쓰이지 않지만 값은 보수적으로
+            m.grip_level = 5                 # 물체가 아니므로 쓰이지 않지만 값은 보수적으로
         marks.append(m)
     scene.marks = marks
 

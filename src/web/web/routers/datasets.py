@@ -35,4 +35,4 @@ def dataset_image(item_id: str):
             content={"schema_version": "1.0.0",
                      "error": {"code": "NOT_FOUND", "message": f"'{item_id}'를 찾을 수 없습니다"}},
         )
-    return FileResponse(image_path, media_type="image/png")
+    return FileResponse(image_path, media_type=("image/png" if image_path.endswith(".png") else "image/jpeg"))

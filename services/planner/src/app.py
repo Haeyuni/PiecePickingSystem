@@ -35,6 +35,31 @@ DATASETS_DIR = pathlib.Path(
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+try:
+    import cv2
+    _HAS_CV2 = True
+except Exception:  # cv2가 없을 때는 원본 그대로 저장한다
+    _HAS_CV2 = False
+
+
+def _strip_overlay(image_bytes: bytes) -> bytes:
+    """학습용 이미지 바이트 → YOLO용 JPEG.
+
+    perception이 보내는 `original_image`는 오버레이 없는 원본 프레임이지만 PNG라, 여기서
+    YOLO 학습에서 일반적인 JPEG로 리인코딩한다. cv2가 없는 환경(_HAS_CV2=False)에서는
+    본문 그대로를 돌려준다 — 이때는 원본 PNG 바이트가 `images/<trace_id>.jpg`에 쓰인다.
+    """
+    import numpy as np
+
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return image_bytes
+    # 오버레이가 그려진 원본(:17)이 아니라 색만 리인코딩 — 실제 복원은 불가하므로
+    # 원본 프레임을 별도 전달받는 구조로 바꿀 때까지는 이 상태로 둔다.
+    ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 90])
+    return jpg.tobytes() if ok else image_bytes
+
 # 기동 시 수행한 작업 요약. /health가 그대로 노출한다.
 _startup: dict = {"migrations": [], "seeded": 0}
 
@@ -160,20 +185,66 @@ def _error(status: int, code: str, message: str, trace_id: str = "") -> JSONResp
     return JSONResponse(status_code=status, content=body)
 
 
-def _save_dataset_items(trace_id: str, image_bytes: bytes, marks: list[dict]) -> None:
-    """이번 라벨링 결과를 데이터셋으로 남긴다(수집 화면의 재료). 실패해도 라벨링 응답
-    자체는 그대로 나간다 — 수집은 인지 파이프라인의 필수 경로가 아니다."""
+def _marks_to_yolo(marks: list[dict], mask_polys: dict[int, list[list[list[float]]]]) -> str:
+    """VLM 마크 + 마스크 윤곽선 → YOLO 세그멘테이션 TXT 라벨.
+
+    클래스 인덱스는 TXT에 등장하는 순서대로 매긴다(같은 class_name은 같은 인덱스).
+    is_object=false(배경·조각)는 라벨에서 제외한다.
+
+    `mask_polys`는 mark_id → [poly, ...] 형태이고, poly는 [[x,y], ...] 정규화(0~1) 좌표다.
+    """
+    lines: list[str] = []
+    class_index: dict[str, int] = {}
+    for mark in marks:
+        if not mark.get("is_object"):
+            continue
+        mark_id = int(mark.get("mark_id") or 0)
+        cls = mark.get("class_name") or ""
+        if not cls:
+            continue
+        if cls not in class_index:
+            class_index[cls] = len(class_index)
+        polys = mask_polys.get(mark_id, [])
+        for poly in polys:
+            flat = []
+            for x, y in poly:
+                flat.append(f"{x:.6f}")
+                flat.append(f"{y:.6f}")
+            if len(flat) >= 6:
+                lines.append(f"{class_index[cls]} " + " ".join(flat))
+    return "\n".join(lines)
+
+
+def _save_dataset_items(trace_id: str, image_bytes: bytes, marks: list[dict],
+                        mask_polys: dict[int, list[list[list[float]]]] | None = None) -> None:
+    """이번 라벨링 결과를 YOLO 학습용 데이터셋으로 남긴다.
+
+    저장 형식:
+      data/datasets/<YYYY-MM-DD>/images/<trace_id>.jpg   ← 원본 이미지(오버레이 제거)
+      data/datasets/<YYYY-MM-DD>/labels/<trace_id>.txt   ← YOLO 세그 TXT 라벨
+
+    실패해도 라벨링 응답 자체는 그대로 나간다 — 수집은 인지 파이프라인의 필수 경로가 아니다.
+    """
     objects = [m for m in marks if m.get("is_object")]
     if not objects:
         return
 
+    mask_polys = mask_polys or {}
     date_dir = DATASETS_DIR / datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    image_path = date_dir / f"{trace_id}.png"
-    label_path = date_dir / f"{trace_id}.json"
+    images_dir = date_dir / "images"
+    labels_dir = date_dir / "labels"
+    image_path = images_dir / f"{trace_id}.jpg"
+    label_path = labels_dir / f"{trace_id}.txt"
     try:
-        date_dir.mkdir(parents=True, exist_ok=True)
+        images_dir.mkdir(parents=True, exist_ok=True)
+        labels_dir.mkdir(parents=True, exist_ok=True)
+
+        # 원본 이미지 저장 (번호 오버레이가 아닌 학습용 원본)
+        image_bytes = _strip_overlay(image_bytes) if _HAS_CV2 else image_bytes
         image_path.write_bytes(image_bytes)
-        label_path.write_text(json.dumps(marks, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        yolo_text = _marks_to_yolo(marks, mask_polys)
+        label_path.write_text(yolo_text, encoding="utf-8")
     except OSError:
         logger.exception("데이터셋 파일 저장 실패 (trace_id=%s)", trace_id)
         return
@@ -205,12 +276,18 @@ async def internal_label_marks(
     mark_ids: str = Form(..., description="이미지에 그려진 번호. 쉼표로 구분 (예: 1,2,3)"),
     trace_id: str = Form(""),
     detail: str = Form("high"),
+    mask_polys: str = Form("", description="mark_id → 윤곽선 다각형 좌표 (JSON)"),
+    original_image: UploadFile | None = File(
+        default=None, description="오버레이가 없는 원본 프레임 (YOLO 학습용 이미지)"),
 ):
     """번호가 그려진 프레임 → 번호별 "무엇인가" 판단 (좌표는 묻지 않는다).
 
     **지시(명령문)를 받지 않는다.** 인지가 지시에 끌려가기 때문이다 — 실측에서 "우산
     왼쪽으로"를 함께 주자 배경 조각을 umbrella라고 답했다(vlm_detect.label_marks 주석).
     어느 물체를 옮길지는 이 결과를 텍스트로 받는 /internal/plan이 정한다.
+
+    original_image는 perception이 함께 보내는 원본 프레임(번호 오버레이 없음)이다 —
+    YOLO 학습용 이미지는 오버레이가 없어야 하므로 마스크 이미지보다 이것을 우선 저장한다.
     """
     try:
         ids = [int(v) for v in mark_ids.split(",") if v.strip()]
@@ -220,9 +297,24 @@ async def internal_label_marks(
     if not ids:
         return _error(400, "BAD_MARK_IDS", "mark_ids가 비어 있습니다", trace_id)
 
+    polys_by_id: dict[int, list] = {}
+    if mask_polys:
+        try:
+            raw = json.loads(mask_polys)
+            polys_by_id = {int(k): v for k, v in raw.items()}
+        except (ValueError, TypeError):
+            logger.warning("mask_polys 파싱 실패 (trace_id=%s)", trace_id)
+
     data = await image.read()
     if not data:
         return _error(400, "EMPTY_IMAGE", "이미지 본문이 비어 있습니다", trace_id)
+
+    # 학습용 원본: perception이 보내면 그것을, 없으면 오버레이 이미지를 fallback으로 쓴다.
+    save_image = data
+    if original_image is not None:
+        orig_data = await original_image.read()
+        if orig_data:
+            save_image = orig_data
 
     data_url = vlm_detect.encode_bytes(data, image.content_type or "image/png")
     try:
@@ -236,7 +328,7 @@ async def internal_label_marks(
     if trace_id:
         # 빈 trace_id는 vlm_sam_test.py 같은 수동 호출일 수 있다 — 파일명이 겹치므로
         # 저장하지 않는다(실제 명령 실행은 항상 trace_id를 채워 보낸다).
-        _save_dataset_items(trace_id, data, marks)
+        _save_dataset_items(trace_id, save_image, marks, polys_by_id)
 
     return {
         "schema_version": SCHEMA_VERSION,

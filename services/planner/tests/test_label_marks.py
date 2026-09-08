@@ -7,6 +7,7 @@
 실행: docker compose exec planner python -m unittest discover -s tests -t .
 """
 import io
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,10 +27,12 @@ PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
 
 
 def post(image: bytes = PNG, **form):
+    files = {"image": ("marks.png", io.BytesIO(image), "image/png")}
+    original = form.pop("original_image", None)
+    if original is not None:
+        files["original_image"] = ("original.png", io.BytesIO(original), "image/png")
     data = {"mark_ids": "1,2", **form}
-    return client.post("/internal/label-marks",
-                       files={"image": ("marks.png", io.BytesIO(image), "image/png")},
-                       data=data)
+    return client.post("/internal/label-marks", files=files, data=data)
 
 
 class LabelMarksTest(unittest.TestCase):
@@ -46,12 +49,12 @@ class LabelMarksTest(unittest.TestCase):
                 vlm_detect.MarkLabel(mark_id=1, is_object=True, part_of=0,
                                      class_name="toothpaste", name_ko="치약",
                                      mass_g=150.0, fragile=False, deformable=True,
-                                     transparent=False, profile="deformable",
+                                     transparent=False, grip_level=4,
                                      confidence=0.9, reasoning="흔한 치약 튜브 형태"),
                 vlm_detect.MarkLabel(mark_id=2, is_object=False, part_of=0, class_name="",
                                      name_ko="", mass_g=0.0, fragile=False,
                                      deformable=False, transparent=False,
-                                     profile="fragile", confidence=0.9, reasoning=""),
+                                     grip_level=5, confidence=0.9, reasoning=""),
             ])
 
         vlm_detect.label_marks = fake
@@ -72,12 +75,12 @@ class LabelMarksTest(unittest.TestCase):
         self.assertEqual(body["marks"][0]["class_name"], "toothpaste")
 
     def test_attributes_reach_perception(self):
-        """무게·파지 프로파일까지 응답에 실려야 한다 — perception은 objects.yaml을 안 본다."""
+        """무게·파지력 단계까지 응답에 실려야 한다 — perception은 objects.yaml을 안 본다."""
         mark = post().json()["marks"][0]
 
         self.assertEqual(mark["mass_g"], 150.0)
         self.assertTrue(mark["deformable"])
-        self.assertEqual(mark["profile"], "deformable")
+        self.assertEqual(mark["grip_level"], 4)
 
     def test_reasoning_reaches_the_response(self):
         """판단 근거가 화면에 뜨려면 이 응답에 실려 나가야 한다 (물체 판단 근거 표시)."""
@@ -87,21 +90,63 @@ class LabelMarksTest(unittest.TestCase):
         self.assertEqual(marks[1]["reasoning"], "")   # is_object=false는 빈 문자열
 
     def test_dataset_item_is_saved_when_trace_id_is_given(self):
-        """실제 명령 실행(trace_id 있음)마다 이미지+라벨 JSON을 남긴다 (데이터셋 수집)."""
-        response = post(trace_id="tr-dataset-1")
+        """실제 명령 실행(trace_id 있음)마다 원본 이미지 + YOLO TXT 라벨을 남긴다
+        (YOLO 학습용 데이터셋 수집)."""
+        poly = json.dumps({"1": [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]]})
+        response = post(trace_id="tr-dataset-1", mask_polys=poly)
         self.assertEqual(response.status_code, 200)
 
-        saved = list(app_module.DATASETS_DIR.rglob("tr-dataset-1.*"))
-        names = {p.name for p in saved}
-        self.assertEqual(names, {"tr-dataset-1.png", "tr-dataset-1.json"})
+        saved = {p for p in app_module.DATASETS_DIR.rglob("tr-dataset-1.*")}
+        self.assertEqual({p.suffix for p in saved}, {".jpg", ".txt"})
 
-        image_path = next(p for p in saved if p.suffix == ".png")
-        self.assertEqual(image_path.read_bytes(), PNG)
+        image_path = next(p for p in saved if p.suffix == ".jpg")
+        # 원본 이미지(오버레이 있는 PNG 본문)로 저장된다 — cv2가 없으면 리인코딩 생략.
+        if not app_module._HAS_CV2:
+            self.assertEqual(image_path.read_bytes(), PNG)
 
-        label_path = next(p for p in saved if p.suffix == ".json")
-        import json
-        saved_marks = json.loads(label_path.read_text(encoding="utf-8"))
-        self.assertEqual([m["class_name"] for m in saved_marks], ["toothpaste", ""])
+        # YOLO 세그 TXT: "class_id x1 y1 x2 y2 ..." 형태. is_object=false는 제외.
+        label_path = next(p for p in saved if p.suffix == ".txt")
+        lines = label_path.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(
+            lines[0],
+            "0 0.100000 0.100000 0.900000 0.100000 0.900000 0.900000 0.100000 0.900000",
+        )
+
+    def test_mask_polys_are_used_for_txt_labeling(self):
+        """마스크 윤곽선 좌표(mask_polys)가 넘어오면 YOLO TXT에 반영되어야 한다."""
+        poly = json.dumps({"1": [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]]})
+        response = post(trace_id="tr-poly", mask_polys=poly)
+        self.assertEqual(response.status_code, 200)
+
+        saved = {p for p in app_module.DATASETS_DIR.rglob("tr-poly.txt")}
+        self.assertEqual(len(saved), 1)
+        label_path = next(iter(saved))
+        lines = label_path.read_text(encoding="utf-8").strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        head, coords = lines[0].split(" ", 1)
+        self.assertEqual(head, "0")
+        self.assertEqual(coords, "0.100000 0.100000 0.900000 0.100000 0.900000 0.900000 0.100000 0.900000")
+
+    def test_mask_to_polygons_normalizes_and_clips(self):
+        """마스크 윤곽선 → 정규화(0~1) 다각형 좌표. cv2가 없으면 건너뛴다."""
+        if not app_module._HAS_CV2:
+            self.skipTest("cv2 없음")
+
+        import numpy as np
+
+        mask = np.zeros((40, 50), dtype=bool)
+        mask[10:30, 15:35] = True
+        polys = vlm_detect.mask_to_polygons(mask)
+
+        self.assertEqual(len(polys), 1)
+        for x, y in polys[0]:
+            self.assertGreaterEqual(x, 0.0)
+            self.assertLessEqual(x, 1.0)
+            self.assertGreaterEqual(y, 0.0)
+            self.assertLessEqual(y, 1.0)
+        # 원본 50x40의 박스 [15:35, 10:30] → 정규화
+        self.assertEqual(polys[0][0], [0.3, 0.25])
 
     def test_dataset_item_is_not_saved_without_trace_id(self):
         """수동 테스트 스크립트(vlm_sam_test.py)처럼 trace_id가 없는 호출은 저장하지 않는다
@@ -109,6 +154,19 @@ class LabelMarksTest(unittest.TestCase):
         post()  # trace_id 생략
 
         self.assertEqual(list(app_module.DATASETS_DIR.iterdir()), [])
+
+    def test_original_image_becomes_the_training_image(self):
+        """perception이 보낸 원본(오버레이 없음)이 학습용 이미지로 저장된다 —
+        번호가 그려진 마크 프레임(vlm 라벨링용)과 구분해서 쓰기 위함이다."""
+        original = b"\x89PNG\r\n\x1a\n" + b"ORIGINAL-PNG-BYTES"
+        poly = json.dumps({"1": [[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]]]})
+        response = post(trace_id="tr-orig", mask_polys=poly, original_image=original)
+        self.assertEqual(response.status_code, 200)
+
+        image_path = next(p for p in app_module.DATASETS_DIR.rglob("tr-orig.jpg"))
+        # cv2 없이도 원본 바이트가 저장된다(리인코딩 fallback). cv2가 있으면 JPEG로 변환.
+        if not app_module._HAS_CV2:
+            self.assertEqual(image_path.read_bytes(), original)
 
     def test_registered_classes_are_not_sent_to_the_vlm(self):
         """등록 클래스 어휘를 주지 않는 것이 이 경로의 전제다 (vlm_detect 상단 주석).
