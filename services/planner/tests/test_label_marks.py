@@ -7,15 +7,19 @@
 실행: docker compose exec planner python -m unittest discover -s tests -t .
 """
 import io
+import tempfile
 import unittest
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from src import app as app_module
 from src import vlm_detect
 
-# TestClient를 with 없이 쓰면 lifespan(마이그레이션·시드)이 돌지 않는다 — 이 엔드포인트는
-# DB를 쓰지 않으므로 그대로 둔다.
+# TestClient를 with 없이 쓰면 lifespan(마이그레이션·시드)이 돌지 않는다 — 이 엔드포인트
+# 자체는 DB 연결 없이도 응답한다(DB 쓰기는 물체 있는 응답마다 시도되지만 실패해도
+# 조용히 넘어간다 — _save_dataset_items 참조). DATASETS_DIR는 setUp에서 임시 디렉터리로
+# 바꿔 둔다 — 안 바꾸면 테스트가 실제 저장소의 data/datasets/에 파일을 남긴다.
 client = TestClient(app_module.app)
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 32
@@ -31,6 +35,9 @@ def post(image: bytes = PNG, **form):
 class LabelMarksTest(unittest.TestCase):
     def setUp(self):
         self._real = vlm_detect.label_marks
+        self._real_datasets_dir = app_module.DATASETS_DIR
+        self._tmp_datasets_dir = tempfile.TemporaryDirectory()
+        app_module.DATASETS_DIR = Path(self._tmp_datasets_dir.name)
         self.calls = []
 
         def fake(image, mark_ids, **kwargs):
@@ -51,6 +58,8 @@ class LabelMarksTest(unittest.TestCase):
 
     def tearDown(self):
         vlm_detect.label_marks = self._real
+        app_module.DATASETS_DIR = self._real_datasets_dir
+        self._tmp_datasets_dir.cleanup()
 
     def test_returns_marks_and_versions(self):
         response = post(trace_id="tr-1")
@@ -76,6 +85,30 @@ class LabelMarksTest(unittest.TestCase):
 
         self.assertEqual(marks[0]["reasoning"], "흔한 치약 튜브 형태")
         self.assertEqual(marks[1]["reasoning"], "")   # is_object=false는 빈 문자열
+
+    def test_dataset_item_is_saved_when_trace_id_is_given(self):
+        """실제 명령 실행(trace_id 있음)마다 이미지+라벨 JSON을 남긴다 (데이터셋 수집)."""
+        response = post(trace_id="tr-dataset-1")
+        self.assertEqual(response.status_code, 200)
+
+        saved = list(app_module.DATASETS_DIR.rglob("tr-dataset-1.*"))
+        names = {p.name for p in saved}
+        self.assertEqual(names, {"tr-dataset-1.png", "tr-dataset-1.json"})
+
+        image_path = next(p for p in saved if p.suffix == ".png")
+        self.assertEqual(image_path.read_bytes(), PNG)
+
+        label_path = next(p for p in saved if p.suffix == ".json")
+        import json
+        saved_marks = json.loads(label_path.read_text(encoding="utf-8"))
+        self.assertEqual([m["class_name"] for m in saved_marks], ["toothpaste", ""])
+
+    def test_dataset_item_is_not_saved_without_trace_id(self):
+        """수동 테스트 스크립트(vlm_sam_test.py)처럼 trace_id가 없는 호출은 저장하지 않는다
+        — 파일명이 겹치기 때문이다."""
+        post()  # trace_id 생략
+
+        self.assertEqual(list(app_module.DATASETS_DIR.iterdir()), [])
 
     def test_registered_classes_are_not_sent_to_the_vlm(self):
         """등록 클래스 어휘를 주지 않는 것이 이 경로의 전제다 (vlm_detect 상단 주석).

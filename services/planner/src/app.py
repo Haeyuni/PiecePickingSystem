@@ -9,8 +9,11 @@ B?: /internal/label-marks (SAM이 번호를 그린 프레임 → 번호별 클�
 GPU라 perception에 두고, 번호를 그린 이미지만 여기로 보내 이름을 받아 간다
 (docs/on-demand-perception.md 4절).
 """
+import datetime
 import json
 import logging
+import os
+import pathlib
 import uuid
 from contextlib import asynccontextmanager
 
@@ -20,6 +23,14 @@ from fastapi.responses import JSONResponse
 
 from . import db, grounding, llm_client, seed, validator, vlm_detect
 from .schema import SCHEMA_VERSION, PlanRequest, PlanResponse
+
+# data/datasets/<날짜>/<trace_id>.{png,json} — Roboflow 스타일 수집 화면의 재료
+# (database/migrations/003_dataset_items.sql). vlm_detect.OBJECTS_YAML과 같은 방식으로
+# 저장소 루트를 계산한다 — planner는 perception_common(ROS 패키지)에 의존하지 않는다.
+DATASETS_DIR = pathlib.Path(
+    os.environ.get("DATASETS_DIR")
+    or pathlib.Path(__file__).resolve().parents[3] / "data" / "datasets"
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -149,6 +160,45 @@ def _error(status: int, code: str, message: str, trace_id: str = "") -> JSONResp
     return JSONResponse(status_code=status, content=body)
 
 
+def _save_dataset_items(trace_id: str, image_bytes: bytes, marks: list[dict]) -> None:
+    """이번 라벨링 결과를 데이터셋으로 남긴다(수집 화면의 재료). 실패해도 라벨링 응답
+    자체는 그대로 나간다 — 수집은 인지 파이프라인의 필수 경로가 아니다."""
+    objects = [m for m in marks if m.get("is_object")]
+    if not objects:
+        return
+
+    date_dir = DATASETS_DIR / datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+    image_path = date_dir / f"{trace_id}.png"
+    label_path = date_dir / f"{trace_id}.json"
+    try:
+        date_dir.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(image_bytes)
+        label_path.write_text(json.dumps(marks, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError:
+        logger.exception("데이터셋 파일 저장 실패 (trace_id=%s)", trace_id)
+        return
+
+    try:
+        with psycopg.connect(db.dsn(), connect_timeout=3) as conn, conn.cursor() as cur:
+            for obj in objects:
+                cur.execute(
+                    """
+                    INSERT INTO dataset_items (
+                        item_id, trace_id, image_path, label_path,
+                        class_name, name_ko, attr_source, confidence, reasoning
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        str(uuid.uuid4()), trace_id, str(image_path), str(label_path),
+                        obj.get("class_name"), obj.get("name_ko"), "llm_suggested",
+                        obj.get("confidence"), obj.get("reasoning"),
+                    ),
+                )
+            conn.commit()
+    except Exception:
+        logger.exception("dataset_items 기록 실패 (trace_id=%s)", trace_id)
+
+
 @app.post("/internal/label-marks")
 async def internal_label_marks(
     image: UploadFile = File(..., description="SAM 마스크마다 번호를 그려 넣은 프레임"),
@@ -182,12 +232,18 @@ async def internal_label_marks(
         # 하위 서비스(VLM API) 장애는 503 — /internal/plan의 LLM 장애와 같은 판단이다
         return _error(503, "VLM_UNAVAILABLE", f"라벨링에 실패했습니다: {e}", trace_id)
 
+    marks = [m.model_dump() for m in scene.marks]
+    if trace_id:
+        # 빈 trace_id는 vlm_sam_test.py 같은 수동 호출일 수 있다 — 파일명이 겹치므로
+        # 저장하지 않는다(실제 명령 실행은 항상 trace_id를 채워 보낸다).
+        _save_dataset_items(trace_id, data, marks)
+
     return {
         "schema_version": SCHEMA_VERSION,
         "trace_id": trace_id,
         "model": vlm_detect.model_name(),
         "prompt_version": vlm_detect.MARKS_PROMPT_VERSION,
-        "marks": [m.model_dump() for m in scene.marks],
+        "marks": marks,
     }
 
 

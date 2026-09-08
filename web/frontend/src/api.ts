@@ -1,5 +1,5 @@
 /** web 백엔드 호출 (웹_인터페이스_정의서.md 2절). */
-import type { ApprovalAction, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
+import type { ApprovalAction, DatasetItem, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
 
 export interface ApiError {
   code: string
@@ -91,4 +91,29 @@ export function submitApproval(traceId: string, body: ApprovalAction) {
     `/api/executions/${traceId}/approval`,
     { method: 'POST', body: JSON.stringify({ schema_version: '1.0.0', ...body }) },
   )
+}
+
+export function getDatasetItems(params: Record<string, string> = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request<{ items: DatasetItem[] }>(`/api/datasets${query ? `?${query}` : ''}`)
+}
+
+export interface SttResult {
+  recognized_text: string
+  confidence: number
+  low_confidence: boolean
+}
+
+/** multipart라 request()의 JSON Content-Type을 쓰지 않는다 — 브라우저가 boundary를
+ * 직접 채워야 하므로 Content-Type 헤더를 아예 지정하지 않는다. */
+export async function transcribeAudio(audio: Blob): Promise<SttResult> {
+  const form = new FormData()
+  form.append('audio', audio, 'command.webm')
+  const response = await fetch('/api/stt', { method: 'POST', body: form })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const error: ApiError = body.error ?? { code: 'UNKNOWN', message: `HTTP ${response.status}` }
+    throw error
+  }
+  return body as SttResult
 }
