@@ -5,6 +5,7 @@ multipart 스트림으로 흘려보낸다. mock 모드나 카메라가 아직 �
 executor가 None을 돌려주므로 204로 답한다 — <img> 태그가 깨진 아이콘 대신 onError로
 빈 자리를 보여줄 수 있게(CameraViews.tsx 참조).
 
+/api/camera/raw는 리얼센스가 내는 원본 컬러 프레임 그대로다 — 기본 카메라 뷰(2026-09-08).
 /api/camera/color는 원본이 아니라 grasp가 발행하는 /grasp/debug_image(검출 오버레이 +
 파지 후보점)를 중계한다 — ros_bridge.py의 _BridgeNode 구독 참조. grasp가 아직 관측을
 한 번도 처리하지 못했으면(예: 로봇 자세 미수신) 다른 스트림과 마찬가지로 204다.
@@ -39,6 +40,12 @@ def _stream_or_204(get_frame):
         _mjpeg(get_frame),
         media_type=f"multipart/x-mixed-replace; boundary={BOUNDARY}",
     )
+
+
+@router.get("/api/camera/raw")
+async def raw_color_stream(request: Request):
+    executor = request.app.state.executor
+    return _stream_or_204(executor.latest_raw_color_jpeg)
 
 
 @router.get("/api/camera/color")

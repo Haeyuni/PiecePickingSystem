@@ -177,8 +177,10 @@ class _BridgeNode(Node):
         # 73%를 계속 쓰고 있었고(2026-09-06), 그 부하가 같은 호스트의 로봇 드라이버·
         # DDS와 자원을 다퉜다. 스트림 라우터는 10FPS로만 당겨가고(routers/camera.py),
         # 아무도 안 볼 땐 아예 안 당겨간다 — 그만큼만 일하면 된다.
+        self._latest_raw_color_msg: Image | None = None
         self._latest_color_msg: Image | None = None
         self._latest_depth_msg: Image | None = None
+        self._raw_color_jpeg_cache: tuple[Image, bytes | None] | None = None
         self._color_jpeg_cache: tuple[Image, bytes | None] | None = None
         self._depth_jpeg_cache: tuple[Image, bytes | None] | None = None
         self.on_event: Callable[[dict], None] | None = None
@@ -187,11 +189,16 @@ class _BridgeNode(Node):
         self.create_subscription(RobotState, "/control/robot_state", self._on_robot_state, 10)
         self.create_subscription(SafetyEvent, "/control/safety_events", self._on_safety_event, 10)
 
-        # 카메라 뷰는 grasp의 검출+파지후보 오버레이(위 주석 참조), 뎁스 뷰는 리얼센스
-        # 드라이버가 직접 내는 원본이다. 이미지 토픽은 대역폭이 커서 BEST_EFFORT — 화면
-        # 프레임 하나 놓쳐도 다음 프레임이 금방 오므로 재전송을 기다릴 이유가 없다
-        # (grasp의 depth 구독과 같은 QoS 선택, grasp/node.py 참조).
+        # 기본 카메라 뷰는 리얼센스가 내는 원본(/camera/color/image_raw) — 명령 사이에도
+        # 항상 실시간으로 보여야 "카메라가 살아있다"를 바로 알 수 있다(2026-09-08 요청).
+        # 관측 결과 뷰(grasp의 검출+파지후보 오버레이)는 별도 스트림으로 그 아래 둔다 —
+        # 온디맨드 관측이라 명령이 들어와야만 갱신되고, 그 전까지는 마지막 결과가 그대로
+        # 남아 있다(사진처럼). 뎁스 뷰는 리얼센스가 내는 원본 그대로다. 이미지 토픽은
+        # 대역폭이 커서 BEST_EFFORT — 화면 프레임 하나 놓쳐도 다음 프레임이 금방 오므로
+        # 재전송을 기다릴 이유가 없다(grasp의 depth 구독과 같은 QoS 선택, grasp/node.py 참조).
         image_qos = QoSProfile(depth=2, reliability=ReliabilityPolicy.BEST_EFFORT)
+        self.create_subscription(Image, "/camera/color/image_raw", self._on_raw_color_image,
+                                 image_qos)
         self.create_subscription(Image, "/grasp/debug_image", self._on_color_image,
                                  image_qos)
         self.create_subscription(Image, "/camera/aligned_depth_to_color/image_raw",
@@ -239,9 +246,16 @@ class _BridgeNode(Node):
         if changed and self.on_event:
             self.on_event({"type": "robot_state", **state})
 
+    def _on_raw_color_image(self, msg: Image) -> None:
+        if msg.encoding not in ("bgr8", "rgb8"):
+            self.get_logger().warning(f"카메라 뷰(원본): 지원하지 않는 인코딩 {msg.encoding}",
+                                      throttle_duration_sec=10.0)
+            return
+        self._latest_raw_color_msg = msg
+
     def _on_color_image(self, msg: Image) -> None:
         if msg.encoding not in ("bgr8", "rgb8"):
-            self.get_logger().warning(f"카메라 뷰: 지원하지 않는 인코딩 {msg.encoding}",
+            self.get_logger().warning(f"관측 결과 뷰: 지원하지 않는 인코딩 {msg.encoding}",
                                       throttle_duration_sec=10.0)
             return
         self._latest_color_msg = msg
@@ -263,6 +277,11 @@ class _BridgeNode(Node):
             return cache[1], cache
         jpeg = _encode_jpeg(to_bgr(msg))
         return jpeg, (msg, jpeg)
+
+    def raw_color_jpeg(self) -> bytes | None:
+        jpeg, self._raw_color_jpeg_cache = self._jpeg_of(
+            self._latest_raw_color_msg, self._raw_color_jpeg_cache, _color_to_bgr)
+        return jpeg
 
     def color_jpeg(self) -> bytes | None:
         jpeg, self._color_jpeg_cache = self._jpeg_of(
@@ -316,6 +335,9 @@ class RosExecutor:
 
     def robot_state(self) -> dict:
         return self._node.latest_robot_state if self._node else {"mode": "error"}
+
+    def latest_raw_color_jpeg(self) -> bytes | None:
+        return self._node.raw_color_jpeg() if self._node else None
 
     def latest_color_jpeg(self) -> bytes | None:
         return self._node.color_jpeg() if self._node else None

@@ -78,8 +78,11 @@ class MockExecutor:
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
         self._on_event = on_event
 
-    def latest_color_jpeg(self) -> bytes | None:
+    def latest_raw_color_jpeg(self) -> bytes | None:
         """mock에는 카메라가 없다 — 화면은 스트림 없음으로 처리한다."""
+        return None
+
+    def latest_color_jpeg(self) -> bytes | None:
         return None
 
     def latest_depth_jpeg(self) -> bytes | None:

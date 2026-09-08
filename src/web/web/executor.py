@@ -71,11 +71,18 @@ class Executor(Protocol):
     def robot_state(self) -> dict:
         """최신 RobotState. 최소한 mode를 포함한다 (2.1절 busy 차단 판단에 쓰인다)."""
 
+    def latest_raw_color_jpeg(self) -> bytes | None:
+        """리얼센스가 내는 원본 컬러 프레임(JPEG), 오버레이 없음. 기본 "카메라 뷰"가 이걸
+        보여준다(2026-09-08) — 명령 사이에도 항상 실시간이라 카메라가 살아있는지 바로
+        보인다. 아직 못 받았거나(mock/카메라 미연결) 스트림 자체가 없으면 None."""
+
     def latest_color_jpeg(self) -> bytes | None:
-        """"카메라 뷰"의 최근 프레임(JPEG). **원본 RGB가 아니라 grasp의 관측 오버레이다**
+        """"관측 결과" 뷰의 최근 프레임(JPEG). **원본 RGB가 아니라 grasp의 관측 오버레이다**
         (마스크 윤곽 + 파지 후보 그립 모양) — 화면정의서 2.2.4절 원안(원본만, 오버레이
-        없음)은 이후 사용자 요청으로 뒤집혔다(ros_bridge.py의 `_BridgeNode` 주석 참조,
-        D-5). 아직 못 받았거나(mock/카메라 미연결) 스트림 자체가 없으면 None."""
+        없음)은 이후 사용자 요청으로 뒤집혔다가(ros_bridge.py의 `_BridgeNode` 주석 참조,
+        D-5), 2026-09-08에 원본 뷰가 기본으로 돌아오면서 이 오버레이는 별도 스트림으로
+        분리됐다. 온디맨드 관측이라 명령이 들어와야만 갱신된다(그 전엔 마지막 프레임이
+        그대로). 아직 못 받았거나(mock/카메라 미연결) 스트림 자체가 없으면 None."""
 
     def latest_depth_jpeg(self) -> bytes | None:
         """뎁스 맵을 컬러맵으로 시각화한 최근 프레임(JPEG). 없으면 None."""
