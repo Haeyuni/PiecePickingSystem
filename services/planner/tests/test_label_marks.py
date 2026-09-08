@@ -40,11 +40,11 @@ class LabelMarksTest(unittest.TestCase):
                                      class_name="toothpaste", name_ko="치약",
                                      mass_g=150.0, fragile=False, deformable=True,
                                      transparent=False, profile="deformable",
-                                     confidence=0.9),
+                                     confidence=0.9, reasoning="흔한 치약 튜브 형태"),
                 vlm_detect.MarkLabel(mark_id=2, is_object=False, part_of=0, class_name="",
                                      name_ko="", mass_g=0.0, fragile=False,
                                      deformable=False, transparent=False,
-                                     profile="fragile", confidence=0.9),
+                                     profile="fragile", confidence=0.9, reasoning=""),
             ])
 
         vlm_detect.label_marks = fake
@@ -69,6 +69,13 @@ class LabelMarksTest(unittest.TestCase):
         self.assertEqual(mark["mass_g"], 150.0)
         self.assertTrue(mark["deformable"])
         self.assertEqual(mark["profile"], "deformable")
+
+    def test_reasoning_reaches_the_response(self):
+        """판단 근거가 화면에 뜨려면 이 응답에 실려 나가야 한다 (물체 판단 근거 표시)."""
+        marks = post().json()["marks"]
+
+        self.assertEqual(marks[0]["reasoning"], "흔한 치약 튜브 형태")
+        self.assertEqual(marks[1]["reasoning"], "")   # is_object=false는 빈 문자열
 
     def test_registered_classes_are_not_sent_to_the_vlm(self):
         """등록 클래스 어휘를 주지 않는 것이 이 경로의 전제다 (vlm_detect 상단 주석).

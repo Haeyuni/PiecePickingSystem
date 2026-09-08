@@ -38,6 +38,8 @@ export interface DetectedObject {
   graspable: boolean
   not_graspable_reason: string
   needs_confirmation: boolean
+  /** VLM의 판단 근거 한 줄. attr_source가 llm_suggested일 때만 값이 있다. */
+  reasoning: string
   /** 점수 내림차순. 비어 있으면 파지 후보가 없다는 뜻이다. */
   grasp_candidates?: GraspCandidate[]
 }
