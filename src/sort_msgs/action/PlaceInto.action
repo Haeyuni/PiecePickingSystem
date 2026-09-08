@@ -2,6 +2,7 @@
 string schema_version
 string trace_id
 string request_id
+string source_observation_id
 string object_id
 string profile
 string bin_id                    # bins.yaml에 등록된 목적지 중 하나. LLM은 이 중에서만 선택 가능 (그라운딩)
@@ -14,6 +15,14 @@ geometry_msgs/Pose pose_override  # use_pose_override=false면 무시. 1차 범�
 # release_clearance_mm이 "물체 높이 짐작"이 아니라 순수한 안전 여유가 된다.
 # 0이면 미상 — place_server가 예전처럼 release_clearance_mm만 쓴다(하위호환).
 float32 object_bottom_offset_mm
+
+# 3차 frozen PickSnapshot. box geometry가 실측된 경우에만 아래 값으로 geometry mode를 쓴다.
+# pickup_tcp_posx는 실제 pick closure TCP [x,y,z,rx,ry,rz](mm/ZYZ deg)이고,
+# tcp_to_object_bottom_mm은 그 TCP에서 pick 당시 물체 support까지의 base-Z 거리다.
+bool has_pick_snapshot
+float64[6] pickup_tcp_posx
+float32 tcp_to_object_bottom_mm
+geometry_msgs/Polygon object_footprint_base_mm
 int32 max_retries
 ---
 # --- Result ---

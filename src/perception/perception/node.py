@@ -292,6 +292,9 @@ class PerceptionNode(Node):
         goal = goal_handle.request
         started = time.monotonic()
         trace_id = goal.trace_id or f"obs-{int(started * 1000) % 1_000_000:06d}"
+        # stamp는 촬영 시각이고, observation_id는 이 Observe 호출의 불변 식별자다.
+        # 동시에 하나의 Observe만 허용하므로 publish 경로에서 안전하게 공유할 수 있다.
+        self._active_observation_id = goal.request_id or trace_id
 
         try:
             if goal_handle.is_cancel_requested:
@@ -334,6 +337,7 @@ class PerceptionNode(Node):
         result.success = success
         result.failure_reason = reason
         result.object_count = object_count
+        result.observation_id = getattr(self, "_active_observation_id", "")
         result.stamp = stamp or self.get_clock().now().to_msg()
         result.cycle_time_ms = (time.monotonic() - started) * 1000
         return result
@@ -613,12 +617,14 @@ class PerceptionNode(Node):
         world = WorldState()
         world.schema_version = SCHEMA_VERSION
         world.trace_id = trace_id
+        world.observation_id = getattr(self, "_active_observation_id", "")
         world.stamp = stamp
         world.frame_id = BASE_FRAME
 
         masks = InstanceMasks()
         masks.schema_version = SCHEMA_VERSION
         masks.trace_id = trace_id
+        masks.observation_id = world.observation_id
         masks.stamp = stamp
 
         header = self._mask_header(stamp)

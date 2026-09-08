@@ -31,6 +31,7 @@ string REASON_VLM_UNAVAILABLE=vlm_unavailable
 string failure_reason
 
 int32 object_count
+string observation_id           # 성공한 관측을 식별. Goal.request_id와 동일
 builtin_interfaces/Time stamp
 float32 cycle_time_ms
 ---

@@ -46,8 +46,13 @@ docker compose restart grasp
 주요 값은 파일 안 주석에 근거와 이력이 함께 있다. 특히:
 
 * `refine_grasp_depth_mm` — 파지 깊이의 유일한 손잡이. 얕게 물면 여기를 올린다.
-* `approach_angle_max_deg` — 이 각도를 넘는 후보는 버린다. 좁힐수록 자세는 좋아지지만
-  후보가 전멸하는 물체가 늘어난다.
+* `approach_angle_hard_max_deg` — 이 각도를 넘는 후보만 버린다(2026-09-08 재설계).
+  **예전의 `approach_angle_threshold_deg`/`step`/`max_deg` 3종 확장 필터는 없앴다** —
+  15도부터 넓히다 처음 통과자에서 멈추는 구조라 실제 상한이 30도가 아니라 "후보가
+  하나라도 있는 가장 좁은 5도 구간"이었고, Top-K를 남기려는 의도와 어긋났다.
+  기울어진 후보를 실제로 쓸지는 control이 정한다(개폭·IK·관절·안전 + 접근 적합도
+  랭킹, `control/grasp_selection.py`). 여기를 좁힐수록 자세는 좋아지지만 후보가
+  전멸하는 물체가 늘어난다.
 * `camera_frame_offset_mm` — **0으로 두는 것이 맞다.** 올리기 전에 그 주석을 읽을 것.
 
 좌표계·오프셋의 전체 그림은 `docs/problem/2026-09-07-grasp-coordinate-offset.md`에 있다.

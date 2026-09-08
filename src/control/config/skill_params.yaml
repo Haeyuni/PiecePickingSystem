@@ -189,9 +189,17 @@ gripper:
   min_grip_width_mm: 5.0
   # pick 전 그리퍼를 GraspCandidate.width_mm + 이 값만큼만 연다(pick_server._open_width_m).
   # width_mm을 모르면(0) 대신 motion.gripper_open_m(최대)까지 연다.
-  # TODO: 값 확정 — 30mm는 접근 중 손가락이 물체를 스치지 않을 정도로 보수적으로 잡은
-  # 시작값이다. 실물로 확인해 튜닝 필요.
-  width_margin_mm: 30.0
+  # 2026-09-08 (사용자 요청, 실물 관찰) 30.0 → 34.0: 여유를 3~5mm 더 준다.
+  # 30mm는 실물 확인 전 잡은 시작값이었는데("접근 중 손가락이 물체를 스치지 않을
+  # 정도"), 실제로 보면 딱 맞거나 약간 모자라 보이고 **접근 중 물체가 손가락 끝에
+  # 걸리는 경우**가 있었다. 계산된 물체폭 자체가 실물보다 좁게 나오는 쪽이라
+  # 여유로 흡수한다.
+  # **이 값은 grasp_selection.score_width_fit의 comfort_hi(= 최대개폭 - 이 값)로도
+  # 쓰인다**(pick_server._selection_params — 같은 뜻의 값을 두 군데서 읽지 않기 위해서).
+  # 30.0 → 34.0으로 comfort_hi가 80 → 76mm가 된다. 이건 부작용이 아니라 정의상
+  # 맞는 이동이다 — 여유가 34mm면 76mm보다 넓은 물체는 폭+여유가 최대개폭 110mm를
+  # 넘어 목표 개폭을 못 만든다. 두 값이 같은 이유로 함께 움직여야 한다.
+  width_margin_mm: 34.0
   # 닫을 때 **목표 개폭 = 물체폭 x 이 비율**.
   # 'c'(완전 닫기)로 닫으면 빈 그리퍼에서도 손가락끼리 부딪혀 힘 한계에 도달해
   # Grip detected가 켜진다 — 실제로 아무것도 안 잡고 "성공" 판정이 났다(2026-09-07).
@@ -248,17 +256,46 @@ grasp_selection:
   # 관절 여유가 이 이상이면 만점(도). M0609는 J3만 ±150이라 사실상 J3 여유를 보는 항이다.
   joint_margin_ref_deg: 30.0
 
+  # --- 접근 적합도 (2026-09-08, 2.5차) ---------------------------------------
+  # 접근각을 grasp 단계에서 hard filter로 자르지 않게 되면서(grasp_params.yaml의
+  # approach_angle_hard_max_deg 참조) 그 판단이 여기로 왔다. 예전 hard filter가 쓰던
+  # 숫자를 감점 곡선의 꼭짓점으로 그대로 물려받아 추적이 되게 했다.
+  #
+  #   angle <= prefer(15)  → 1.0   (예전 approach_angle_threshold_deg와 같은 값)
+  #   angle == soft(30)    → 0.5   (예전 approach_angle_max_deg = 잘리던 선.
+  #                                 "예전에 탈락하던 각도 = 절반짜리 후보"로 읽으면 된다)
+  #   angle >= zero(75)    → 0.0   (grasp의 hard 상한과 같은 값 — 그 위는 애초에 안 온다)
+  #
+  # **zero는 grasp_params.yaml의 approach_angle_hard_max_deg와 같이 움직여야 한다.**
+  # 거기만 넓히고 여기를 두면 새로 들어온 각도들이 전부 0점으로 뭉쳐 서로 구분이 안 된다.
+  approach_angle_prefer_deg: 15.0
+  approach_angle_soft_max_deg: 30.0
+  approach_angle_zero_deg: 75.0
+
+  # 지금 TCP에서 접근 지점까지의 이동량/회전량 정규화 기준. 이만큼 움직여야 하면 0점.
+  # **도달 가능성 판정이 아니다** — 그건 IK가 이미 봤다. 같은 값이면 지금 자세에서 덜
+  # 움직여도 되는 후보를 고르자는 선호도이고, 그만큼 사이클이 짧고 경로가 단순하다.
+  # 현재 자세를 못 읽으면(movel 직후 aux_control 무응답 구간) 이 항만 빠진다.
+  approach_travel_ref_mm: 400.0
+  approach_rotation_ref_deg: 120.0
+
   # 점수 가중치. 각 항은 [0,1]로 정규화돼 있고, 판단할 정보가 없는 항은 빠진 뒤 남은
   # 가중치로 다시 정규화된다(정보 없음이 감점이 되지 않게).
   # **GraspNet score는 여러 판단 요소 중 하나일 뿐이다** — 그것만으로 고르던 것을
   # 바꾸는 것이 이 블록의 목적이다.
   weights:
-    grasp_score: 0.35       # GraspCandidate.score (전략이 이미 0~1로 clip해서 낸다)
-    width_fit: 0.20         # RG2 개폭 적합성 (너무 넓으면 최대개방으로 떨어지고, 너무 좁으면 스친다)
-    center_proximity: 0.20  # 파지점이 물체 중심(xy)에 가까운가
+    grasp_score: 0.30       # GraspCandidate.score (전략이 이미 0~1로 clip해서 낸다)
+    width_fit: 0.15         # RG2 개폭 적합성 (너무 넓으면 최대개방으로 떨어지고, 너무 좁으면 스친다)
+    center_proximity: 0.15  # 파지점이 물체 중심(xy)에 가까운가
     height_fit: 0.10        # 물체 높이의 중간을 무는가 (윗모서리만 물면 미끄러진다)
     joint_margin: 0.10      # 관절 한계까지 여유
     depth_quality: 0.05     # depth_valid_ratio. 물체 단위 값이라 같은 물체 안에서는 동점이다
+    # 2026-09-08(2.5차) 추가. grasp이 각도로 미리 자르지 않게 된 만큼 그 판단이 여기로
+    # 왔다 — 합을 1로 유지하려고 grasp_score/width_fit/center_proximity에서 덜어냈다.
+    # **접근각을 너무 올리면 예전 hard filter와 같아진다**(수직 후보만 뽑힘). 기울어진
+    # 후보가 계속 뽑혀 미끄러지면 올리고, 멀쩡한 후보가 각도만으로 밀리면 내린다.
+    approach_angle: 0.10    # 수직에 가까운 접근인가
+    approach_travel: 0.05   # 지금 자세에서 접근 지점까지 얼마나 움직여야 하나
 
 
 visual_verification:

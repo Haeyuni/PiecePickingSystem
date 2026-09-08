@@ -193,13 +193,27 @@ TF link_6 (플랜지)            = (596.9,  -306.1,  187.3)        ← 1.5mm 일
 |---|---|---|
 | 실제 파지점 (플랜지 기준) | **233.2mm** | 고정점 3자세 최소제곱, 잔차 1.2mm. 가로 성분 (−4.6, −0.2) ≈ 0 (대칭 그리퍼와 일치). TF의 `rg2_inner_finger` 뿌리 184.7mm + 패드 ~48mm와도 맞는다 |
 | 컨트롤러 TCP (플랜지 기준) | **208.0mm** | `get_current_posx` − `get_current_tool_flange_posx`. 이름 `GripperDA_v1`, 순수 이동(회전 오프셋 없음, TF 대비 1.3도) |
-| **TCP → 파지점** | **+25.2mm** | 위 둘의 차. `skill_params.yaml`의 `tool.grasp_center_offset_mm`에 넣었다 |
+| **TCP → 당시 측정한 파지 reference** | **+25.2mm** | 위 둘의 차. 이후 RG2 개폭에 따라 손끝 도달점이 달라지고 독립된 tip/pad 측정이 아니었음이 확인되어 현재 활성값으로 쓰지 않는다 |
 
 부호가 **양수**라는 것은 손끝이 TCP보다 접근 방향으로 더 나가 있다는 뜻이고, 따라서 control은
 TCP를 그만큼 **덜** 내려보낸다(작업대에서 멀어지는 안전한 방향).
 
 폐기한 값: `grasp_center_offset_mm = −18.3`. TCP 미선택 상태에서 잰 것이라 perception을 손끝이
 아니라 **플랜지**와 비교한 숫자였다.
+
+### 현재 활성값과 보정 성격
+
+`src/control/config/skill_params.yaml`의 현재 활성값은 **+5.3mm**다. 이 값은
+`89.1 - (81.8 + 2.0)`으로 얻은 특정 자세의 empirical residual이며, 독립적으로 실측한
+물리적 finger/pad geometry가 아니다. 따라서 다음 세 종류를 섞지 않는다.
+
+| 종류 | 현재 항목 | 의미 |
+|---|---|---|
+| physical/tool calibration | TCP `GripperDA_v1` 208.0mm, hand-eye 행렬 | 좌표계 사이의 실측 변환 |
+| modeled grasp reference | `tool.grasp_center_offset_mm.z = 5.3` | 현재 파지 모델의 경험적 residual, 물리 손끝 길이가 아님 |
+| motion/safety margin | `pick_depth_extra_mm`, `release_clearance_mm`, `place_safe_clearance_mm` | 의도적인 삽입량·이격량. calibration 오차를 숨기는 용도로 조정하지 않음 |
+
+25.2mm와 −18.3mm는 사고 분석의 역사적 측정값으로만 남기며 활성 설정으로 복원하지 않는다.
 
 ## 재발 방지
 
@@ -213,6 +227,25 @@ ros2 service call /dsr01/dsr_controller2/tcp/get_current_tcp dsr_msgs2/srv/GetCu
 
 교차 확인: `get_current_posx`와 `get_current_tool_flange_posx`가 **같으면** 미선택이다
 (정상이면 툴 축으로 208mm 차이).
+
+복구:
+
+```
+ros2 service call /dsr01/dsr_controller2/tcp/set_current_tcp \
+  dsr_msgs2/srv/SetCurrentTcp "{name: 'GripperDA_v1'}"
+```
+
+### 2026-09-08 재발 (하루 만에)
+
+같은 상태로 다시 돌았다. 09:20에 드라이버를 재기동한 뒤 확인을 안 했고, 09:50~10:00의
+pick 다섯 번이 전부 좌표가 208mm 틀어진 채 실행됐다.
+
+| | 09-07 21:07 (TCP 선택됨) | 09-08 09:50 (미선택) |
+|---|---|---|
+| `execution_logs.grasp_pose` z | 78.8 / 81.8 / 84.9 / 86.7 | 290.2 / 290.5 / 295.2 / 302.3 |
+
+위 표의 "물체 보고 z ≈ 74 / ≈ 330"과 같은 값이다. 확인은 **드라이버를 재기동할 때마다**
+해야 한다 — 이 항목을 건너뛰면 그날의 실물 데이터가 통째로 못 쓰게 된다.
 
 ## 이 사건이 남기는 교훈
 

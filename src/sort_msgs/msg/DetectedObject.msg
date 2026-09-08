@@ -20,6 +20,9 @@ float32 depth_valid_ratio      # 낮으면 투명/반사 의심 (8단계 확장�
 # 안전모드로 들어간다(2026-09-06 실물). 지지면 z = position_base_mm.z - height_mm 이므로
 # 이 둘과 파지 z가 있으면 "물체가 TCP보다 얼마나 아래로 내려와 있는지"가 나온다.
 float32 height_mm
+# grasp가 object-only cloud의 XY convex hull로 채운다. base 좌표계 mm.
+# 빈 polygon이면 footprint 미상이며 box boundary 검사를 활성화하지 않는다.
+geometry_msgs/Polygon footprint_base_mm
 bool graspable
 string not_graspable_reason    # graspable=false일 때만 값 있음, 아니면 빈 문자열
 

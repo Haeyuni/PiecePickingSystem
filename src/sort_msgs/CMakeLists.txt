@@ -14,6 +14,7 @@ find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GraspCandidate.msg"
+  "msg/SelectedGrasp.msg"
   "msg/DetectedObject.msg"
   "msg/InstanceMasks.msg"
   "msg/WorldState.msg"

@@ -3,6 +3,7 @@
 
 string schema_version
 string trace_id
+string observation_id          # 짝이 되는 WorldState.observation_id와 반드시 같아야 함
 builtin_interfaces/Time stamp
 string[] object_ids            # WorldState.objects의 object_id와 1:1 대응
 sensor_msgs/Image[] masks      # object_id별 단일 채널 마스크 (mono8, 0/255)

@@ -42,6 +42,8 @@ class MockExecutor:
         # world_state_normal.json), 이게 없으면 orchestrator._wait_for_fresh_observation의
         # "stamp가 바뀔 때까지 기다린다"가 매 명령마다 타임아웃까지 통째로 날아간다.
         self._stamp_override: dict | None = None
+        self._observation_id: str | None = None
+        self._trace_id: str | None = None
 
     # --- 수명주기 -----------------------------------------------------------
 
@@ -61,6 +63,10 @@ class MockExecutor:
         state = json.loads(path.read_text(encoding="utf-8"))
         if self._stamp_override is not None:
             state["stamp"] = self._stamp_override
+        if self._observation_id is not None:
+            state["observation_id"] = self._observation_id
+        if self._trace_id is not None:
+            state["trace_id"] = self._trace_id
         return state
 
     def use_fixture(self, name: str) -> None:
@@ -95,11 +101,14 @@ class MockExecutor:
         확인)가 없어진다."""
         now = time.time()
         self._stamp_override = {"sec": int(now), "nanosec": int((now % 1) * 1e9)}
+        self._observation_id = f"mock-{trace_id}-{time.monotonic_ns()}"
+        self._trace_id = trace_id
         world = self.get_latest_world_state()
         object_count = len((world or {}).get("objects", []))
         logger.info("mock 관측 트리거 (mode=%s, trace=%s) — 물체 %d개", mode, trace_id, object_count)
         return {"success": True, "failure_reason": "none", "object_count": object_count,
-               "cycle_time_ms": 0.0, "cancelled": False}
+                "observation_id": self._observation_id, "stamp": self._stamp_override,
+                "cycle_time_ms": 0.0, "cancelled": False}
 
     async def _emit_state(self) -> None:
         if self._on_event:
@@ -130,11 +139,20 @@ class MockExecutor:
                                    visual_verification_passed=False,
                                    cycle_time_ms=(time.monotonic() - started) * 1000)
 
+            pose = goal.grasp_pose or {}
+            position = pose.get("position") or {}
             return SkillResult(
                 success=True,
                 visual_verification_passed=True if skill == "pick" else None,
                 cycle_time_ms=(time.monotonic() - started) * 1000,
                 torque_trace=[0.4, 1.9, 2.6, 2.4] if skill == "pick" else [],
+                selected_candidate_id=(goal.grasp_candidates[0].get("candidate_id", "")
+                                       if skill == "pick" and goal.grasp_candidates else ""),
+                source_observation_id=(goal.source_observation_id if skill == "pick" else ""),
+                executed_tcp_posx=(
+                    [float(position.get("x", 0.0)), float(position.get("y", 0.0)),
+                     float(position.get("z", 0.0)), 0.0, 180.0, 0.0]
+                    if skill == "pick" else None),
             )
         finally:
             self._mode = "idle"

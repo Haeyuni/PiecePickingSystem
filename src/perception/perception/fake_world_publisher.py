@@ -46,6 +46,7 @@ def to_msg(fixture: dict) -> WorldState:
     msg = WorldState()
     msg.schema_version = fixture["schema_version"]
     msg.trace_id = fixture.get("trace_id", "")
+    msg.observation_id = fixture.get("observation_id", "")
     msg.stamp = Time(sec=fixture["stamp"]["sec"], nanosec=fixture["stamp"]["nanosec"])
     msg.frame_id = fixture.get("frame_id", "base")
     msg.needs_reobserve = list(fixture.get("needs_reobserve", []))

@@ -32,7 +32,7 @@ from onrobot_rg_msgs.srv import GripperPose, SetCommand
 from rclpy.qos import DurabilityPolicy, QoSProfile
 from sensor_msgs.msg import JointState
 from sort_msgs.action import Pick
-from sort_msgs.msg import GraspCandidate
+from sort_msgs.msg import SelectedGrasp
 
 from . import dsr_motion, grasp_selection
 from .config_paths import skill_params_path
@@ -152,6 +152,10 @@ class PickServer(Node):
                                   else dsr_motion.JOINT_LIMITS_DEG)
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
+        # 컨트롤러가 "이 목표는 못 간다"고 내는 알람을 지켜본다 — 없으면 movel이
+        # goal을 accept한 채 아무것도 안 하는 경우가 60초 타임아웃을 다 채운다
+        # (dsr_motion.MotionErrorMonitor 참조).
+        self._motion_errors = dsr_motion.MotionErrorMonitor(self, callbacks)
         self._posx_client = self.create_client(
             GetCurrentPosx, dsr_motion.GET_CURRENT_POSX_SERVICE, callback_group=callbacks)
         # 후보의 접근·파지 자세가 실제로 풀리는지 확인한다. place_server가 놓는 높이를
@@ -165,7 +169,7 @@ class PickServer(Node):
             GetCurrentSolutionSpace, dsr_motion.GET_CURRENT_SOLUTION_SPACE_SERVICE,
             callback_group=callbacks)
         self._selected_pub = self.create_publisher(
-            GraspCandidate, SELECTED_GRASP_TOPIC,
+            SelectedGrasp, SELECTED_GRASP_TOPIC,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL))
         self._gripper_cmd_client = self.create_client(
             SetCommand, dsr_motion.GRIPPER_COMMAND_SERVICE, callback_group=callbacks)
@@ -174,10 +178,16 @@ class PickServer(Node):
         self._gripper_joint_angle: float | None = None
         self.create_subscription(JointState, dsr_motion.GRIPPER_JOINT_STATES_TOPIC,
                                  self._on_gripper_state, 5, callback_group=callbacks)
+        # 팔 관절각. get_current_posx(aux_control)가 무응답일 때 fkin으로 손목 자세를
+        # 복원하는 데 쓴다 — 그게 없으면 뒤집기 보정이 꺼져 172도를 헛돈다(_wrist_posx).
+        self._arm_joint_deg: tuple[float, ...] | None = None
+        self._arm_joint_stamp: float | None = None
+        self.create_subscription(JointState, dsr_motion.ARM_JOINT_STATES_TOPIC,
+                                 self._on_arm_state, 5, callback_group=callbacks)
         # RG2 컨트롤러의 상태 비트필드. bit1(Grip detected)이 **개폭과 무관하게** 물체를
         # 물었는지 알려준다 — 변형체를 제대로 물어도 0mm까지 닫히는 문제(아래 파지 판정
         # 주석 참조)를 개폭 추정 없이 해결한다. (time, gsta)로 들고 있어 신선도를 본다.
-        self._gripper_status: tuple[float, int] | None = None
+        self._gripper_status: tuple[float, int, float] | None = None
         self.create_subscription(OnRobotRGInput, dsr_motion.GRIPPER_STATUS_TOPIC,
                                  self._on_gripper_status, 5, callback_group=callbacks)
 
@@ -231,7 +241,7 @@ class PickServer(Node):
             f"기동 그리퍼 열기 완료 — 최대 개방({self._gripper_open_m * 1000:.0f}mm)")
 
     def _on_gripper_status(self, msg: OnRobotRGInput) -> None:
-        self._gripper_status = (time.monotonic(), int(msg.gsta))
+        self._gripper_status = (time.monotonic(), int(msg.gsta), float(msg.gwdf) / 10.0)
 
     def _grip_detected(self, max_age_s: float = 2.0) -> bool | None:
         """RG2가 보고하는 'Grip detected'(gsta bit1). 모르면 None.
@@ -242,14 +252,66 @@ class PickServer(Node):
         """
         if self._gripper_status is None:
             return None
-        stamp, gsta = self._gripper_status
+        stamp, gsta, _ = self._gripper_status
         if time.monotonic() - stamp > max_age_s:
             return None
         return bool(gsta & 0x02)
 
+    def _gripper_evidence(self, since: float | None = None, max_age_s: float = 2.0):
+        if self._gripper_status is None:
+            return None
+        stamp, gsta, status_width_mm = self._gripper_status
+        if time.monotonic() - stamp > max_age_s or (since is not None and stamp < since):
+            return None
+        return {"stamp": stamp, "gsta": gsta, "grip": bool(gsta & 0x02),
+                "status_width_mm": status_width_mm}
+
     def _on_gripper_state(self, msg: JointState) -> None:
         if msg.position:
             self._gripper_joint_angle = msg.position[0]
+
+    def _on_arm_state(self, msg: JointState) -> None:
+        """팔 관절각(라디안 → 도). **이름으로 골라낸다** — 순서를 가정하면 드라이버가
+        순서를 바꿨을 때 조용히 엉뚱한 자세를 만든다."""
+        index = {name: i for i, name in enumerate(msg.name)}
+        try:
+            self._arm_joint_deg = tuple(
+                math.degrees(float(msg.position[index[name]]))
+                for name in dsr_motion.ARM_JOINT_NAMES)
+            self._arm_joint_stamp = time.monotonic()
+        except (KeyError, IndexError, TypeError, ValueError):
+            return
+
+    def _wrist_posx(self, goal_handle):
+        """지금 TCP posx. aux_control이 무응답이면 fkin으로 복원한다.
+
+        **이 값이 None이면 뒤집기 보정이 꺼진다.** 평행 그리퍼는 닫힘축 부호가 뒤집혀도
+        같은 파지라 두 표현 중 가까운 쪽을 골라야 하는데(dsr_motion.
+        nearest_equivalent_grasp_rotation), 현재 자세를 모르면 그 선택을 못 해 전략이 낸
+        표현을 그대로 명령한다 — 2026-09-07 실물에서 172.4도를 헛돌아 접근에만 14초가
+        걸린 그 경로다. pick은 movel 직후(= aux_control 무응답 구간)에 시작하므로 특히
+        **재시도에서** 이 폴백이 없으면 그 문제가 되살아난다.
+        """
+        posx = dsr_motion.get_current_posx(self._posx_client, goal_handle,
+                                           timeout_s=1.0, retries=2)
+        if posx is not None:
+            return posx
+        if goal_handle.is_cancel_requested:
+            return None
+        joints = self._arm_joint_deg
+        if (self._arm_joint_stamp is None
+                or time.monotonic() - self._arm_joint_stamp > 2.0):
+            joints = None
+        posx = dsr_motion.posx_via_fkin(self._fkin_client, joints)
+        if posx is None:
+            self.get_logger().warning(
+                "손목 자세를 못 읽었다 (get_current_posx 무응답 + fkin 폴백도 실패) — "
+                "뒤집기 보정과 접근 적합도 항이 빠진 채 진행한다")
+        else:
+            self.get_logger().info(
+                "get_current_posx 무응답 — /dsr01/joint_states + fkin으로 손목 자세를 "
+                f"복원했다 (TCP={[round(v, 1) for v in posx[:3]]})")
+        return posx
 
     def _goal_callback(self, goal_request):
         return GoalResponse.ACCEPT
@@ -303,12 +365,13 @@ class PickServer(Node):
                     self._publish_phase(goal_handle, phase)
                     time.sleep(FAKE_PHASE_DURATION_S)
                 width_mm, visual_passed, torque = 42.0, True, [0.4, 1.9, 2.6, 2.4]
+                executed_tcp = list(selected.geometry.target_posx)
             else:
                 pick_result = self._pick_real(goal_handle, goal, selected, wrist_pose)
                 if pick_result is None:          # 취소 (_pick_real의 모든 취소 경로가 None)
                     goal_handle.canceled()
                     return self._result(False, Pick.Result.REASON_NO_CONTACT, started)
-                width_mm, close_target_mm = pick_result
+                width_mm, close_target_mm, executed_tcp, evidence = pick_result
                 # --- 파지 성공 판정 ---------------------------------------
                 # **1순위: RG2 컨트롤러의 Grip detected 비트.** 개폭과 무관하게 물었는지를
                 # 알려주는 확정 신호다. 드라이버가 /onrobot/status를 발행할 때만 쓸 수 있다
@@ -319,21 +382,27 @@ class PickServer(Node):
                 # 0mm까지 닫힌다(2026-09-07 실물: depth로 쥐고 있음을 확인했는데 개폭은
                 # 0.0mm였다). 그 오판정이 재계획 → 새 pick → 그리퍼 열기로 이어져 쥐고
                 # 있던 물체를 그 자리에 떨어뜨리는 사고까지 갔다. 확정 신호가 없을 때만 쓴다.
-                grip = self._grip_detected()
-                if grip is not None and close_target_mm <= 0.0:
-                    # 완전 닫기로 닫은 경우다 — 빈 그리퍼도 grip=True가 되므로 이 신호를
-                    # 쓰면 안 된다. 개폭 판정으로 떨어뜨린다(그것도 변형체에 약하지만,
-                    # 확실히 틀리는 신호보다는 낫다).
-                    grip = None
-                if grip is None:
-                    grasped = width_mm > self._min_grip_width_mm
-                    basis = (f"개폭 추정 (width={width_mm:.1f}mm vs "
-                             f"min_grip_width_mm={self._min_grip_width_mm:.1f}mm) "
-                             "— /onrobot/status 미수신, 드라이버 재기동 필요")
-                else:
-                    grasped = grip
-                    basis = f"Grip detected={grip} (width={width_mm:.1f}mm)"
-                self.get_logger().info(f"파지 판정: {'성공' if grasped else '실패'} | {basis}")
+                pre, post, lifted = (evidence.get(name) for name in ("pre", "post", "lift"))
+                if pre is None or post is None or lifted is None or pre["grip"]:
+                    basis = (f"pre={pre} post={post} lift={lifted} "
+                             f"pose_width_close={width_mm:.1f}mm "
+                             f"pose_width_lift={evidence.get('lift_width_mm')}")
+                    self.get_logger().error(
+                        f"[PICK_VERIFY] 상태 불확실 — 자동 재계획 금지 | {basis}")
+                    store.set_gripper(width_mm=width_mm, closed=True)
+                    store.set_error()
+                    result = self._result(False, Pick.Result.REASON_UNREACHABLE, started,
+                                          candidate_id=selected.candidate.candidate_id)
+                    self._cache.put(goal.request_id, result)
+                    goal_handle.abort()
+                    return result
+                grasped = bool(pre and post and lifted
+                               and not pre["grip"] and post["grip"] and lifted["grip"])
+                basis = (f"pre={pre} post={post} lift={lifted} "
+                         f"pose_width_close={width_mm:.1f}mm "
+                         f"pose_width_lift={evidence.get('lift_width_mm')}")
+                self.get_logger().info(
+                    f"[PICK_VERIFY] {'성공' if grasped else '실패'} | {basis}")
                 if not grasped:
                     # 실제로는 아무것도 못 집었는데 success를 돌려주면 place_into가 그대로
                     # 이어져 빈 그리퍼로 목적지까지 가는 사고가 된다.
@@ -357,8 +426,10 @@ class PickServer(Node):
 
             store.set_gripper(width_mm=width_mm, closed=True)
             result = self._result(True, Pick.Result.REASON_NONE, started,
-                                  visual_passed=visual_passed, torque=torque,
-                                  candidate_id=selected.candidate.candidate_id)
+                                   visual_passed=visual_passed, torque=torque,
+                                   candidate_id=selected.candidate.candidate_id,
+                                   source_observation_id=goal.source_observation_id,
+                                   executed_tcp=executed_tcp)
             self._cache.put(goal.request_id, result)
             goal_handle.succeed()
             return result
@@ -440,16 +511,34 @@ class PickServer(Node):
                 spec.get("center_scale_floor_mm", defaults.center_scale_floor_mm)),
             joint_margin_ref_deg=float(
                 spec.get("joint_margin_ref_deg", defaults.joint_margin_ref_deg)),
+            # 접근 적합도(2.5차). 세 각도는 grasp_params.yaml의 같은 이름 값들과 짝이다 —
+            # zero는 grasp의 hard 상한과 같아야 "그 위는 애초에 안 온다"가 성립한다.
+            approach_angle_prefer_deg=float(
+                spec.get("approach_angle_prefer_deg", defaults.approach_angle_prefer_deg)),
+            approach_angle_soft_max_deg=float(
+                spec.get("approach_angle_soft_max_deg", defaults.approach_angle_soft_max_deg)),
+            approach_angle_zero_deg=float(
+                spec.get("approach_angle_zero_deg", defaults.approach_angle_zero_deg)),
+            approach_travel_ref_mm=float(
+                spec.get("approach_travel_ref_mm", defaults.approach_travel_ref_mm)),
+            approach_rotation_ref_deg=float(
+                spec.get("approach_rotation_ref_deg", defaults.approach_rotation_ref_deg)),
             weights=weights,
         )
 
-    @staticmethod
-    def _candidates_from_goal(goal) -> list:
+    def _candidates_from_goal(self, goal) -> list:
         """goal → 검사할 후보 목록(점수 내림차순, planner가 준 순서 그대로).
 
         `grasp_candidates`가 비어 있으면 `grasp_pose` 하나로 만든다 — 예전 planner나
         goal을 직접 쏘는 도구가 그대로 동작해야 한다. 그 경우에도 개폭·IK·안전 검사는
         똑같이 지나간다(그게 이 작업이 막으려는 실패 모드다).
+
+        **다른 물체의 후보는 여기서 버린다.** `candidate_id`는 "<object_id>#<순위>"라
+        어느 물체에서 나왔는지가 값 안에 들어 있다(grasp/node.py). 지금까지 control은
+        그걸 확인하지 않고 goal에 실려 온 것을 전부 검사했는데, 그러면 planner/orchestrator
+        어딘가에서 목록이 섞였을 때 **점수가 높다는 이유로 명령과 무관한 물체를 집는**
+        경로가 열린다. 실제로 섞이는 경로를 아직 못 찾았더라도, 그 사고는 조용히 일어나고
+        결과가 물리적이라 여기서 값싸게 막아 둔다(2026-09-08).
         """
         raw = list(getattr(goal, "grasp_candidates", None) or [])
         if not raw:
@@ -457,12 +546,28 @@ class PickServer(Node):
                 candidate_id="", rank=0, pose=goal.grasp_pose,
                 # 후보가 하나뿐이라 점수는 순위에 영향이 없다.
                 score=1.0, gripper_width_mm=float(goal.gripper_width_mm))]
+
+        target = str(goal.object_id or "")
+        kept, foreign = [], []
+        for candidate in raw:
+            owner = str(candidate.candidate_id or "").split("#")[0]
+            # candidate_id가 비어 있으면 출처를 모른다 — 예전 planner가 채워 보내던
+            # 형식이라 버리지 않고 통과시킨다(그 경우 goal 자체가 이 물체의 것이다).
+            if owner and target and owner != target:
+                foreign.append(candidate.candidate_id)
+                continue
+            kept.append(candidate)
+        if foreign:
+            self.get_logger().error(
+                f"[대상불일치] object={target} goal에 다른 물체의 후보 {len(foreign)}개가 "
+                f"실려 왔다 — 버린다: {foreign[:5]}"
+                + (" ..." if len(foreign) > 5 else ""))
         return [grasp_selection.Candidate(
             candidate_id=candidate.candidate_id, rank=rank, pose=candidate.pose,
             score=float(candidate.score),
             gripper_width_mm=float(candidate.gripper_width_mm),
             strategy=candidate.strategy)
-            for rank, candidate in enumerate(raw)]
+            for rank, candidate in enumerate(kept)]
 
     @staticmethod
     def _object_context(goal) -> grasp_selection.ObjectContext:
@@ -494,8 +599,7 @@ class PickServer(Node):
         candidates = self._candidates_from_goal(goal)
         obj = self._object_context(goal)
         fake = is_fake_robot()
-        wrist_pose = None if fake else dsr_motion.get_current_posx(
-            self._posx_client, goal_handle, timeout_s=1.0, retries=2)
+        wrist_pose = None if fake else self._wrist_posx(goal_handle)
         current_zyz = wrist_pose[3:] if wrist_pose else None
         # ikin은 solution space마다 다른 해를 낸다. movel은 현재 space를 유지하므로
         # "지금 상태에서 갈 수 있는가"를 물으려면 현재 space로 물어야 한다.
@@ -516,7 +620,14 @@ class PickServer(Node):
                                         sol_space=sol_space, limits=self._joint_limits_deg)
 
         evaluations = grasp_selection.evaluate_candidates(
-            candidates, obj, self._selection, geometry_of, ik_verdict_of)
+            candidates, obj, self._selection, geometry_of, ik_verdict_of,
+            # 접근 적합도(2.5차): 지금 자세에서 접근 지점까지 얼마나 움직여야 하는지.
+            # wrist_pose는 위에서 이미 읽은 값이라 서비스를 다시 부르지 않는다.
+            # 못 읽었으면(None) 이 항만 빠지고 나머지 판정은 그대로 돈다.
+            current_posx=wrist_pose,
+            # ZYZ는 ry가 180도 근처면 같은 방향이 다른 (rx,rz)로 나온다 — 성분 차로
+            # 재면 안 되므로 회전행렬 각도차를 쓰는 함수를 넘긴다(dsr_motion 참조).
+            rotation_diff=dsr_motion.rotation_diff_deg)
         selected = grasp_selection.select(evaluations)
 
         # 후보별 판정은 **로그에만** 남긴다(웹에는 이 숫자들을 내보내지 않는다).
@@ -531,6 +642,7 @@ class PickServer(Node):
             f"입력={len(candidates)} 검사={len(evaluations)} "
             f"(상한 max_evaluated={self._selection.max_evaluated}) "
             f"width탈락={tally[grasp_selection.STATUS_WIDTH_INVALID]} "
+            f"geom탈락={tally[grasp_selection.STATUS_GEOMETRY_INVALID]} "
             f"ik탈락={tally[grasp_selection.STATUS_IK_FAILED]} "
             f"joint탈락={tally[grasp_selection.STATUS_JOINT_LIMIT]} "
             f"safety탈락={tally[grasp_selection.STATUS_SAFETY_INVALID]} "
@@ -541,19 +653,22 @@ class PickServer(Node):
             self.get_logger().warning(
                 f"[후보선택] IK 확인 실패 {unknown_ik}건 — ikin/fkin 서비스가 응답하지 않아 "
                 "도달 가능성을 검증하지 못한 채 통과시켰다(로봇 드라이버 미기동?)")
-        self._publish_selected(selected)
+        self._publish_selected(selected, goal.trace_id, goal.source_observation_id)
         return selected, evaluations, wrist_pose
 
-    def _publish_selected(self, selected) -> None:
+    def _publish_selected(self, selected, trace_id: str, observation_id: str) -> None:
         """고른 후보를 발행한다. 못 골랐으면 빈 candidate_id로 발행해 이전 선택을 지운다 —
         안 그러면 grasp 오버레이가 지난 사이클의 후보를 계속 강조한다."""
-        msg = GraspCandidate()
+        msg = SelectedGrasp()
+        msg.schema_version = SCHEMA_VERSION
+        msg.trace_id = trace_id
+        msg.observation_id = observation_id
         if selected is not None:
-            msg.pose = selected.candidate.pose
-            msg.score = float(selected.candidate.score)
-            msg.gripper_width_mm = float(selected.candidate.gripper_width_mm)
-            msg.candidate_id = selected.candidate.candidate_id
-            msg.strategy = selected.candidate.strategy
+            msg.candidate.pose = selected.candidate.pose
+            msg.candidate.score = float(selected.candidate.score)
+            msg.candidate.gripper_width_mm = float(selected.candidate.gripper_width_mm)
+            msg.candidate.candidate_id = selected.candidate.candidate_id
+            msg.candidate.strategy = selected.candidate.strategy
         self._selected_pub.publish(msg)
 
     def _pick_real(self, goal_handle, goal, selected, wrist_pose) -> tuple[float, float] | None:
@@ -648,7 +763,8 @@ class PickServer(Node):
             return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
                                           self._linear_vel_mm_s, self._linear_acc_mm_s2,
                                           self._rot_vel_deg_s, self._rot_acc_deg_s2,
-                                          posx_client=self._posx_client, logger=self.get_logger())
+                                          posx_client=self._posx_client, logger=self.get_logger(),
+                                          error_monitor=self._motion_errors)
 
         def next_target(xyz, last_pose):
             """`xyz`로 위치만 바꾸고 회전은 유지한다 — 연속 이동에서 계산값을 재사용하면
@@ -786,6 +902,8 @@ class PickServer(Node):
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("파지 위치로 이동 실패")
+        if reached is None:
+            raise RuntimeError("파지 위치의 실제 TCP를 읽지 못해 snapshot을 만들 수 없다")
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_CONTACT_DETECTED)
 
@@ -817,6 +935,8 @@ class PickServer(Node):
             f"(물체폭 {candidate_width_mm:.1f}mm x {self._grip_close_ratio:.2f}) "
             + (f"힘 {force_n:.1f}N (profile={goal.profile})" if force_n
                else f"힘 미지정 (profile={goal.profile}에 max_grip_force_n 없음)"))
+        pre_evidence = self._gripper_evidence()
+        close_sent = time.monotonic()
         if not dsr_motion.send_gripper_command(self._gripper_cmd_client, close_command):
             if goal_handle.is_cancel_requested:
                 return None
@@ -843,6 +963,10 @@ class PickServer(Node):
                 return None
             raise _LiftFailedError("그리퍼 개폭 측정 실패 — 닫기는 완료됐으나 파지 여부 불확실",
                                    width_mm)
+        post_evidence = self._gripper_evidence(since=close_sent)
+        closure_tcp = self._wrist_posx(goal_handle)
+        if closure_tcp is None:
+            raise _LiftFailedError("close 후 실제 TCP를 읽지 못해 snapshot을 만들 수 없다", width_mm)
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_LIFTING)
         lift_posx = next_target(approach_xyz, descend_pose)
@@ -850,11 +974,15 @@ class PickServer(Node):
             if goal_handle.is_cancel_requested:
                 return None
             raise _LiftFailedError("현재 자세를 읽지 못했다", width_mm)
+        lift_started = time.monotonic()
         lift_ok, _ = move(lift_posx)
         if not lift_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise _LiftFailedError("들어올리기 실패", width_mm)
+        lift_evidence = self._gripper_evidence(since=lift_started)
+        lift_width_mm = dsr_motion.gripper_width_mm(
+            self._gripper_pose_client, self._gripper_joint_angle)
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_VERIFYING)
         self.get_logger().warning(
@@ -867,19 +995,29 @@ class PickServer(Node):
         # 2026-09-07 실물: 여기서 float 하나만 돌려주고 있어 **모든 실물 pick이** 닫기 직후
         # `cannot unpack non-iterable float object`로 실패했다. 호출부만 2개로 바꾸고
         # 반환문을 안 고친 것이었고, 타입 힌트(tuple[float, float])도 이미 2개였다.
-        return width_mm, close_target_mm
+        return width_mm, close_target_mm, list(closure_tcp[:6]), {
+            "pre": pre_evidence,
+            "post": post_evidence,
+            "lift": lift_evidence,
+            "lift_width_mm": lift_width_mm,
+        }
 
     @staticmethod
     def _injected_failure(object_id: str) -> bool:
         return bool(is_fake_robot() and os.environ.get("FAKE_FAIL_OBJECT") == object_id)
 
     def _result(self, success, reason, started, visual_passed=False, torque=None,
-                candidate_id: str = ""):
+                 candidate_id: str = "", source_observation_id: str = "",
+                 executed_tcp=None):
         result = Pick.Result()
         result.success = success
         result.failure_reason = reason
         # 어느 후보를 실제로 실행했는지. 못 고른 경우와 grasp_pose 하나만 받은 경우는 빈 값이다.
         result.selected_candidate_id = candidate_id
+        result.source_observation_id = source_observation_id
+        result.has_executed_tcp_posx = executed_tcp is not None
+        if executed_tcp is not None:
+            result.executed_tcp_posx = [float(v) for v in executed_tcp]
         result.retries_used = 0
         result.cycle_time_ms = (time.monotonic() - started) * 1000
         result.torque_trace_summary = torque or []

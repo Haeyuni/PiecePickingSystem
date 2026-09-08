@@ -84,6 +84,9 @@ class PickDepthDiagnosticsTest(unittest.TestCase):
                 )
                 server = NS(
                     _posx_client=None, _movel_client=None, _gripper_cmd_client=None,
+                    # 도달 불가 알람 감시자(dsr_motion.MotionErrorMonitor). 이 테스트는
+                    # 알람 없는 정상 경로만 보므로 move_linear에 그대로 넘겨지기만 하면 된다.
+                    _motion_errors=None,
                     _grasp_center_offset_mm=[2.0, 3.0, 5.3], _pick_depth_extra_mm=4.0,
                     _approach_height_mm=80.0, _linear_vel_mm_s=30.0, _linear_acc_mm_s2=30.0,
                     _rot_vel_deg_s=20.0, _rot_acc_deg_s2=20.0,

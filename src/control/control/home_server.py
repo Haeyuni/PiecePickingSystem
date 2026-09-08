@@ -61,6 +61,10 @@ class HomeServer(Node):
         self._acc_deg_s2 = float(home.get("acc_deg_s2", 20.0))
         self._movej_client = ActionClient(self, MovejH2r, dsr_motion.MOVEJ_ACTION,
                                           callback_group=callbacks)
+        # 컨트롤러가 "이 목표는 못 간다"고 내는 알람을 지켜본다 — 없으면 movel이
+        # goal을 accept한 채 아무것도 안 하는 경우가 60초 타임아웃을 다 채운다
+        # (dsr_motion.MotionErrorMonitor 참조).
+        self._motion_errors = dsr_motion.MotionErrorMonitor(self, callbacks)
 
         self.get_logger().info(
             f"home 액션 서버 준비 ({'fake' if is_fake_robot() else '실물'} 모드, "
@@ -122,7 +126,8 @@ class HomeServer(Node):
         """MovejH2r로 실제 관절 이동 (블로킹 대기·취소 전파는 dsr_motion.move_joint 참조)."""
         return dsr_motion.move_joint(self._movej_client, self._joint_deg, goal_handle,
                                      self._vel_deg_s, self._acc_deg_s2,
-                                     logger=self.get_logger())
+                                     logger=self.get_logger(),
+                                     error_monitor=self._motion_errors)
 
     def _result(self, success, reason, started):
         result = Home.Result()

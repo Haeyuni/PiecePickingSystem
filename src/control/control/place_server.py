@@ -24,7 +24,7 @@ from onrobot_rg_msgs.srv import SetCommand
 from sensor_msgs.msg import JointState
 from sort_msgs.action import PlaceInto
 
-from . import dsr_motion
+from . import box_geometry, dsr_motion
 from .config_paths import skill_params_path
 from .request_cache import RequestCache
 from .robot_state_publisher import is_fake_robot, store
@@ -125,6 +125,10 @@ class PlaceServer(Node):
         self._home_rise_mm = float(motion.get("home_rise_mm", 200.0))
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
+        # 컨트롤러가 "이 목표는 못 간다"고 내는 알람을 지켜본다 — 없으면 movel이
+        # goal을 accept한 채 아무것도 안 하는 경우가 60초 타임아웃을 다 채운다
+        # (dsr_motion.MotionErrorMonitor 참조).
+        self._motion_errors = dsr_motion.MotionErrorMonitor(self, callbacks)
         self._ikin_client = self.create_client(
             Ikin, "/dsr01/dsr_controller2/motion/ikin", callback_group=callbacks)
         self._posx_client = self.create_client(
@@ -162,13 +166,14 @@ class PlaceServer(Node):
             goal_handle.abort()
             return self._result(False, PlaceInto.Result.REASON_UNREACHABLE, time.monotonic())
 
-        bin_pose = self._bins[goal.bin_id].get("pose", {})
+        bin_spec = self._bins[goal.bin_id]
+        bin_pose = bin_spec.get("pose", {})
         # 놓는 높이 여유는 목적지마다 다를 수 있다 — bins.yaml 의 해당 목적지에
         # release_clearance_mm 이 있으면 그것을, 없으면 skill_params.yaml 의 공용값을 쓴다.
         # 바구니 깊이·기존 내용물 높이가 목적지마다 다르므로 공용값 하나로 맞추면
         # 한쪽은 너무 높아 떨어뜨리고 다른 쪽은 너무 낮아 부딪힌다.
         release_clearance_mm = float(
-            self._bins[goal.bin_id].get("release_clearance_mm", self._release_clearance_mm))
+            bin_spec.get("release_clearance_mm", self._release_clearance_mm))
         # **물체가 TCP 아래로 내려와 있는 만큼을 따로 더한다.** bin_pose는 빈 그리퍼로
         # 티칭한 높이라, 물체를 든 채 그 높이까지 내려가면 물체가 바구니 바닥에 먼저 닿는다.
         # 그러면 로봇은 목표 z에 도달하지 못한 채 계속 밀어붙이다 안전모드로 들어간다
@@ -181,36 +186,69 @@ class PlaceServer(Node):
         #
         # 이렇게 나누면 release_clearance_mm이 "물체 높이 짐작"이 아니라 **순수한 안전
         # 여유**가 된다 — 물체가 커지면 자동으로 더 높은 데서 놓고, 여유값은 그대로 둔다.
-        bottom_offset_mm = max(0.0, float(getattr(goal, "object_bottom_offset_mm", 0.0) or 0.0))
-        # **orchestrator의 값은 파지점(grasp_pose) 기준이지 TCP 기준이 아니다.**
-        # 그것은 `grasp_pose.z - (물체 윗면 z - 물체 높이)`, 즉 "손가락이 만나는 지점에서
-        # 물체 바닥까지"다. 여기서 명령하는 것은 TCP이고 손가락은 TCP에서
-        # tool.grasp_center_offset_mm만큼 떨어져 있으므로, 그만큼을 빼야 물체 바닥이
-        # 실제로 원하는 높이에 온다 (pick과 place가 같은 "파지점" 규약을 쓰게 하는 것).
-        #
-        # 이 보정이 없던 동안 place는 필요보다 약 18mm **높은** 데서 놓았다 — 안전한
-        # 방향이라 문제가 드러나지 않았지만, release_clearance_mm이 문서대로
-        # "순수한 안전 여유"가 되려면 여기서 정확히 맞춰야 한다. 이 변경으로 실제 여유는
-        # 48mm에서 설정값(30mm) 그대로가 된다.
-        #
-        # **물체 높이를 모르면(0) 이 변환을 하지 않는다.** 그 경우 바꿀 대상인 "파지점 기준
-        # 값" 자체가 없어서 빼 봐야 안전 여유만 18mm 깎일 뿐이다. 미상 경로는 예전 동작을
-        # 그대로 둔다.
-        tcp_to_finger_z_mm = 0.0
-        if bottom_offset_mm > 0.0:
-            tcp_to_finger_z_mm = dsr_motion.grasp_center_from_posx(
-                dsr_motion.bin_pose_to_posx(bin_pose), self._grasp_center_offset_mm)[2] \
-                - float(bin_pose.get("z", 0.0))
-        release_z = (float(bin_pose.get("z", 0.0)) + bottom_offset_mm
-                     + release_clearance_mm - tcp_to_finger_z_mm)
-        if bottom_offset_mm > 0.0:
-            detail = (f"물체높이보정 {bottom_offset_mm:.1f}mm + 여유 {release_clearance_mm:.1f}mm"
-                      f" - TCP↔손끝 {tcp_to_finger_z_mm:+.1f}mm")
+        geometry_mode = "inner_corners_base_mm" in bin_spec
+        if geometry_mode:
+            footprint = [(point.x, point.y) for point in goal.object_footprint_base_mm.points]
+            if (not goal.has_pick_snapshot or "floor_point_base_mm" not in bin_spec
+                    or "wall_margin_mm" not in bin_spec):
+                self.get_logger().error(
+                    "box geometry 설정 또는 frozen PickSnapshot이 불완전해 place를 중단한다")
+                goal_handle.abort()
+                return self._result(False, PlaceInto.Result.REASON_PLACE_FAILED, time.monotonic())
+            try:
+                box = box_geometry.box_geometry_from_measurements(
+                    inner_corners_base_mm=bin_spec["inner_corners_base_mm"],
+                    floor_point_base_mm=bin_spec["floor_point_base_mm"],
+                )
+                plan = box_geometry.plan_box_place(
+                    box=box,
+                    wall_margin_mm=float(bin_spec["wall_margin_mm"]),
+                    release_clearance_mm=release_clearance_mm,
+                    pickup_tcp_posx=list(goal.pickup_tcp_posx),
+                    footprint_xy=footprint,
+                    tcp_to_object_bottom_mm=float(goal.tcp_to_object_bottom_mm),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                self.get_logger().error(f"box geometry place 거부: {exc}")
+                goal_handle.abort()
+                return self._result(False, PlaceInto.Result.REASON_PLACE_FAILED, time.monotonic())
+            target_posx = list(plan.target_tcp_posx)
+            release_z = target_posx[2]
+            detail = (f"geometry floor {box.floor_z_mm:.1f} + TCP→물체바닥 "
+                      f"{goal.tcp_to_object_bottom_mm:.1f}mm + 여유 {release_clearance_mm:.1f}mm")
+            self.get_logger().info(
+                f"[PlacePlan] mode=box_geometry obs={goal.source_observation_id} "
+                f"object={goal.object_id} bin={goal.bin_id} target="
+                f"{[round(v, 2) for v in target_posx]} footprint_points={len(footprint)} "
+                f"center={tuple(round(v, 2) for v in box.center_base_mm)} "
+                f"width={box.width_mm:.1f} depth={box.depth_mm:.1f} yaw={box.yaw_deg:.1f}deg")
         else:
-            detail = f"여유 {release_clearance_mm:.1f}mm (물체높이 미상 — 고정 여유만 사용)"
+            bottom_offset_mm = max(
+                0.0, float(getattr(goal, "object_bottom_offset_mm", 0.0) or 0.0))
+            # Legacy pose의 물체 높이 보정은 파지점 기준이므로 TCP↔modeled reference를
+            # 변환한다. Geometry mode는 실제 pickup TCP snapshot을 써서 이 모델값을 쓰지 않는다.
+            tcp_to_finger_z_mm = 0.0
+            if bottom_offset_mm > 0.0:
+                tcp_to_finger_z_mm = dsr_motion.grasp_center_from_posx(
+                    dsr_motion.bin_pose_to_posx(bin_pose), self._grasp_center_offset_mm)[2] \
+                    - float(bin_pose.get("z", 0.0))
+            release_z = (float(bin_pose.get("z", 0.0)) + bottom_offset_mm
+                         + release_clearance_mm - tcp_to_finger_z_mm)
+            target_posx = dsr_motion.bin_pose_to_posx(bin_pose)
+            target_posx[2] = release_z
+            if bottom_offset_mm > 0.0:
+                detail = (f"물체높이보정 {bottom_offset_mm:.1f}mm + 여유 "
+                          f"{release_clearance_mm:.1f}mm - TCP↔손끝 "
+                          f"{tcp_to_finger_z_mm:+.1f}mm")
+            else:
+                detail = (f"여유 {release_clearance_mm:.1f}mm "
+                          "(물체높이 미상 — 고정 여유만 사용)")
+            self.get_logger().info(
+                f"[PlacePlan] mode=legacy_taught_pose object={goal.object_id} bin={goal.bin_id} "
+                "reason=inner_corners_base_mm 미실측")
         self.get_logger().info(
             f"place_into 시작 object={goal.object_id} bin={goal.bin_id} "
-            f"target=({bin_pose.get('x')}, {bin_pose.get('y')}, {bin_pose.get('z')})mm "
+            f"target=({target_posx[0]:.1f}, {target_posx[1]:.1f}, {target_posx[2]:.1f})mm "
             f"놓는높이={release_z:.1f}mm ({detail})")
         store.set_busy("place_into")
         started = time.monotonic()
@@ -224,8 +262,7 @@ class PlaceServer(Node):
                     self._publish_phase(goal_handle, phase)
                     time.sleep(FAKE_PHASE_DURATION_S)
             else:
-                if self._place_real(goal_handle, bin_pose,
-                                    release_z - float(bin_pose.get("z", 0.0))) is None:
+                if self._place_real(goal_handle, target_posx) is None:
                     goal_handle.canceled()
                     return self._result(False, PlaceInto.Result.REASON_NO_CONTACT, started)
 
@@ -294,25 +331,41 @@ class PlaceServer(Node):
             self.get_logger().info(f"{what}가 팔 범위 밖 — {z:.0f}mm로 낮춘다")
         return z
 
+    def _retry_lower(self, transit_z: float, floor_z: float, started: float,
+                     what: str) -> bool:
+        """`what` 이동이 실패했을 때 안전고도를 한 계단 낮춰 다시 해 볼지.
+
+        **컨트롤러가 도달 불가 알람을 낸 경우에만** True다. 다른 실패(취소, 서버 무응답,
+        허용오차 초과)까지 높이 탓으로 돌리면 원인을 가린 채 같은 실패를 반복한다 —
+        그 구분은 `_motion_errors`가 goal 전송 이후의 알람만 보고 해 준다.
+        """
+        reason = self._motion_errors.since(started)
+        if reason is None:
+            return False
+        if transit_z <= floor_z:
+            self.get_logger().error(
+                f"{what} 실패({reason}) — 안전고도가 이미 하한 {floor_z:.0f}mm라 "
+                "더 낮출 수 없다")
+            return False
+        self.get_logger().warning(
+            f"{what} 실패({reason}) — 안전고도 {transit_z:.0f}mm를 "
+            f"{max(floor_z, transit_z - 20.0):.0f}mm로 낮춰 다시 시도한다")
+        return True
+
     @staticmethod
     def _publish_phase(goal_handle, phase) -> None:
         feedback = PlaceInto.Feedback()
         feedback.phase = phase
         goal_handle.publish_feedback(feedback)
 
-    def _place_real(self, goal_handle, bin_pose: dict,
-                    release_offset_mm: float) -> bool | None:
-        """위치제어만으로 실물 place_into를 수행한다 (pick_server._pick_real과 같은 1단계
-        제약 — compliance/visual_verification 없이 bins.yaml 좌표를 그대로 믿는다).
+    def _place_real(self, goal_handle, target_posx) -> bool | None:
+        """계획된 TCP posx로 위치제어 place를 수행한다.
 
-        bin_pose 바로 위(approach_height_mm)에서 한 번 멈췄다, bin_pose.z + release_offset_mm
-        까지만 내려가 그리퍼를 열고 다시 들어올린다 — bin_pose 그 자체(z)까지 내려가지 않는다.
-        `release_offset_mm`은 "물체가 TCP 아래로 내려온 양 + 목적지별 안전 여유"의 합이다
-        (execute_callback 참조) — 호출부가 계산해 넘긴다.
+        geometry mode에서는 frozen pick orientation과 box 계산 좌표이고, legacy mode에서는
+        기존 taught bin pose에 높이 보정을 더한 좌표다.
         성공 True, 취소 None, 그 외 실패는 RuntimeError.
         """
-        target_posx = dsr_motion.bin_pose_to_posx(bin_pose)
-        target_posx[2] += release_offset_mm
+        target_posx = list(target_posx)
         approach_posx = list(target_posx)
         approach_posx[2] += self._approach_height_mm
         target_xyz = target_posx[:3]
@@ -322,7 +375,8 @@ class PlaceServer(Node):
             return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
                                           self._linear_vel_mm_s, self._linear_acc_mm_s2,
                                           self._rot_vel_deg_s, self._rot_acc_deg_s2,
-                                          posx_client=self._posx_client, logger=self.get_logger())
+                                          posx_client=self._posx_client, logger=self.get_logger(),
+                                          error_monitor=self._motion_errors)
 
         def next_target(xyz, last_pose):
             """`xyz`로 위치만 바꾸고 회전은 유지한다 (dsr_motion.py 모듈 docstring —
@@ -398,32 +452,55 @@ class PlaceServer(Node):
             f"place 안전고도 = {transit_z:.1f}mm (바구니 접근 {approach_xyz[2]:.1f}, "
             f"현재 {current_pose[2]:.1f}, 여유 {self._place_safe_clearance_mm:.0f})")
 
-        # ① 수직 상승 (XY·회전 고정)
-        rise_ok, _ = move([current_pose[0], current_pose[1], transit_z,
-                           current_pose[3], current_pose[4], current_pose[5]])
-        if not rise_ok:
-            if goal_handle.is_cancel_requested:
-                return None
-            raise RuntimeError("안전 높이 상승 실패")
+        # ①②③을 안전고도 후보마다 다시 시도한다. ikin 사전 검사(_reachable_z)를 통과한
+        # 높이도 실제로는 컨트롤러가 거부할 수 있어서다 — 2026-09-07 21:08 실물에서
+        # 바구니 상공 321.6mm가 그랬고(ikin은 관절 한계 안의 멀쩡한 해를 돌려줬다),
+        # 그때는 재시도 경로가 없어 60초 타임아웃 세 번 뒤 place_failed로 끝났다.
+        # 이제 `_motion_errors`가 그 알람을 즉시 잡아주므로, 한 계단(20mm) 낮춰
+        # 바구니 접근 높이까지 내려가며 다시 해 본다.
+        traverse_pose = None
+        floor_z = max(current_pose[2], approach_xyz[2])
+        while True:
+            attempt_started = time.monotonic()
 
-        # ② 제자리 회전 (위치 고정, 바구니 배치 자세로)
-        rotate_ok, rotate_pose = move([current_pose[0], current_pose[1], transit_z,
-                                       approach_posx[3], approach_posx[4], approach_posx[5]])
-        if not rotate_ok:
-            if goal_handle.is_cancel_requested:
-                return None
-            raise RuntimeError("바구니 배치 자세로 회전 실패")
+            # ① 수직 상승 (XY·회전 고정)
+            rise_ok, _ = move([current_pose[0], current_pose[1], transit_z,
+                               current_pose[3], current_pose[4], current_pose[5]])
+            if not rise_ok:
+                if goal_handle.is_cancel_requested:
+                    return None
+                if self._retry_lower(transit_z, floor_z, attempt_started, "안전 높이 상승"):
+                    transit_z = max(floor_z, transit_z - 20.0)
+                    continue
+                raise RuntimeError("안전 높이 상승 실패")
 
-        # ③ 수평 이동 (Z·회전 고정 — 회전은 ②에서 실제로 도달한 값을 그대로 쓴다)
-        traverse_posx = next_target([approach_xyz[0], approach_xyz[1], transit_z], rotate_pose)
-        if traverse_posx is None:
+            # ② 제자리 회전 (위치 고정, 바구니 배치 자세로)
+            rotate_ok, rotate_pose = move([current_pose[0], current_pose[1], transit_z,
+                                           approach_posx[3], approach_posx[4],
+                                           approach_posx[5]])
+            if not rotate_ok:
+                if goal_handle.is_cancel_requested:
+                    return None
+                if self._retry_lower(transit_z, floor_z, attempt_started, "바구니 자세 회전"):
+                    transit_z = max(floor_z, transit_z - 20.0)
+                    continue
+                raise RuntimeError("바구니 배치 자세로 회전 실패")
+
+            # ③ 수평 이동 (Z·회전 고정 — 회전은 ②에서 실제로 도달한 값을 그대로 쓴다)
+            traverse_posx = next_target([approach_xyz[0], approach_xyz[1], transit_z],
+                                        rotate_pose)
+            if traverse_posx is None:
+                if goal_handle.is_cancel_requested:
+                    return None
+                raise RuntimeError("현재 자세를 읽지 못했다")
+            traverse_ok, traverse_pose = move(traverse_posx)
+            if traverse_ok:
+                break
             if goal_handle.is_cancel_requested:
                 return None
-            raise RuntimeError("현재 자세를 읽지 못했다")
-        traverse_ok, traverse_pose = move(traverse_posx)
-        if not traverse_ok:
-            if goal_handle.is_cancel_requested:
-                return None
+            if self._retry_lower(transit_z, floor_z, attempt_started, "바구니 상공 수평 이동"):
+                transit_z = max(floor_z, transit_z - 20.0)
+                continue
             raise RuntimeError("바구니 상공으로 수평 이동 실패")
 
         # ④ 수직 하강 (바구니 바로 위 → 접근 지점)

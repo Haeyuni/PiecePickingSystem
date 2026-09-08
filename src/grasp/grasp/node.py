@@ -26,6 +26,7 @@
 쪽에서 매번 유실된다.
 """
 import bisect
+import math
 import pathlib
 import time
 
@@ -37,10 +38,11 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from geometry_msgs.msg import Point32
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Header
 
-from sort_msgs.msg import GraspCandidate, InstanceMasks, WorldState
+from sort_msgs.msg import GraspCandidate, InstanceMasks, SelectedGrasp, WorldState
 
 # perception_common(공용 패키지)의 좌표 변환·이미지 변환을 그대로 쓴다.
 #
@@ -106,6 +108,11 @@ def stamp_key(stamp) -> tuple[int, int]:
     return (stamp.sec, stamp.nanosec)
 
 
+def observation_key(msg) -> tuple[str, str, int, int]:
+    """trace/Observe/stamp를 모두 묶은 내부 join key."""
+    return (str(msg.trace_id), str(msg.observation_id), msg.stamp.sec, msg.stamp.nanosec)
+
+
 class GraspNode(Node):
     def __init__(self):
         super().__init__("grasp_node")
@@ -159,9 +166,10 @@ class GraspNode(Node):
         self._chain_debug: dict[str, dict] = {}
         # object_id → (전략이 낸 후보 수, 발행한 후보 수). 아래 [후보수] 로그가 쓴다.
         self._candidate_counts: dict[str, tuple[int, int]] = {}
-        self._pending_masks: dict[tuple[int, int], InstanceMasks] = {}
-        self._pending_worlds: dict[tuple[int, int], WorldState] = {}
+        self._pending_masks: dict[tuple[str, str, int, int], InstanceMasks] = {}
+        self._pending_worlds: dict[tuple[str, str, int, int], WorldState] = {}
         self._publish_debug = bool(self.get_parameter("publish_debug_image").value)
+        self._last_debug_snapshot = None
 
         callbacks = ReentrantCallbackGroup()
         image_qos = QoSProfile(depth=5, reliability=ReliabilityPolicy.BEST_EFFORT)
@@ -188,9 +196,9 @@ class GraspNode(Node):
         # 실행과 다른 것을 강조하면 안 된다.
         # 최신 하나만 의미가 있고 늦게 붙어도 받아야 하므로 pick_server와 같은
         # transient local QoS를 쓴다.
-        self._selected_grasp: tuple[float, GraspCandidate] | None = None
+        self._selected_grasp: tuple[float, str, object] | None = None
         self.create_subscription(
-            GraspCandidate, "/control/selected_grasp", self._on_selected_grasp,
+            SelectedGrasp, "/control/selected_grasp", self._on_selected_grasp,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
             callback_group=callbacks)
 
@@ -198,9 +206,16 @@ class GraspNode(Node):
             f"grasp 기동 완료 (전략 {self._strategy_name}, 설정 {path})")
 
     # --- 입력 ---------------------------------------------------------------
-    def _on_selected_grasp(self, msg: GraspCandidate) -> None:
+    def _on_selected_grasp(self, msg: SelectedGrasp) -> None:
         # candidate_id가 비면 "고른 것이 없다"(전 후보 탈락)는 뜻이라 강조를 지운다.
-        self._selected_grasp = (time.monotonic(), msg) if msg.candidate_id else None
+        self._selected_grasp = ((time.monotonic(), msg.observation_id, msg.candidate)
+                                if msg.candidate.candidate_id else None)
+        # on-demand 화면은 다음 관측을 기다리지 않는다. 방금 고른 후보를 같은 frozen
+        # observation 이미지에 다시 그려 selected 표시만 갱신한다.
+        if self._publish_debug and self._last_debug_snapshot is not None:
+            world, mask_by_id, base2camera = self._last_debug_snapshot
+            if msg.observation_id == world.observation_id:
+                self._publish_debug_image(world, mask_by_id, base2camera)
 
     def _on_info(self, msg: CameraInfo) -> None:
         if msg.k[0] <= 0.0 or msg.k[4] <= 0.0:
@@ -255,7 +270,7 @@ class GraspNode(Node):
         return frame, frame_id
 
     def _on_masks(self, msg: InstanceMasks) -> None:
-        key = stamp_key(msg.stamp)
+        key = observation_key(msg)
         world = self._pending_worlds.pop(key, None)
         if world is not None:
             self._process(world, msg)
@@ -287,7 +302,7 @@ class GraspNode(Node):
 
     # --- 한 관측 ------------------------------------------------------------
     def _on_world_state(self, world: WorldState) -> None:
-        key = stamp_key(world.stamp)
+        key = observation_key(world)
         masks = self._pending_masks.pop(key, None)
         if masks is not None:
             self._process(world, masks)
@@ -341,8 +356,10 @@ class GraspNode(Node):
                         f"| 클라우드 되잡기 {d.get('refined_shift_mm')}mm "
                         f"(폭 {d.get('graspnet_width_mm')}→실측) "
                         f"| 기울기 {d.get('chosen_angle_deg')}deg "
-                        f"(후보 {d.get('angles_deg')} 중 임계 {d.get('used_threshold_deg')}deg로 "
-                        f"{d.get('passed_count')}개 통과)",
+                        f"(후보 {d.get('angles_deg')} 중 hard 상한 "
+                        f"{d.get('hard_max_deg')}deg로 {d.get('passed_count')}개 통과, "
+                        f"예전 {d.get('legacy_max_deg')}deg 기준이면 "
+                        f"{d.get('legacy_pass_count')}개)",
                         throttle_duration_sec=5.0)
             filled += bool(candidates)
 
@@ -351,8 +368,15 @@ class GraspNode(Node):
         # 개수가 로그에 있어야 한다(2026-09-07). raw는 전략이 돌려준 수,
         # published는 world_state에 실제로 실린 수다 — 둘이 다르면 노드가 깎은 것이다.
         detail = ", ".join(
-            f"{oid}: raw={c['raw']} valid={c['valid']} filtered={c['passed']} "
-            f"published={c['published']}"
+            f"{oid}: raw={c['raw']} valid={c['valid']} "
+            + (f"old_angle_pass_{c['legacy_deg']:.0f}={c['legacy']} "
+               if c.get('legacy') is not None and c.get('legacy_deg') is not None else "")
+            + (f"new_angle_pass_{c['hard_deg']:.0f}={c['passed']} "
+               if c.get('hard_deg') is not None else f"filtered={c['passed']} ")
+            + (f"검사={c['examined']} " if c.get('examined') is not None else "")
+            + (f"geom탈락={dict(c['geom_rejects'])} " if c.get('geom_rejects') else "")
+            + f"published={c['published']}"
+            + (f" angles={c['angles']}" if c.get('angles') else "")
             for oid, c in self._candidate_counts.items())
         total_published = sum(c["published"] for c in self._candidate_counts.values())
         self.get_logger().info(
@@ -362,6 +386,7 @@ class GraspNode(Node):
         self._candidate_counts.clear()
 
         if self._publish_debug:
+            self._last_debug_snapshot = (world, mask_by_id, T_base_camera_mm.copy())
             self._publish_debug_image(world, mask_by_id, T_base_camera_mm)
 
     def _blockers(self, world: WorldState, masks: InstanceMasks) -> list[str]:
@@ -398,6 +423,16 @@ class GraspNode(Node):
             z_percentile=float(self._pointcloud_params.get("z_percentile", 2.0)),
             max_radius_mm=float(self._pointcloud_params.get("max_radius_mm", 250.0)))
         points_base = pointcloud_utils.transform(points_cam, T_base_camera_mm)
+        # Place footprint는 perception의 분류/마스크 품질 로직을 바꾸지 않고, grasp가 이미
+        # 만든 object-only cloud의 XY convex hull만 전달한다. 보이지 않는 면의 불확실성은
+        # box geometry의 별도 wall margin이 담당한다.
+        obj.footprint_base_mm.points = []
+        if len(points_base) >= 3:
+            hull = cv2.convexHull(np.asarray(points_base[:, :2], dtype=np.float32)).reshape(-1, 2)
+            if len(hull) >= 3:
+                obj.footprint_base_mm.points = [
+                    Point32(x=float(x), y=float(y), z=0.0) for x, y in hull
+                ]
 
         min_points = int(self._strategy_params.get("min_points", 0))
         if min_points and len(points_base) < min_points:
@@ -432,17 +467,35 @@ class GraspNode(Node):
             debug = candidates[0]["debug"]
             self._chain_debug[object_id] = debug
         # 파이프라인 각 단계의 후보 수. 어디서 줄어드는지 추적하려면 전부 있어야 한다.
-        #   raw       추론 서버가 돌려준 원본 수 (서버가 이미 NMS + sort_by_score를 마친 것)
-        #   valid     회전행렬·수치가 정상인 것
-        #   passed    기울기 필터를 통과한 것
-        #   published world_state에 실린 것 (= min(passed, top_k))
+        #   raw        추론 서버가 돌려준 원본 수 (서버가 이미 NMS + sort_by_score를 마친 것)
+        #   valid      회전행렬·수치가 정상인 것
+        #   legacy     **예전 30도 정책이었으면** 통과했을 수 (2.5차 비교용)
+        #   passed     새 정책(접근각 hard 상한)을 통과한 것
+        #   published  world_state에 실린 것 (= min(passed, top_k))
         # graspnet_baseline만 진단을 실어 보내므로, 없으면(PCA) 전략 반환 수로 채운다.
         stage = {
             "raw": (debug or {}).get("raw_count", len(candidates)),
             "valid": (debug or {}).get("valid_count", len(candidates)),
             "passed": (debug or {}).get("passed_count", len(candidates)),
+            "legacy": (debug or {}).get("legacy_pass_count"),
+            # 기하 검사(2.6차)에서 버린 후보. 사유별 수 — 물체에 안 걸친 후보를
+            # 물체 중심으로 끌어오는 대신 버리므로, 몇 개가 왜 빠졌는지가 보여야 한다.
+            "geom_rejects": (debug or {}).get("geometry_rejects") or {},
+            "examined": (debug or {}).get("examined_count"),
+            "legacy_deg": (debug or {}).get("legacy_max_deg"),
+            "hard_deg": (debug or {}).get("hard_max_deg"),
+            # 후보별 접근각(도). 각도 정책을 튜닝하려면 "몇 개가 걸렸나"만으로는 부족하고
+            # **어디에 몰려 있나**를 봐야 한다 — 물티슈처럼 전부 60~77도인 물체가 있다.
+            "angles": [round(float(c.get("approach_angle_deg", 0.0) or 0.0), 1)
+                       for c in candidates
+                       if isinstance(c, dict) and c.get("approach_angle_deg") is not None],
         }
+        before_depth_fit = [
+            list((c.get("pose") or {}).get("position", {}).values())
+            if isinstance(c, dict) else None
+            for c in candidates]
         candidates = [self._fit_grasp_depth(c, obj) for c in candidates]
+        self._log_candidate_geometry(object_id, obj, candidates, before_depth_fit)
         # candidate_id는 "<object_id>#<순위>"다. 순위 0이 1순위(점수 최고)지만, **실행할
         # 후보는 control이 고른다**(control/grasp_selection.py — 개폭·IK·관절·최소안전을
         # 보고 랭킹). 로그·웹·planner·control이 같은 후보를 가리킬 수 있어야 Top-K를
@@ -452,6 +505,58 @@ class GraspNode(Node):
         stage["published"] = len(messages)
         self._candidate_counts[object_id] = stage
         return messages
+
+    def _log_candidate_geometry(self, object_id, obj, candidates, before_depth_fit) -> None:
+        """후보가 **실제로 그 물체에 걸쳐 있는지**를 단계별로 한 줄씩 남긴다 (2026-09-08).
+
+        "후보가 물체 끝단에 잡힌다"를 볼 때 알아야 하는 것은 네 가지가 갈리는 지점이다.
+          A. GraspNet raw부터 이상한가        → raw_xyz / raw_w
+          B. 되잡기에서 옆으로 끌려갔나       → lat(접근축과 직교한 이동량)
+          C. 깊이 맞춤에서 움직였나           → dfit(그 단계의 이동량, 접근축 방향이어야 정상)
+          D. 자세는 멀쩡한데 웹 투영만 이상한가 → 이 로그가 정상인데 화면이 이상하면 D다
+
+        끝단 치우침은 `edge`로 본다 — 되잡기의 패드 창이 잡은 중앙이 물체 전체 닫힘축
+        중앙에서 얼마나 벗어났는지다. `extent`(물체 전체 폭) 대비 크면 모서리를 문 것이다.
+        `win`이 20 미만이면 창이 비어 풀린 경우라 그 후보의 위치·폭을 믿으면 안 된다.
+
+        **로그 전용이다.** 이 숫자들은 GraspCandidate.msg에도 웹에도 나가지 않는다.
+        """
+        center = getattr(obj, "position_base_mm", None)
+        center_xyz = ([float(center.x), float(center.y), float(center.z)]
+                      if center is not None else None)
+        for rank, candidate in enumerate(candidates):
+            if not isinstance(candidate, dict):
+                continue
+            debug = candidate.get("geometry_debug") or {}
+            position = (candidate.get("pose") or {}).get("position") or {}
+            final = [float(position.get(k, 0.0)) for k in ("x", "y", "z")]
+            parts = [f"[후보기하] {object_id}#{rank}",
+                     f"raw_xyz={debug.get('raw_xyz')}",
+                     f"raw_w={debug.get('raw_width_mm')}"]
+            if debug.get("refined_shift_mm") is not None:
+                parts.append(f"refine={debug['refined_shift_mm']}mm "
+                             f"(lat={debug.get('lateral_shift_mm')}mm)")
+            prior = before_depth_fit[rank] if rank < len(before_depth_fit) else None
+            if prior and len(prior) == 3:
+                moved = math.dist([float(v) for v in prior], final)
+                parts.append(f"dfit={moved:.1f}mm")
+            parts.append(f"final_xyz={[round(v, 1) for v in final]}")
+            parts.append(f"w={float(candidate.get('width_mm', 0.0) or 0.0):.1f}mm")
+            if debug.get("closing_extent_mm") is not None:
+                parts.append(f"extent={debug['closing_extent_mm']:.1f}mm")
+                # 2.6차 이후 lat은 **0이어야 정상**이다 — 되잡기가 가로 위치를 안 옮긴다.
+                # 0이 아니면 어딘가에서 다시 끌어오고 있다는 뜻이라 바로 눈에 띈다.
+                # GraspNet 위치가 클라우드 중심에서 얼마나 벗어나 있었는지 —
+                # 되잡기가 그만큼 구제한 것이다(버리는 기준이 아니라 품질 지표).
+                parts.append(f"cand_lat={debug.get('candidate_lateral_mm')}mm")
+                if debug.get("depth_shift_mm") is not None:
+                    parts.append(f"depth_shift={debug['depth_shift_mm']}mm")
+                parts.append(f"win={debug.get('window_points')}/{debug.get('cloud_points')}")
+                parts.append(f"geom={debug.get('status')}")
+            if center_xyz is not None:
+                parts.append(f"obj중심거리={math.dist(center_xyz, final):.1f}mm")
+            parts.append(f"angle={float(candidate.get('approach_angle_deg', 0.0) or 0.0):.1f}deg")
+            self.get_logger().info(" ".join(parts), throttle_duration_sec=0.0)
 
     # Provisional empirical-pad clearance, not a validated fingertip safety margin.
     # Source repeatability reaches range 3.9mm / std 0.85mm (obj_179);
@@ -549,7 +654,8 @@ class GraspNode(Node):
                 if xs.size:
                     self._draw_label(vis, (int(xs.min()), int(ys.min())),
                                      f"{obj.class_name} {obj.confidence:.2f}", box_color)
-            self._draw_grasp_candidates(vis, obj.grasp_candidates, camera2base)
+            self._draw_grasp_candidates(
+                vis, obj.grasp_candidates, camera2base, world.observation_id)
 
         self._publish_image(vis, world.stamp, frame_id)
 
@@ -567,7 +673,7 @@ class GraspNode(Node):
     # 프레임마다 바뀔 수 있어(점수 순위가 흔들린다) id만으로는 못 맞춘다 — 자세로 맞춘다.
     _SELECTED_MATCH_TOL_MM = 5.0
 
-    def _selected_index(self, candidates) -> int | None:
+    def _selected_index(self, candidates, observation_id: str) -> int | None:
         """이 후보 목록에서 control이 고른 것의 인덱스. 없으면 None.
 
         object_id(candidate_id의 '#' 앞부분)가 같고 파지점이 가장 가까운 후보를 고른다.
@@ -575,8 +681,10 @@ class GraspNode(Node):
         """
         if self._selected_grasp is None or not candidates:
             return None
-        received, selected = self._selected_grasp
+        received, selected_observation_id, selected = self._selected_grasp
         if time.monotonic() - received > self._SELECTED_MAX_AGE_S:
+            return None
+        if selected_observation_id != observation_id:
             return None
         object_id = selected.candidate_id.split("#")[0]
         best, best_distance = None, self._SELECTED_MATCH_TOL_MM
@@ -589,7 +697,8 @@ class GraspNode(Node):
                 best, best_distance = index, distance
         return best
 
-    def _draw_grasp_candidates(self, vis: np.ndarray, candidates, camera2base: np.ndarray) -> None:
+    def _draw_grasp_candidates(self, vis: np.ndarray, candidates, camera2base: np.ndarray,
+                               observation_id: str) -> None:
         """파지 후보를 base→camera 역변환·투영해 실제 개폭·접근축을 반영한 그리퍼
         스케치로 그린다 — "닫는 축 선 하나"만 그리면 개폭·접근 방향이 안 보여
         PCA 결과와 구분이 안 됐다(2026-09-05, 사용자 피드백).
@@ -607,7 +716,7 @@ class GraspNode(Node):
 
         숫자(점수·개폭)는 그리지 않는다 — 화면을 깨끗하게 유지한다(2026-09-07 요구사항).
         """
-        selected_index = self._selected_index(candidates)
+        selected_index = self._selected_index(candidates, observation_id)
         for rank, candidate in enumerate(candidates):
             p = candidate.pose.position
             point_cam = camera2base @ np.array([p.x, p.y, p.z, 1.0])

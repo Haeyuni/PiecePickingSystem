@@ -60,6 +60,9 @@ GRIPPER_JOINT_STATES_TOPIC = "/onrobot_joint_states"
 # RG2 컨트롤러 상태 비트필드(gsta 포함). onrobot_rg_control 드라이버가 발행한다 —
 # 2026-09-07에 추가한 토픽이라, 드라이버를 그 이후로 빌드/재기동하지 않았으면 없다.
 GRIPPER_STATUS_TOPIC = "/onrobot/status"
+# 컨트롤러 알람(OnLogAlarm)이 그대로 실려 나오는 토픽. dsr_controller2.cpp의 OnLogAlarm이
+# LOG_ALARM을 RobotError로 옮겨 발행한다 — `code`가 알람 index고 `msg1`이 알람 본문이다.
+MOTION_ERROR_TOPIC = "/dsr01/error"
 IKIN_SERVICE = "/dsr01/dsr_controller2/motion/ikin"
 FKIN_SERVICE = "/dsr01/dsr_controller2/motion/fkin"
 GET_CURRENT_SOLUTION_SPACE_SERVICE = (
@@ -145,6 +148,42 @@ def current_solution_space(client, default: int = 2, timeout_s: float = 2.0) -> 
     if result is None or not result.success:
         return int(default)
     return int(result.sol_space)
+
+
+ARM_JOINT_STATES_TOPIC = "/dsr01/joint_states"
+# `/dsr01/joint_states`가 쓰는 이름. 순서를 가정하지 않고 이 이름으로 골라낸다.
+ARM_JOINT_NAMES = ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6")
+
+
+def posx_via_fkin(fkin_client, joint_deg, timeout_s: float = 2.0) -> list[float] | None:
+    """관절각(도) → TCP posx. `get_current_posx`가 무응답일 때의 **대체 경로**다.
+
+    **왜 이게 필요한가.** movel 직후 aux_control(`get_current_posx`)이 10~20초 무응답인
+    구간이 있는데(get_current_posx 주석), pick은 그 구간에서 시작한다. 자세를 못 읽으면
+    `tcp_posx_for_grasp`의 뒤집기 보정이 통째로 꺼져서(current_zyz_deg=None) 같은 파지를
+    172도 헛돌아 가는 일이 다시 생긴다 — 2026-09-07에 고쳤던 그 문제가 **재시도 때만**
+    되살아나는 셈이다.
+
+    `motion/fkin`은 aux_control과 다른 네임스페이스라 그 무응답 구간에도 답한다
+    (후보 검사의 verify_ik가 바로 그때 ikin/fkin을 정상적으로 쓰고 있다).
+    2026-09-08 실측: 같은 순간 fkin과 get_current_posx의 차이가 0.0006mm / 0.0006도였다 —
+    TCP 설정도 그대로 반영된다.
+
+    **solution space는 안 돌려준다.** posx의 7번째 값이 필요한 곳은 이 폴백을 쓰지 않는다
+    (필요하면 current_solution_space를 따로 부른다).
+    """
+    from dsr_msgs2.srv import Fkin
+
+    if joint_deg is None or len(joint_deg) < 6:
+        return None
+    request = Fkin.Request()
+    request.pos = [float(v) for v in joint_deg[:6]]
+    request.ref = 0  # DR_BASE
+    result = _call_service(fkin_client, request, timeout_s)
+    if result is None or not result.success:
+        return None
+    posx = [float(v) for v in result.conv_posx[:6]]
+    return posx if all(math.isfinite(v) for v in posx) else None
 
 
 def verify_ik(ikin_client, fkin_client, posx, sol_space: int = 2,
@@ -450,10 +489,64 @@ def plan_pick_posx(pose, offset_mm, approach_height_mm: float, depth_extra_mm: f
     return ([*target_xyz, *target_posx[3:]], [*approach_xyz, *target_posx[3:]], axis)
 
 
+# --- 컨트롤러가 "이 이동은 시작조차 못 한다"고 알리는 알람 -----------------------------
+# RobotError.group. dsr_msgs2/msg/RobotError.msg: SYSTEM=1, MOTION=2, TP=3, INVERTER=4,
+# SAFETY_CONTROLLER=5.
+ERROR_GROUP_MOTION = 2
+# "[ERR] Pose(...) is NOT REACHABLE". **movel은 이 알람을 내고도 goal을 accept한 채
+# 아무것도 하지 않는다** — 실패 응답을 주지 않으므로, 이 알람을 안 보면 호출부는
+# overall_timeout_s(60초)를 다 채우고서야 실패로 끝난다. 2026-09-07 21:08 실물:
+# place_into가 바구니 상공(334.7, -479.2, 321.6)으로 가려다 이 알람을 세 번 내고
+# 매번 60초씩 기다렸다(총 3분, place_failed).
+ALARM_NOT_REACHABLE = 1206
+BLOCKING_MOTION_ALARMS = frozenset({ALARM_NOT_REACHABLE})
+
+
+class MotionErrorMonitor:
+    """`/dsr01/error`를 구독해 "이 이동은 못 한다"는 컨트롤러 알람을 기억한다.
+
+    `call_action_blocking`에 넘기면 goal을 보낸 **뒤에** 온 알람만 보고 즉시 실패로
+    끊는다. goal 전송 시각을 기준으로 거르는 이유: 이 토픽은 지난 알람도 그대로
+    흘러다니므로, 시각을 안 보면 예전 알람 하나로 이후 모든 이동이 실패한다.
+
+    `ikin`으로는 이 판정을 대신할 수 없다. 2026-09-08 실측: 실제로 거부된 자세
+    (334.68, -479.25, 321.62, 22.82, -179.93, 23.16)를 ikin에 물으면
+    `success=True, conv_posj=[-55.6, 32.4, 63.8, 0.05, 83.9, -55.3]`으로
+    **관절 한계 안의 멀쩡한 해**를 돌려준다. 그래서 place_server._reachable()의
+    사전 검사가 통과시켰고, 실패는 실제로 보내봐야만 드러난다.
+    """
+
+    def __init__(self, node, callback_group=None, codes=BLOCKING_MOTION_ALARMS):
+        from dsr_msgs2.msg import RobotError
+
+        self._codes = frozenset(codes)
+        self._lock = threading.Lock()
+        self._last: tuple[float, int, str] | None = None
+        node.create_subscription(RobotError, MOTION_ERROR_TOPIC, self._on_error, 10,
+                                 callback_group=callback_group)
+
+    def _on_error(self, msg) -> None:
+        if int(msg.group) != ERROR_GROUP_MOTION or int(msg.code) not in self._codes:
+            return
+        # 메시지에 stamp가 없어 수신 시각을 쓴다. 알람은 goal 수락 직후(수십 ms)에 오므로
+        # 이 정도 해상도로 충분하다.
+        with self._lock:
+            self._last = (time.monotonic(), int(msg.code), (msg.msg1 or "").strip())
+
+    def since(self, t0: float) -> str | None:
+        """`t0` 이후에 받은 차단성 알람의 설명. 없으면 None."""
+        with self._lock:
+            last = self._last
+        if last is None or last[0] < t0:
+            return None
+        return f"컨트롤러 알람 code={last[1]} {last[2]}"
+
+
 def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0,
                          cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0,
                          on_timeout_verify=None, feedback_callback=None,
-                         verify_poll_s: float = 1.0, logger=None):
+                         verify_poll_s: float = 1.0, logger=None,
+                         error_monitor=None):
     """액션을 보내고 결과를 기다린다(현재 스레드를 막는다). goal_handle이 취소 요청을
     받으면(웹의 정지 버튼) 원격 목표도 함께 취소한다 — 안 그러면 화면엔 "취소됨"으로
     보이는데 로봇은 계속 움직이는 상태가 된다.
@@ -481,6 +574,11 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     pick+place 한 사이클에서만 40초 안팎이 순수 대기로 날아갔다(2026-09-06 실물 로그).
     get_current_posx는 한가할 때 10ms 안에 답하므로 1초 주기로 확인해도 서비스에 부담이 없다.
 
+    **`error_monitor`**(`MotionErrorMonitor`): 넘기면 goal 전송 이후에 도착한 컨트롤러
+    알람을 매 주기 확인해 **즉시** 실패로 끊는다. 이게 없으면 "goal은 accept됐는데
+    로봇은 안 움직이는" 경우가 `overall_timeout_s`(60초)를 다 채운다 —
+    `MotionErrorMonitor` 주석의 2026-09-07 place 사고가 그것이다.
+
     반환: (성공 여부, 원격 액션의 result 객체 또는 None).
     """
     # 이 함수는 pick_server.py/place_server.py의 매 move() 호출마다 도니, 여기가
@@ -502,6 +600,13 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
         state["handle"] = future.result()
         sent.set()
 
+    # 알람 판정 기준 시각. **send_goal_async보다 먼저 잡아야 한다** — 알람은 수락 직후
+    # 수십 ms 안에 오므로, 전송 뒤에 시각을 잡으면 그 알람을 "예전 것"으로 흘려보낸다.
+    sent_at = time.monotonic()
+
+    def blocked() -> str | None:
+        return error_monitor.since(sent_at) if error_monitor is not None else None
+
     client.send_goal_async(
         goal, feedback_callback=feedback_callback).add_done_callback(on_send_done)
     sent.wait(timeout=send_timeout_s)
@@ -521,6 +626,12 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
                 "— 응답 유실일 수 있어 실제 도착 여부를 확인하며 기다린다")
         while time.monotonic() < deadline:
             if goal_handle.is_cancel_requested:
+                return False, None
+            blocked_reason = blocked()
+            if blocked_reason is not None:
+                # 수락 응답조차 못 받았는데 알람이 왔다 — 도착을 기다릴 이유가 없다.
+                if logger:
+                    logger.error(f"call_action_blocking: 이동 불가 알람 — {blocked_reason}")
                 return False, None
             if sent.wait(timeout=0.1):
                 remote_handle = state.get("handle")
@@ -559,6 +670,25 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
         if goal_handle.is_cancel_requested:
             remote_handle.cancel_goal_async()
             finished.wait(timeout=cancel_timeout_s)
+            return False, None
+        blocked_reason = blocked()
+        if blocked_reason is not None:
+            # **컨트롤러가 이 목표를 거부했다.** goal은 accept된 채 남아 있고 결과 통지도
+            # 오지 않으므로, 여기서 끊지 않으면 60초를 그대로 버린다. 취소는 타임아웃
+            # 경로와 같은 정성으로 확인한다 — 안 끝난 goal 위에 다음 movel을 겹쳐 보내면
+            # 그 뒤 모든 이동이 "접수는 되는데 진행이 없는" 상태로 이어진다(2026-09-06).
+            if logger:
+                logger.error(
+                    f"call_action_blocking: 이동 불가 알람 — {blocked_reason}. "
+                    "타임아웃을 기다리지 않고 즉시 취소한다")
+            remote_handle.cancel_goal_async()
+            for _ in range(4):
+                if finished.wait(timeout=cancel_timeout_s):
+                    break
+            else:
+                if logger:
+                    logger.error("call_action_blocking: 이동 불가 알람 후 취소가 확인되지 "
+                                 "않았다 — 이전 목표가 아직 살아있을 수 있다")
             return False, None
         now = time.monotonic()
         if next_verify is not None and now >= next_verify:
@@ -622,7 +752,7 @@ def move_linear(client, target_pos: list[float], goal_handle,
                 vel_deg_s: float, acc_deg_s2: float,
                 posx_client=None,
                 position_tolerance_mm: float = 3.0, rotation_tolerance_deg: float = 3.0,
-                logger=None) -> tuple[bool, list[float] | None]:
+                logger=None, error_monitor=None) -> tuple[bool, list[float] | None]:
     """MovelH2r 하나를 블로킹으로 실행. `target_pos`는 [x,y,z,rx,ry,rz](mm, deg).
 
     `posx_client`를 넘기면 타임아웃 시 get_current_posx로 실제 위치를 한 번 더
@@ -717,7 +847,8 @@ def move_linear(client, target_pos: list[float], goal_handle,
         return ok
 
     success, _ = call_action_blocking(client, goal, goal_handle, on_timeout_verify=verify_arrived,
-                                      feedback_callback=on_feedback, logger=logger)
+                                      feedback_callback=on_feedback, logger=logger,
+                                      error_monitor=error_monitor)
     if logger and not success:
         logger.error(
             f"move_linear 실패: feedback 마지막값={last_pose}, 목표={list(target_pos)} "
@@ -726,7 +857,8 @@ def move_linear(client, target_pos: list[float], goal_handle,
 
 
 def move_joint(client, target_deg: list[float], goal_handle,
-              vel_deg_s: float, acc_deg_s2: float, logger=None) -> bool:
+              vel_deg_s: float, acc_deg_s2: float, logger=None,
+              error_monitor=None) -> bool:
     """MovejH2r 하나를 블로킹으로 실행. `target_deg`는 j1~j6(도).
 
     movel과 달리 도착 확인(on_timeout_verify)을 못 넘긴다 — 목표가 관절각이라
@@ -739,7 +871,8 @@ def move_joint(client, target_deg: list[float], goal_handle,
     goal.target_pos = [float(v) for v in target_deg]
     goal.target_vel = [float(vel_deg_s)] * 6
     goal.target_acc = [float(acc_deg_s2)] * 6
-    success, _ = call_action_blocking(client, goal, goal_handle, logger=logger)
+    success, _ = call_action_blocking(client, goal, goal_handle, logger=logger,
+                                      error_monitor=error_monitor)
     return success
 
 

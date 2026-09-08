@@ -1,6 +1,17 @@
 # 분류 목적지 정의. 캘리브레이션 단계에서 실측해 고정한다.
 # 좌표 단위는 mm (인터페이스_정의서.md 1.1절). 회전은 쿼터니언.
 # 참조: 인터페이스_정의서.md 5.2절
+#
+# box geometry mode는 아래 실측값을 한 목적지에 모두 추가했을 때만 활성화한다.
+# 값이 없는 현재 설정은 기존 taught pose fallback이다. 추정값을 넣지 않는다.
+#   inner_corners_base_mm:                           # 상단 내부 모서리, base [x,y,z]
+#     front_left: [..., ..., ...]
+#     front_right: [..., ..., ...]
+#     rear_right: [..., ..., ...]
+#     rear_left: [..., ..., ...]
+#   floor_point_base_mm: [..., ..., ...]             # 내부 임의 바닥점, z만 사용
+#   wall_margin_mm: ...                              # 물체 boundary와 벽 사이 안전 여유
+# center/width/depth/yaw/floor_z는 위 5점에서 계산하며 별도 taught center를 요구하지 않는다.
 
 bins:
   left_box:
@@ -11,6 +22,17 @@ bins:
     # 접근/삽입 높이(z+110mm, z+30mm)는 /dsr01/dsr_controller2/motion/ikin으로 도달 가능함을 확인했다.
     name_ko: 왼쪽 박스
     pose: { x: 334.684, y: -479.249, z: 183.820, qx: 0.003103, qy: 0.999995, qz: -0.000428, qw: -0.001010 }
+    # 2026-09-08 실측: 닫힌 손끝 중앙으로 상단 내부 모서리 4점과 내부 바닥 1점을 접촉.
+    # 기록한 GripperDA_v1 TCP posx에 닫힌 손끝의 tool +Z 25.2mm를 자세별로 회전 적용한
+    # 실제 base 접촉점이다. 이름 순서는 측정 순서 1→2→3→4와 같다.
+    inner_corners_base_mm:
+      front_left:  [385.898, -371.494, 139.609]
+      front_right: [264.086, -368.680, 141.814]
+      rear_right:  [256.111, -578.083, 138.101]
+      rear_left:   [391.268, -569.062, 131.276]
+    # X/Y는 진단 기록이고 production geometry는 이 점의 Z만 floor_z로 사용한다.
+    floor_point_base_mm: [321.596, -472.100, -5.512]
+    wall_margin_mm: 10.0
   right_box:
     # 2026-09-05 재실측: get_current_posx()로 읽은 로봇의 실제 TCP 자세(base 좌표계).
     # ZYZ 오일러(rx=26.6632, ry=-179.7805, rz=27.2262 deg) → 쿼터니언은
@@ -19,6 +41,16 @@ bins:
     # 접근/삽입 높이(z+110mm, z+30mm)는 /dsr01/dsr_controller2/motion/ikin으로 도달 가능함을 확인했다.
     name_ko: 오른쪽 박스
     pose: { x: 19.381, y: -495.934, z: 173.369, qx: 0.004913, qy: 0.999986, qz: -0.000868, qw: -0.001707 }
+    # 2026-09-08 실측: 왼쪽 박스와 같은 방식으로 닫힌 손끝 중앙을 사용했다.
+    # GripperDA_v1 TCP posx에 tool +Z 25.2mm를 회전 적용한 실제 base 접촉점이다.
+    inner_corners_base_mm:
+      front_left:  [67.499, -364.838, 141.525]
+      front_right: [-74.162, -360.260, 139.460]
+      rear_right:  [-70.257, -581.734, 136.833]
+      rear_left:   [61.445, -574.749, 138.852]
+    # X/Y는 진단 기록이고 production geometry는 이 점의 Z만 floor_z로 사용한다.
+    floor_point_base_mm: [-0.451, -451.048, -7.903]
+    wall_margin_mm: 10.0
     # 2026-09-06 요청: 이 목적지만 안전 여유를 10mm 올린다(공용 30.0 → 40.0).
     # 물체 높이 보정이 들어온 뒤에도 유지한다 — 이 바구니가 왼쪽보다 10mm 낮게 실측돼
     # 있어서(pose.z 173.4 vs 183.8) 같은 여유를 줘도 실제 여유는 더 적기 때문이다.

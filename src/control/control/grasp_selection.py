@@ -30,12 +30,18 @@ from dataclasses import dataclass, field
 
 # --- 후보 상태 ---------------------------------------------------------------
 # raw는 "아직 검사 안 함"이다. 나머지는 검사 결과이고, selected는 valid 중 최종 1등.
+#
+# STATUS_GEOMETRY_INVALID(2026-09-08, 2.6차)는 "물체와 안 맞는 자세"다. 주된 판정은
+# grasp 쪽에서 포인트클라우드로 한다(graspnet_baseline: cloud_mismatch /
+# no_grip_material — control에는 클라우드가 없다). 여기서는 클라우드 없이도 확실히
+# 알 수 있는 한 가지, **파지점이 물체 윗면보다 위에 있는 경우**만 본다.
 STATUS_RAW = "raw"
 STATUS_VALID = "valid"
 STATUS_WIDTH_INVALID = "width_invalid"
 STATUS_IK_FAILED = "ik_failed"
 STATUS_JOINT_LIMIT = "joint_limit"
 STATUS_SAFETY_INVALID = "safety_invalid"
+STATUS_GEOMETRY_INVALID = "geometry_invalid"
 STATUS_SELECTED = "selected"
 
 # dsr_motion.IK_* 와 같은 문자열이어야 한다. 이 모듈이 ROS2를 import하지 않으려고
@@ -134,14 +140,36 @@ class SelectionParams:
     # 실질적으로 J3 여유를 보는 항이 된다.
     joint_margin_ref_deg: float = 30.0
 
+    # --- 접근 적합도 (2026-09-08, 2.5차) ---
+    # 접근각은 이제 grasp 단계에서 hard filter로 자르지 않는다(grasp_params.yaml
+    # approach_angle_hard_max_deg 주석 참조) — "불가"가 아니라 "덜 좋다"이므로 여기서
+    # 점수로 다룬다. 세 값은 그 감점 곡선의 꼭짓점이고, 예전 hard filter의 숫자를
+    # 그대로 물려받아 추적이 되게 했다.
+    #   prefer(15) : 수직에 가깝다 — 만점. 예전 approach_angle_threshold_deg와 같은 값
+    #   soft(30)   : 여기서 0.5점. 예전 approach_angle_max_deg(= 잘리던 선)와 같은 값이라,
+    #                "예전에 잘리던 각도 = 절반짜리 후보"로 읽으면 된다
+    #   zero(75)   : 여기서 0점. grasp의 hard 상한과 같은 값 — 그 위는 애초에 안 온다
+    approach_angle_prefer_deg: float = 15.0
+    approach_angle_soft_max_deg: float = 30.0
+    approach_angle_zero_deg: float = 75.0
+    # 현재 TCP에서 접근 지점까지의 이동량/회전량 정규화 기준. 이만큼 움직여야 하면 0점.
+    # **판정이 아니라 선호도다** — 도달 가능성은 IK가 이미 봤다. 같은 값이면 지금 자세에서
+    # 덜 움직여도 되는 후보를 고르자는 뜻이고, 그만큼 사이클이 짧고 경로가 단순하다.
+    approach_travel_ref_mm: float = 400.0
+    approach_rotation_ref_deg: float = 120.0
+
     # --- 가중치 (합이 1이 아니어도 된다 — 사용 가능한 항만 모아 정규화한다) ---
     weights: dict = field(default_factory=lambda: {
-        "grasp_score": 0.35,       # GraspNet 품질. 여러 판단 요소 중 하나일 뿐이다
-        "width_fit": 0.20,         # RG2 개폭 적합성
-        "center_proximity": 0.20,  # 파지점이 물체 중심에 가까운가
+        "grasp_score": 0.30,       # GraspNet 품질. 여러 판단 요소 중 하나일 뿐이다
+        "width_fit": 0.15,         # RG2 개폭 적합성
+        "center_proximity": 0.15,  # 파지점이 물체 중심에 가까운가
         "height_fit": 0.10,        # 물체 높이의 중간쯤을 무는가 (윗모서리만 물면 미끄러진다)
         "joint_margin": 0.10,      # 관절 한계까지 여유
         "depth_quality": 0.05,     # depth 신뢰도. 물체 단위 값이라 같은 물체 안에서는 동점이다
+        # 2026-09-08(2.5차)에 들어온 두 항. grasp이 각도로 미리 자르지 않게 된 만큼
+        # 그 판단이 여기로 옮겨왔다 — 합을 1로 맞추느라 위 두 항에서 0.05씩 덜어냈다.
+        "approach_angle": 0.10,    # 수직에 가까운 접근인가
+        "approach_travel": 0.05,   # 지금 자세에서 접근 지점까지 얼마나 움직여야 하나
     })
 
 
@@ -158,6 +186,11 @@ class Evaluation:
     joint_ok: bool | None = None
     joint_margin_deg: float | None = None
     wrist_j5_deg: float | None = None    # 참고 기록용. 특이점 판정은 미구현이다
+    # 접근 적합도의 원시값. 점수로 환산하기 전 숫자를 그대로 남겨야 로그에서 "왜 이
+    # 후보가 밀렸나"를 각도/이동량으로 바로 읽을 수 있다.
+    approach_angle_deg: float | None = None
+    approach_travel_mm: float | None = None
+    approach_rotation_deg: float | None = None
     safety_ok: bool | None = None
     geometry: PickGeometry | None = None
     terms: dict = field(default_factory=dict)
@@ -167,7 +200,8 @@ class Evaluation:
     def rejected_before_motion(self) -> bool:
         """실행 전에 탈락한 후보인가. 이 상태들은 로봇을 전혀 움직이지 않았다는 뜻이다."""
         return self.status in (STATUS_WIDTH_INVALID, STATUS_IK_FAILED,
-                               STATUS_JOINT_LIMIT, STATUS_SAFETY_INVALID)
+                               STATUS_JOINT_LIMIT, STATUS_SAFETY_INVALID,
+                               STATUS_GEOMETRY_INVALID)
 
 
 def _clamp01(value: float) -> float:
@@ -269,6 +303,65 @@ def score_depth_quality(obj: ObjectContext) -> float | None:
     return _clamp01(obj.depth_valid_ratio)
 
 
+def approach_angle_deg(approach_axis) -> float | None:
+    """base 접근축이 **수직 아래(0,0,-1)** 에서 몇 도 벌어져 있는지. 0도가 바로 위에서 내려오는 것.
+
+    **`abs()`로 재지 않는다** — 그러면 아래에서 위로 찌르는 자세(작업대를 뚫는 방향)가
+    0도로 나온다. 내적을 그대로 쓰므로 90도 초과는 "작업대 아래에서 올라옴"을 뜻한다.
+
+    grasp이 낸 `approach_angle_deg`를 그대로 쓰지 않고 여기서 다시 재는 이유: 이 축은
+    **실행이 실제로 쓰는 접근축**(dsr_motion.approach_axis_from_pose → PickGeometry)이라,
+    검사와 실행이 갈라질 여지가 없다. 두 값은 같아야 하고 다르면 그게 버그다.
+    """
+    if approach_axis is None or len(approach_axis) < 3:
+        return None
+    x, y, z = (float(v) for v in approach_axis[:3])
+    norm = math.sqrt(x * x + y * y + z * z)
+    if norm < 1e-9:
+        return None
+    return math.degrees(math.acos(max(-1.0, min(1.0, -z / norm))))
+
+
+def score_approach_angle(angle_deg: float | None, params: SelectionParams) -> float | None:
+    """접근각을 0~1로. 모르면 None.
+
+    prefer까지 1.0, soft에서 0.5, zero에서 0.0인 꺾은선이다. 왜 한 번 꺾는가 —
+    직선 하나로 15도에서 75도까지 떨어뜨리면 예전에 "통과/탈락"을 갈랐던 30도 부근의
+    차이가 뭉개진다. 30도를 0.5로 못박아 두면 그 선의 의미가 점수에 남는다.
+    """
+    if angle_deg is None:
+        return None
+    prefer = float(params.approach_angle_prefer_deg)
+    soft = float(params.approach_angle_soft_max_deg)
+    zero = float(params.approach_angle_zero_deg)
+    if angle_deg <= prefer:
+        return 1.0
+    if angle_deg >= zero:
+        return 0.0
+    if soft > prefer and angle_deg <= soft:
+        return 1.0 - 0.5 * (angle_deg - prefer) / (soft - prefer)
+    if zero > soft:
+        return 0.5 * (1.0 - (angle_deg - soft) / (zero - soft))
+    return 0.0
+
+
+def score_approach_travel(travel_mm: float | None, rotation_deg: float | None,
+                          params: SelectionParams) -> float | None:
+    """지금 자세에서 접근 지점까지의 이동량·회전량을 0~1로. 둘 다 모르면 None.
+
+    **도달 가능성 판정이 아니다** — 그건 IK가 이미 봤다. 여기는 "같은 값이면 덜 움직이는
+    쪽"이라는 선호도이고, 둘 중 아는 것만 평균한다(현재 자세를 못 읽었으면 이 항은 없다).
+    """
+    parts = []
+    if travel_mm is not None and params.approach_travel_ref_mm > 0.0:
+        parts.append(1.0 - _clamp01(travel_mm / params.approach_travel_ref_mm))
+    if rotation_deg is not None and params.approach_rotation_ref_deg > 0.0:
+        parts.append(1.0 - _clamp01(rotation_deg / params.approach_rotation_ref_deg))
+    if not parts:
+        return None
+    return _clamp01(sum(parts) / len(parts))
+
+
 def combined_score(terms: dict, weights: dict) -> float:
     """항들을 가중 평균한다. 값이 None인 항은 빼고 **남은 가중치로 다시 정규화**한다.
 
@@ -309,6 +402,34 @@ def check_width(candidate: Candidate, params: SelectionParams) -> str:
     return ""
 
 
+def check_grasp_geometry(candidate: Candidate, obj: ObjectContext,
+                        params: SelectionParams) -> str:
+    """파지점이 물체 안에 있는가. 통과면 빈 문자열, 아니면 거부 사유.
+
+    **여기서 보는 것은 하나뿐이다: 파지점이 물체 윗면보다 위에 있는가.** 그러면 손가락이
+    물체 위 허공에서 닫힌다. `check_min_safety`가 지지면(아래쪽)을 보므로 이 함수는 그
+    반대쪽을 막아 물체의 두께 구간을 위아래로 닫는다.
+
+    **가로 방향(옆 허공)은 여기서 못 본다** — 그 판정에는 포인트클라우드가 필요하고
+    그건 grasp에 있다(graspnet_baseline._refine_on_cloud: cloud_mismatch). 같은 검사를
+    control에서 근사로 흉내내면 두 곳의 기준이 갈라지므로 하지 않는다.
+
+    여유는 `support_tolerance_mm`을 그대로 쓴다 — 손끝 위치가 모델값이라(
+    tool.grasp_center_offset_mm) 아래쪽에 주는 것과 같은 크기의 모델 오차 여유를
+    위쪽에도 준다. 새 상수를 만들면 근거 없는 값이 하나 더 생긴다.
+    """
+    if obj.center_mm is None or not (obj.height_mm > 0.0):
+        return ""            # 물체 두께를 모르면 판단하지 않는다
+    top_z = float(obj.center_mm[2])
+    grasp_z = float(candidate.pose.position.z)
+    ceiling = top_z + params.support_tolerance_mm
+    if grasp_z > ceiling:
+        return (f"파지점 z {grasp_z:.1f}mm가 물체 윗면 {top_z:.1f}mm보다 "
+                f"{grasp_z - top_z:.1f}mm 위 (허용 {params.support_tolerance_mm:.1f}mm) — "
+                "손가락이 물체 위 허공에서 닫힌다")
+    return ""
+
+
 def check_min_safety(geometry: PickGeometry, obj: ObjectContext,
                      params: SelectionParams) -> str:
     """최소 안전 검사. 통과면 빈 문자열, 아니면 거부 사유.
@@ -340,12 +461,20 @@ def check_min_safety(geometry: PickGeometry, obj: ObjectContext,
 # --- 평가 · 선택 ----------------------------------------------------------------
 
 def evaluate_candidates(candidates, obj: ObjectContext, params: SelectionParams,
-                        geometry_of, ik_verdict_of) -> list:
+                        geometry_of, ik_verdict_of,
+                        current_posx=None, rotation_diff=None) -> list:
     """후보를 하나씩 검사해 Evaluation 목록을 돌려준다. 로봇은 움직이지 않는다.
 
     `geometry_of(pose) -> PickGeometry`, `ik_verdict_of(posx) -> verdict`는 호출부가 준다
     (`verdict`는 `.ok` / `.known` / `.status` / `.joint_margin_deg` / `.posj`를 갖는
     dsr_motion.IkVerdict 형태). 검사 순서는 **개폭 → IK → 관절 → 최소 안전**이다.
+
+    `current_posx`(지금 TCP [x,y,z,rx,ry,rz])와 `rotation_diff(a_zyz, b_zyz) -> deg`를
+    주면 접근 적합도에 이동량·회전량이 들어간다. 둘 다 선택 인자다 — 현재 자세를 못
+    읽는 상황(movel 직후 aux_control 무응답 구간)에서도 나머지 판정은 그대로 돌아야 한다.
+    회전 비교를 콜러블로 받는 이유: ZYZ는 ry가 180도 근처면 같은 방향이 다른 (rx,rz)로
+    나오므로 성분 차로 못 재는데, 그 계산(dsr_motion.rotation_diff_deg)을 여기로 들이면
+    이 모듈이 ROS2/perception_common에 묶인다.
 
     **IK를 확인하지 못한 경우(ikin 무응답)는 탈락시키지 않는다.** ikin이 죽었다는 이유로
     모든 후보를 버리면 pick이 통째로 멈춘다 — 그건 이 작업이 없애려는 실패 모드
@@ -365,8 +494,26 @@ def evaluate_candidates(candidates, obj: ObjectContext, params: SelectionParams,
             evaluation.rejection_reason = reason
             continue
 
+        # 물체 밖 자세는 IK를 묻기 전에 거른다 — ikin 왕복이 후보당 약 66ms라
+        # 어차피 못 쓸 후보에 그 시간을 쓸 이유가 없다.
+        reason = check_grasp_geometry(candidate, obj, params)
+        if reason:
+            evaluation.status = STATUS_GEOMETRY_INVALID
+            evaluation.rejection_reason = reason
+            continue
+
         geometry = geometry_of(candidate.pose)
         evaluation.geometry = geometry
+        # **탈락한 후보에도 각도를 남긴다.** IK로 떨어진 후보가 몇 도였는지가 보여야
+        # hard 상한(grasp_params.yaml)을 실측으로 조일지 풀지 판단할 수 있다.
+        evaluation.approach_angle_deg = approach_angle_deg(geometry.approach_axis)
+        if current_posx is not None and len(current_posx) >= 3:
+            evaluation.approach_travel_mm = math.dist(
+                [float(v) for v in current_posx[:3]],
+                [float(v) for v in geometry.approach_posx[:3]])
+            if rotation_diff is not None and len(current_posx) >= 6:
+                evaluation.approach_rotation_deg = float(
+                    rotation_diff(current_posx[3:6], geometry.approach_posx[3:6]))
 
         # 접근점부터 본다 — 실행에서도 거기가 첫 이동이다.
         approach = ik_verdict_of(geometry.approach_posx)
@@ -412,6 +559,9 @@ def evaluate_candidates(candidates, obj: ObjectContext, params: SelectionParams,
             "height_fit": score_height_fit(candidate, obj),
             "joint_margin": score_joint_margin(evaluation.joint_margin_deg, params),
             "depth_quality": score_depth_quality(obj),
+            "approach_angle": score_approach_angle(evaluation.approach_angle_deg, params),
+            "approach_travel": score_approach_travel(
+                evaluation.approach_travel_mm, evaluation.approach_rotation_deg, params),
         }
         evaluation.total_score = combined_score(evaluation.terms, params.weights)
 
@@ -436,7 +586,8 @@ def counts(evaluations) -> dict:
     """상태별 후보 수. 보고·로그가 그대로 쓴다."""
     tally = {status: 0 for status in (STATUS_RAW, STATUS_VALID, STATUS_WIDTH_INVALID,
                                       STATUS_IK_FAILED, STATUS_JOINT_LIMIT,
-                                      STATUS_SAFETY_INVALID, STATUS_SELECTED)}
+                                      STATUS_SAFETY_INVALID, STATUS_GEOMETRY_INVALID,
+                                      STATUS_SELECTED)}
     for evaluation in evaluations:
         tally[evaluation.status] = tally.get(evaluation.status, 0) + 1
     return tally
@@ -461,6 +612,12 @@ def log_line(evaluation: Evaluation) -> str:
     if evaluation.wrist_j5_deg is not None:
         # 특이점 판정은 미구현 — 사람이 로그에서 보고 판단하라는 뜻으로만 남긴다.
         parts.append(f"j5={evaluation.wrist_j5_deg:.1f}deg")
+    if evaluation.approach_angle_deg is not None:
+        parts.append(f"angle={evaluation.approach_angle_deg:.1f}deg")
+    if evaluation.approach_travel_mm is not None:
+        parts.append(f"travel={evaluation.approach_travel_mm:.0f}mm")
+    if evaluation.approach_rotation_deg is not None:
+        parts.append(f"rot={evaluation.approach_rotation_deg:.0f}deg")
     parts.append(f"safety={_flag(evaluation.safety_ok)}")
     if evaluation.total_score is not None:
         terms = " ".join(f"{name}={value:.2f}" for name, value in evaluation.terms.items()

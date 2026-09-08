@@ -27,7 +27,7 @@ def test_camera_meter_output_becomes_base_mm_pose():
     rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
     picked, _ = graspnet_baseline._select_candidates(
         [_raw(rotation, [0.1, 0.2, 0.3])], T_base_camera_mm, T_graspnet_tcp_mm,
-        15.0, 30.0, 5.0, points_base=None)
+        75.0, points_base=None)
 
     assert len(picked) == 1
     best = picked[0]
@@ -45,11 +45,11 @@ def test_graspnet_depth_advances_along_the_approach_axis():
     common = dict(T_base_camera_mm=np.eye(4), T_graspnet_tcp_mm=np.eye(4))
     without, _ = graspnet_baseline._select_candidates(
         [_raw(rotation, [0.0, 0.0, 0.5], depth_m=0.0)],
-        common['T_base_camera_mm'], common['T_graspnet_tcp_mm'], 15.0, 30.0, 5.0,
+        common['T_base_camera_mm'], common['T_graspnet_tcp_mm'], 75.0,
         points_base=None)
     with_depth, _ = graspnet_baseline._select_candidates(
         [_raw(rotation, [0.0, 0.0, 0.5], depth_m=0.03)],
-        common['T_base_camera_mm'], common['T_graspnet_tcp_mm'], 15.0, 30.0, 5.0,
+        common['T_base_camera_mm'], common['T_graspnet_tcp_mm'], 75.0,
         points_base=None)
     without, with_depth = without[0], with_depth[0]
     # 접근축이 base -Z이므로 30mm 전진은 z가 30mm 낮아지는 것으로 나타난다.
@@ -61,7 +61,7 @@ def test_upright_filter_rejects_candidates_that_stab_from_below():
     """아래에서 위로 찌르는 자세는 abs()로 재면 0도로 통과한다 — 걸러져야 한다."""
     upward = np.column_stack([(0.0, 0.0, 1.0), (0.0, 1.0, 0.0), (-1.0, 0.0, 0.0)])
     picked, diagnostics = graspnet_baseline._select_candidates(
-        [_raw(upward, [0.0, 0.0, 0.5])], np.eye(4), np.eye(4), 15.0, 30.0, 5.0,
+        [_raw(upward, [0.0, 0.0, 0.5])], np.eye(4), np.eye(4), 75.0,
         points_base=None)
     assert picked == []
     assert diagnostics['angles_deg'] == [180.0]
@@ -92,7 +92,7 @@ def test_refine_is_not_dragged_sideways_by_a_tilted_approach(tilt_deg):
     T = np.eye(4)
     T[:3, :3] = np.column_stack([closing, other, approach])
 
-    position, _ = graspnet_baseline._refine_on_cloud(T, points, grasp_depth_mm=4.0)
+    position, _, _ = graspnet_baseline._refine_on_cloud(T, points, grasp_depth_mm=4.0)
     # 판의 중심은 원점이다. 가로로 몇 mm 안쪽이어야 한다.
     assert np.hypot(position[0], position[1]) < 6.0, (
         f"기울기 {tilt_deg}도에서 파지점이 가로로 {np.hypot(position[0], position[1]):.1f}mm 밀렸다")
@@ -105,7 +105,7 @@ def test_refine_width_is_measured_across_the_finger_path():
     points = _plate_cloud(half_x=40.0, half_y=25.0)
     T = np.eye(4)                       # closing=+X, other=+Y, approach=+Z
     T[:3, :3] = np.column_stack([(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, -1.0)])
-    _, width = graspnet_baseline._refine_on_cloud(T, points, grasp_depth_mm=4.0)
+    _, width, _ = graspnet_baseline._refine_on_cloud(T, points, grasp_depth_mm=4.0)
     assert width == pytest.approx(80.0, abs=6.0)
 
 
@@ -161,7 +161,7 @@ def test_top_k_candidates_are_kept_in_score_order():
     raws = [_raw(rotation, [0.01 * i, 0.0, 0.5], score=0.1 * i) for i in range(1, 8)]
 
     picked, diagnostics = graspnet_baseline._select_candidates(
-        raws, np.eye(4), np.eye(4), 15.0, 30.0, 5.0, points_base=None, top_k=5)
+        raws, np.eye(4), np.eye(4), 75.0, points_base=None, top_k=5)
 
     assert len(picked) == 5, "top_k 만큼 유지돼야 한다"
     assert diagnostics['raw_count'] == 7
@@ -179,6 +179,182 @@ def test_top_k_is_capped_by_available_candidates():
     """후보가 top_k보다 적으면 있는 만큼만 — 빈 자리를 만들지 않는다."""
     rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
     picked, _ = graspnet_baseline._select_candidates(
-        [_raw(rotation, [0.0, 0.0, 0.5])], np.eye(4), np.eye(4), 15.0, 30.0, 5.0,
+        [_raw(rotation, [0.0, 0.0, 0.5])], np.eye(4), np.eye(4), 75.0,
         points_base=None, top_k=10)
     assert len(picked) == 1
+
+
+# --- 접근각 정책 (2026-09-08, 2.5차) -----------------------------------------
+# 예전에는 threshold(15)부터 step(5)씩 넓히다 **처음 통과자가 나오면 멈춰서**, 실제 상한이
+# 30도가 아니라 "후보가 하나라도 있는 가장 좁은 5도 구간"이었다. 그 구조를 없애고 hard
+# 상한 하나만 남긴 것이 이 정책이다. 아래 테스트가 지키려는 것:
+#   - 수직에 가까운 후보 하나가 있어도 기울어진 후보가 같이 살아남는다 (예전엔 죽었다)
+#   - 명백히 위험한 각도는 여전히 hard reject
+#   - Top-K가 그대로 상한 역할을 한다
+
+def _tilted(angle_deg, score=0.8):
+    """수직 아래에서 `angle_deg`만큼 기운 접근축을 가진 raw 후보 (base = camera = 단위행렬)."""
+    rad = np.radians(angle_deg)
+    approach = np.array([np.sin(rad), 0.0, -np.cos(rad)])
+    closing = np.array([0.0, 1.0, 0.0])
+    third = np.cross(approach, closing)
+    rotation = np.column_stack([approach, closing, third])
+    return _raw(rotation, [0.0, 0.0, 0.5], score=score)
+
+
+def test_upright_candidate_no_longer_starves_the_tilted_ones():
+    """**2.5차의 핵심 회귀 방지.** 12도짜리가 하나 있다고 25/40도가 버려지면 안 된다.
+
+    예전 구조에서는 15도 구간에서 멈춰 나머지가 통째로 사라졌다 — 2026-09-08 실물
+    로그에서 raw=50인데 filtered=1로 나오던 물체들이 이것이다.
+    """
+    raws = [_tilted(12.0, score=0.9), _tilted(25.0, score=0.8), _tilted(40.0, score=0.7)]
+    picked, diagnostics = graspnet_baseline._select_candidates(
+        raws, np.eye(4), np.eye(4), 75.0, points_base=None)
+    assert len(picked) == 3, "기울어진 후보가 수직 후보 때문에 죽으면 안 된다"
+    assert diagnostics['passed_count'] == 3
+
+
+def test_extreme_angle_is_hard_rejected():
+    """Case 3 — 명백히 위험한 접근각은 grasp 단계에서 자른다."""
+    raws = [_tilted(20.0), _tilted(80.0), _tilted(100.0)]
+    picked, diagnostics = graspnet_baseline._select_candidates(
+        raws, np.eye(4), np.eye(4), 75.0, points_base=None)
+    assert diagnostics['passed_count'] == 1
+    assert len(picked) == 1
+    assert picked[0]['approach_angle_deg'] == pytest.approx(20.0, abs=0.1)
+
+
+def test_hard_max_is_configurable():
+    """상한은 설정값이다 — 실물에서 작업대를 스치면 내릴 수 있어야 한다."""
+    raws = [_tilted(50.0)]
+    assert graspnet_baseline._select_candidates(
+        raws, np.eye(4), np.eye(4), 75.0, points_base=None)[0]
+    assert graspnet_baseline._select_candidates(
+        raws, np.eye(4), np.eye(4), 45.0, points_base=None)[0] == []
+
+
+def test_legacy_pass_count_is_reported_for_comparison():
+    """정책 변경 효과를 로그로 보려면 '예전 기준이면 몇 개였나'가 함께 있어야 한다."""
+    raws = [_tilted(10.0), _tilted(28.0), _tilted(44.0), _tilted(62.0)]
+    _, diagnostics = graspnet_baseline._select_candidates(
+        raws, np.eye(4), np.eye(4), 75.0, legacy_max_deg=30.0, points_base=None)
+    assert diagnostics['legacy_pass_count'] == 2      # 10, 28
+    assert diagnostics['passed_count'] == 4
+    assert diagnostics['legacy_max_deg'] == 30.0
+    assert diagnostics['hard_max_deg'] == 75.0
+
+
+def test_top_k_still_caps_the_widened_policy():
+    """Case 5 — 각도를 풀어 후보가 늘어도 world_state로 나가는 수는 top_k로 묶인다."""
+    raws = [_tilted(5.0 + i * 4.0, score=0.9 - i * 0.01) for i in range(15)]
+    picked, diagnostics = graspnet_baseline._select_candidates(
+        raws, np.eye(4), np.eye(4), 75.0, points_base=None, top_k=10)
+    assert diagnostics['passed_count'] == 15
+    assert len(picked) == 10, "top_k가 상한 역할을 그대로 해야 한다"
+    scores = [c['score'] for c in picked]
+    assert scores == sorted(scores, reverse=True)
+
+
+def test_hard_max_default_ignores_the_old_key():
+    """예전 키가 남아 있는 설정 파일에서 30도가 그대로 상한이 되면 2.5차가 무효가 된다."""
+    assert graspnet_baseline._hard_max_deg({'approach_angle_max_deg': 30.0}) == pytest.approx(75.0)
+    assert graspnet_baseline._hard_max_deg({'approach_angle_hard_max_deg': 60.0}) == pytest.approx(60.0)
+
+
+# --- 되잡기의 역할 경계 (2026-09-08, 2.6차에서 시험하고 되돌린 것) --------------
+# 2.6차에서 "GraspNet의 가로 위치를 유지하고 깊이·폭만 보정"으로 바꿔 봤다가 실물에서
+# 더 나빠져 되돌렸다(graspnet_baseline._refine_on_cloud docstring 참조). 그때 확인한
+# 사실을 테스트로 못박아 둔다 — 같은 시도를 근거 없이 반복하지 않도록.
+
+def _pack_cloud(half_x=95.0, half_y=46.0, thickness=15.0, n=20000, seed=3):
+    """물티슈 팩 크기(190 x 92 x 15mm). 윗면 z=0, 중심 (0, 0)."""
+    rng = np.random.default_rng(seed)
+    xy = rng.uniform([-half_x, -half_y], [half_x, half_y], size=(n, 2))
+    z = rng.uniform(-thickness, 0.0, size=(n, 1))
+    return np.hstack([xy, z])
+
+
+def _candidate_frame(x, y, z=40.0, angle_deg=0.0):
+    """(x, y, z)에서 내려오는 후보. 닫힘축은 base y(팩의 짧은 축)."""
+    rad = np.radians(angle_deg)
+    approach = np.array([np.sin(rad), 0.0, -np.cos(rad)])
+    closing = np.array([0.0, 1.0, 0.0])
+    T = np.eye(4)
+    T[:3, 0], T[:3, 1], T[:3, 2] = closing, np.cross(approach, closing), approach
+    T[:3, 3] = [x, y, z]
+    return T
+
+
+def test_refine_recenters_on_the_measured_cloud():
+    """**되잡기는 가로 위치를 클라우드 기준으로 다시 잡는다** — 이것이 의도된 동작이다.
+
+    2026-09-08 실물에서 이 재배치를 끄자 파지점이 물체 중심에서 65~88mm 벗어나고
+    개폭이 73~141mm로 튀어(4/10이 RG2 110mm 초과로 탈락) 파지가 통째로 나빠졌다.
+    GraspNet이 잘린 클라우드를 받는 구성에서는 그 위치 예측을 믿을 수 없다.
+    """
+    points = _pack_cloud()
+    finals = []
+    for x in (-70.0, -35.0, 0.0, 35.0, 70.0):
+        position, width, diag = graspnet_baseline._refine_on_cloud(
+            _candidate_frame(x, 0.0), points, grasp_depth_mm=8.0)
+        assert diag['status'] == graspnet_baseline.GEOMETRY_OK
+        finals.append(round(float(position[0]), 1))
+        assert width == pytest.approx(92.0, abs=6.0), "폭은 실측 클라우드에서 나와야 한다"
+    assert max(finals) - min(finals) < 5.0, (
+        f"가로 위치는 클라우드 기준으로 모인다(의도된 동작): {finals}")
+
+
+def test_candidate_lateral_is_reported_as_a_diagnostic():
+    """GraspNet 위치가 얼마나 벗어나 있었는지는 **진단으로 남긴다** — 버리는 기준이 아니다."""
+    points = _pack_cloud()
+    near = graspnet_baseline._refine_on_cloud(
+        _candidate_frame(0.0, 0.0), points, grasp_depth_mm=8.0)[2]
+    far = graspnet_baseline._refine_on_cloud(
+        _candidate_frame(150.0, 0.0), points, grasp_depth_mm=8.0)[2]
+    assert near['candidate_lateral_mm'] < 5.0
+    assert far['candidate_lateral_mm'] > 100.0
+    # 멀어도 버리지 않는다 — 되잡기가 구제하던 후보까지 죽으면 파지가 나빠진다.
+    assert far['status'] == graspnet_baseline.GEOMETRY_OK
+
+
+def test_midair_depth_offset_is_corrected():
+    """예전 '허공 8~34mm' 문제는 접근축 보정으로 계속 막힌다."""
+    points = _pack_cloud()
+    position, _, diag = graspnet_baseline._refine_on_cloud(
+        _candidate_frame(0.0, 0.0, z=34.0), points, grasp_depth_mm=8.0)
+    assert diag['status'] == graspnet_baseline.GEOMETRY_OK
+    assert position[2] < 0.0, "물체 표면 안쪽으로 내려와야 한다"
+    assert diag['depth_shift_mm'] > 34.0
+
+
+def test_window_is_not_widened_to_the_whole_cloud():
+    """창에 재료가 없으면 **전체 클라우드로 풀지 않고** invalid로 둔다 (2.6차에서 남긴 것).
+
+    전체로 풀면 물체 반대쪽 끝 점으로 폭을 재서 말도 안 되는 개폭이 나온다.
+    """
+    # 점 몇 개짜리 성긴 클라우드 — 창을 어떻게 잡아도 최소 점수를 못 채운다.
+    points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+                       [200.0, 200.0, -50.0]])
+    _, width, diag = graspnet_baseline._refine_on_cloud(
+        _candidate_frame(0.0, 0.0), points, grasp_depth_mm=8.0, min_grip_points=20)
+    assert diag['status'] == graspnet_baseline.GEOMETRY_NO_MATERIAL
+    assert width == 0.0
+
+
+def test_rejected_candidates_are_backfilled_from_the_next_ones():
+    """기하 검사로 빠진 자리는 뒤 후보로 채운다 — Top-K를 둔 이유가 그것이다."""
+    points = _pack_cloud()
+    T_base_camera = np.eye(4)
+    # GraspNet(X=접근) → TCP(Z=접근) 축 맞바꿈. 빼면 되잡기가 접근축을 수평으로 본다.
+    T_graspnet_tcp = np.array([[0.0, 0.0, 1.0, 0.0],
+                               [1.0, 0.0, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, 0.0],
+                               [0.0, 0.0, 0.0, 1.0]])
+    rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
+    raws = [_raw(rotation, [0.0, 0.0, 0.040], score=0.9 - i * 0.01) for i in range(8)]
+    picked, diagnostics = graspnet_baseline._select_candidates(
+        raws, T_base_camera, T_graspnet_tcp, 75.0, points_base=points, top_k=5)
+    assert len(picked) == 5
+    assert diagnostics['topk_count'] == 5
+    assert diagnostics['examined_count'] >= 5

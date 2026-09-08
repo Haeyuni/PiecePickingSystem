@@ -64,6 +64,14 @@ def _quaternion_from_matrix(matrix: np.ndarray) -> tuple[float, float, float, fl
 # base 좌표계에서 "아래로 똑바로" 내려가는 방향. 접근축을 이 벡터와 비교해 기울기를 잰다.
 _BASE_DOWN = np.array([0.0, 0.0, -1.0])
 
+# 접근각 hard 상한의 기본값(도). 설정에 `approach_angle_hard_max_deg`가 없을 때 쓴다.
+# 근거: 접근 후퇴는 접근축을 따라 80mm다(skill_params.yaml motion.approach_height_mm).
+# 75도에서 그 후퇴가 주는 **수직 여유는 80 x cos(75도) = 20.7mm**뿐이라, 이보다 더
+# 기울면 그리퍼가 작업대와 거의 나란히 쓸고 들어온다 — control의 최소 안전 검사는
+# 파지점 한 점의 z만 보므로(check_min_safety) 그 진입 경로를 못 본다.
+# 90도를 넘으면 작업대 아래에서 위로 찌르는 자세다(각도를 abs()로 재지 않는 이유).
+_DEFAULT_HARD_MAX_DEG = 75.0
+
 
 def _camera_offset(params: dict) -> tuple[float, float, float]:
     """설정에서 카메라 좌표계 오프셋(mm) 3축을 읽는다.
@@ -89,6 +97,22 @@ _PAD_HALF_MM = 12.0
 _AXIS_RADIUS_MM = 12.0
 _MIN_LOCAL_POINTS = 40
 
+# --- 후보 기하 판정 (2026-09-08, 2.6차) ---------------------------------------
+GEOMETRY_OK = "ok"
+# 후보의 그리퍼 중심선 근처에 물체 점이 없다 = 물체 **옆 허공**을 잡는 자세.
+GEOMETRY_CLOUD_MISMATCH = "cloud_mismatch"
+# 중심선은 물체 위인데 손가락 창 안에 물릴 재료가 없다(스치듯 지나간다).
+GEOMETRY_NO_MATERIAL = "no_grip_material"
+
+# 중심선에서 물체까지 이 이상 떨어지면 손가락이 물체 옆을 지나간다. **임의값이 아니라
+# 손가락 패드 반폭(_PAD_HALF_MM)이다** — 패드보다 멀리 있는 재료는 닫아도 안 닿는다.
+_CLOUD_LATERAL_TOL_MM = _PAD_HALF_MM
+# 손가락 창 안에 있어야 하는 최소 점 수. 창을 풀어 줄 때 쓰던 기준과 같은 값이다.
+_MIN_GRIP_POINTS = 20
+# 기하 검사에서 버려지는 후보를 감안해 top_k의 몇 배까지 살펴볼지. 되잡기가 후보마다
+# 클라우드 전체를 투영하므로(실측 173k점) 무한정 늘릴 수 없다.
+_GEOMETRY_EXAMINE_FACTOR = 3
+
 
 def _local_surface(proj_a, lateral, radius_mm: float) -> float:
     """그리퍼 **중심선 주변**의 점들만 보고 접근축 위 표면 위치를 낸다.
@@ -105,8 +129,11 @@ def _local_surface(proj_a, lateral, radius_mm: float) -> float:
 
 
 def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
-                     grasp_depth_mm: float) -> tuple[np.ndarray, float]:
-    """GraspNet이 준 **자세는 유지**하고, 위치와 개폭은 실제 포인트클라우드로 다시 잡는다.
+                     grasp_depth_mm: float,
+                     lateral_tol_mm: float = _CLOUD_LATERAL_TOL_MM,
+                     min_grip_points: int = _MIN_GRIP_POINTS
+                     ) -> tuple[np.ndarray, float, dict]:
+    """GraspNet이 준 **자세는 유지**하고, 위치와 개폭은 실측 포인트클라우드로 다시 잡는다.
 
     **왜 필요한가.** GraspNet은 원래 장면 전체의 포인트클라우드로 학습됐는데 이 시스템은
     물체 하나를 마스크로 잘라낸 클라우드만 준다(node._candidates_for). 그 입력은 모델의
@@ -116,19 +143,23 @@ def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
     반면 **자세(접근축/닫힘축)는 쓸 만하다** — 그건 국소 형상에서 나오는 값이라 잘린
     클라우드로도 의미가 있다. 그래서 자세만 쓰고 위치·폭은 측정값으로 확정한다.
 
-    **모든 측정은 그리퍼 중심선 주변의 국소 창에서 한다.** 예전에는 표면을 클라우드
-    **전체의 접근축 극값**(`percentile(proj_a, 3)`)으로 잡고 거기서 15mm 밴드를 떴는데,
-    접근축이 기울면 그 극값이 파지 중심이 아니라 **먼 모서리**가 된다. 그러면 밴드가
-    윗면이 아니라 모서리를 지나는 대각 슬랩이 되어 중심과 폭이 통째로 그리로 끌려갔다.
-    2026-09-07 실측(물체는 가만히 둔 채 접근축만 기울여 봄):
+    ## 2026-09-08 (2.6차): 가로 위치를 GraspNet 것으로 두려다 되돌렸다
 
-        기울기  0도 → 파지점 (321.1, 123.2, 327.1)  폭 97.8mm
-        기울기 20도 → 파지점 (300.8, 134.6, 326.6)  폭 58.5mm   (가로 18.1mm 이동)
-        기울기 30도 → 파지점 (287.7, 146.0, 323.8)  폭 31.3mm   (가로 35.2mm 이동)
+    Top-K 후보가 최종 위치 2곳으로 뭉치는 문제 때문에, 가로 위치를 GraspNet 것으로 두고
+    깊이·폭만 보정하도록 바꿔 봤다. **실물에서 더 나빠져서 되돌렸다**(같은 날 obj_015):
 
-    물체는 움직이지 않았다. GraspNet은 거의 항상 15~30도 기울어진 자세를 내므로 이
-    미끄러짐이 매 파지마다 작용했고, 같은 물체의 폭이 프레임마다 72~94mm로 널뛴 것도
-    이것이다. 아래처럼 국소 창에서 재면 기울기와 무관하게 같은 값이 나온다.
+        raw_w=100.0 (10개 전부 — GraspNet 폭 출력이 포화값이다)
+        → 후보 자리에서 잰 폭 73~141mm, 그중 4개가 RG2 최대 개폭 110mm 초과로 탈락
+        → 파지점이 물체 중심에서 65~88mm 벗어남 (center_proximity 0.00~0.33)
+
+    즉 **GraspNet의 가로 위치는 지켜줄 만한 정보가 아니었다.** 위 docstring이 이미 말하고
+    있던 그대로다 — 잘린 클라우드를 받는 이 구성에서는 위치·폭 예측이 신뢰할 수 없고,
+    "후보마다 위치가 다르다"는 것도 실제 파지 지점의 다양성이 아니라 그 잡음이다.
+    후보가 2곳으로 뭉치는 것은 되잡기의 결함이 아니라 **GraspNet에 물체 하나만 잘라
+    넣고 있다는 사실의 증상**이다. 그건 여기가 아니라 입력을 바꿔야 풀린다.
+
+    **2.6차에서 남긴 것**: 손가락 창에 물릴 재료가 없으면 끌어오지 않고 버리는 판정
+    (`no_grip_material`)과 진단값들. 위치를 되돌린 뒤에도 그 검사는 유효하다.
 
     계산(모두 후보 자신의 축 기준):
       1) 가로 중심 (닫힘축 c, 나머지축 o) → 클라우드 중앙값. 물체의 중심이다.
@@ -137,6 +168,7 @@ def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
       4) 최종 가로 위치 → 그 창 안의 실측 범위 중앙 (비대칭 물체에서 중앙값보다 정확)
     """
     closing, other, approach = T_base_tcp[:3, 0], T_base_tcp[:3, 1], T_base_tcp[:3, 2]
+    origin = T_base_tcp[:3, 3]
     proj_c = points_base @ closing
     proj_o = points_base @ other
     proj_a = points_base @ approach
@@ -148,15 +180,30 @@ def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
     lateral = np.hypot(proj_c - c0, proj_o - o0)
     a_grasp = _local_surface(proj_a, lateral, _AXIS_RADIUS_MM) + float(grasp_depth_mm)
 
+    # 후보 자신의 중심선이 물체에서 얼마나 떨어져 있었는지 — **진단으로만 남긴다.**
+    # 2.6차에서 이 값으로 후보를 버려 봤는데, 그러면 되잡기가 구제하던 후보까지 죽어
+    # 파지가 통째로 나빠졌다(위 docstring). 값은 GraspNet 위치 품질의 지표로 유용하다.
+    candidate_lateral = float(np.hypot(
+        float(origin @ closing) - c0, float(origin @ other) - o0))
+    diag = {
+        "cloud_points": int(len(points_base)),
+        "candidate_lateral_mm": round(candidate_lateral, 1),
+        "closing_extent_mm": float(np.subtract(*np.percentile(proj_c, [98.0, 2.0]))),
+    }
+
     # 3) 손가락 패드가 실제로 지나는 창. 여기 있는 점만이 닫을 때 실제로 물리는 재료다.
     #    마스크가 배경으로 새어 나온 점은 깊이가 더 깊어 이 창 밖으로 자연히 빠진다.
     window = ((np.abs(proj_o - o0) <= _PAD_HALF_MM)
               & (np.abs(proj_a - a_grasp) <= _PAD_HALF_MM))
-    if int(window.sum()) < 20:
+    if int(window.sum()) < int(min_grip_points):
         # 얇거나 성긴 물체 — 창을 접근축 방향으로만 풀어 준다(가로 제한은 유지).
         window = np.abs(proj_o - o0) <= _PAD_HALF_MM
-    if int(window.sum()) < 20:
-        window = np.ones(len(points_base), dtype=bool)
+    diag["window_points"] = int(window.sum())
+    if int(window.sum()) < int(min_grip_points):
+        # **전체 클라우드로는 풀지 않는다** (2.6차에서 남긴 것). 예전에는 여기서 전체를
+        # 썼는데, 그러면 물체 반대쪽 끝 점으로 폭을 재서 말도 안 되는 개폭이 나왔다.
+        diag["status"] = GEOMETRY_NO_MATERIAL
+        return origin.copy(), 0.0, diag
 
     # 남은 이상치에 폭이 끌려가지 않게 min/max 대신 백분위수를 쓴다.
     c_lo, c_hi = np.percentile(proj_c[window], [2.0, 98.0])
@@ -164,31 +211,51 @@ def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
     position = (float(c_lo + c_hi) / 2.0 * closing
                 + float(o_lo + o_hi) / 2.0 * other
                 + a_grasp * approach)
-    return position, float(c_hi - c_lo)
+    diag.update({
+        "status": GEOMETRY_OK,
+        "window_width_mm": round(float(c_hi - c_lo), 1),
+        "depth_shift_mm": round(float(a_grasp - (origin @ approach)), 1),
+    })
+    return position, float(c_hi - c_lo), diag
 
 
 def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
-                       T_graspnet_tcp_mm: np.ndarray, threshold_deg: float,
-                       max_deg: float, step_deg: float,
+                       T_graspnet_tcp_mm: np.ndarray, hard_max_deg: float,
+                       legacy_max_deg: float = 30.0,
                        camera_offset_mm=(0.0, 0.0, 0.0),
                        points_base=None, refine_depth_mm: float = 8.0,
-                       top_k: int = 10) -> tuple[list, dict]:
-    """camera frame GraspNet 후보들을 base로 한 번에 옮기고, **접근축이 수직에 가까운**
-    후보만 남겨 점수 상위 `top_k`개를 돌려준다. (후보 리스트, 진단정보)를 반환한다.
+                       top_k: int = 10,
+                       lateral_tol_mm: float = _CLOUD_LATERAL_TOL_MM,
+                       min_grip_points: int = _MIN_GRIP_POINTS) -> tuple[list, dict]:
+    """camera frame GraspNet 후보들을 base로 한 번에 옮기고, **명백히 위험한 접근각만**
+    걷어낸 뒤 점수 상위 `top_k`개를 돌려준다. (후보 리스트, 진단정보)를 반환한다.
 
     **왜 base로 옮긴 뒤에 각도를 재는가.** GraspNet의 접근축은 `rotation_matrix[:, 0]`인데
     그건 **카메라 좌표** 기준이다. 카메라가 손목에 달려 있어(eye-in-hand) 로봇 자세마다
     카메라가 기울어지므로, 카메라 기준 각도는 "작업대에 대해 수직인가"와 아무 관계가 없다.
     base로 옮긴 뒤 `(0, 0, -1)`과 비교해야 의미가 있다.
 
-    **왜 기울기를 거르는가.** 실물 5회(2026-09-07): 후보 기울기가 34~64도로 나왔고 그중
-    64.4도와 48.7도는 **IK가 안 풀려 이동 자체가 실패**했다. 나머지도 평평한 물체를 옆에서
-    찌르는 자세라 RG2로 물리적으로 물기 어려웠다. GraspNet은 후보를 여러 개 내므로,
-    그중 수직에 가까운 것을 고르면 같은 추론 결과로 실행 가능한 파지를 얻을 수 있다.
+    **여기서 각도로 거르는 것은 최소한으로 한다 (2026-09-08, 2.5차).**
 
-    **넓혀가며 재시도하는 이유.** 임계각을 좁게 잡으면 어떤 장면에서는 후보가 0개가 되어
-    그 물체를 아예 못 집는다. 좁은 값부터 시작해 필요한 만큼만 넓히면, 가능한 한 수직에
-    가까운 후보를 쓰되 "후보 없음"으로 끝나지는 않는다.
+    원래 이 필터는 두 가지를 한꺼번에 막고 있었다.
+      (1) IK가 안 풀리는 자세 — 2026-09-07 실물에서 64.4도/48.7도 후보가 그랬다.
+      (2) RG2로 물리적으로 물기 어려운 자세 — 평평한 물체를 옆에서 찌르는 것.
+    그런데 (1)은 이제 control이 **직접** 본다(grasp_selection: 접근/파지 IK + 관절 한계).
+    각도는 IK 실패의 대리 지표일 뿐이라, 로봇에 물어볼 수 있게 된 지금은 여기서 각도로
+    미리 자르면 **실행 가능한 후보까지 같이 죽는다.** (2)는 애초에 "불가"가 아니라
+    "덜 좋다"이므로 hard filter가 아니라 랭킹에서 다룰 문제다
+    (control/grasp_selection.score_approach_angle).
+
+    그래서 여기 남기는 것은 **명백히 위험한 접근각뿐**이다(`hard_max_deg`). 그 위는
+    접근 후퇴(80mm)로 얻는 수직 여유가 거의 없어 그리퍼가 작업대와 나란히 쓸고
+    들어오고, 90도를 넘으면 아예 작업대를 뚫고 아래에서 올라오는 자세다.
+
+    **예전의 "넓혀가며 재시도"는 없앴다.** `threshold_deg`(15)부터 `step_deg`(5)씩
+    넓히다 **처음 통과자가 나오는 순간 멈추는** 구조라, 실제 상한은 30도가 아니라
+    "후보가 하나라도 있는 가장 좁은 5도 구간"이었다. 12도짜리 후보 하나가 있으면
+    15도에서 멈춰 20~30도의 멀쩡한 후보가 통째로 버려졌다 — 2026-09-08 실물 로그에서
+    raw=50인데 filtered=1로 나온 물체들이 이것이다. Top-K를 유지하려는 1차 작업과
+    정면으로 어긋나므로 제거한다.
 
     각도는 `abs()`로 재지 **않는다** — 그러면 아래에서 위로 찌르는 자세(작업대를 뚫는
     방향)가 0도로 통과한다. `(0,0,-1)`과의 내적을 그대로 쓴다.
@@ -285,21 +352,18 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
     angle_deg = np.degrees(np.arccos(cos_from_down))
     diagnostics["angles_deg"] = [round(float(a), 1) for a in angle_deg]
 
-    # --- 임계각을 넓혀가며 통과 후보 찾기 -----------------------------------
-    used_deg = None
-    keep = np.zeros(len(index), dtype=bool)
-    limit = float(threshold_deg)
-    while limit <= float(max_deg) + 1e-9:
-        keep = angle_deg <= limit
-        if keep.any():
-            used_deg = limit
-            break
-        limit += float(step_deg)
-    if used_deg is None:
-        diagnostics["used_threshold_deg"] = None
-        return [], diagnostics
-    diagnostics["used_threshold_deg"] = round(used_deg, 1)
+    # --- 접근각: 명백히 위험한 것만 자른다 -----------------------------------
+    # 비교용으로 **예전 정책이 통과시켰을 수**도 함께 남긴다 — 정책을 바꿨을 때 후보가
+    # 실제로 얼마나 살아났는지 로그 한 줄로 보이지 않으면 튜닝할 근거가 없다.
+    # (예전 정책은 15도부터 5도씩 넓히다 처음 통과자에서 멈췄으므로, 아래 legacy 수는
+    #  "30도 이하 개수"이지 예전에 실제로 통과한 수가 아니다 — 예전 것은 이보다 적거나 같다.)
+    diagnostics["legacy_max_deg"] = round(float(legacy_max_deg), 1)
+    diagnostics["legacy_pass_count"] = int((angle_deg <= float(legacy_max_deg)).sum())
+    diagnostics["hard_max_deg"] = round(float(hard_max_deg), 1)
+    keep = angle_deg <= float(hard_max_deg)
     diagnostics["passed_count"] = int(keep.sum())
+    if not keep.any():
+        return [], diagnostics
 
     # --- 통과 후보를 점수순으로 Top-K ---------------------------------------
     # **하나만 돌려주지 않는다.** 예전에는 최고점 하나만 내보내 웹 시각화와 이후 선택
@@ -308,21 +372,59 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
     # 기울기 필터를 통과한 것 중 점수 상위 K개를 그대로 유지한다.
     #
     # 실제로 어느 후보를 집을지는 control이 정한다(control/grasp_selection.py) —
-    # 개폭 유효성·접근/파지 IK·관절 한계·최소 안전을 보고 통과한 것들 중 랭킹으로 고른다.
-    # planner는 그 사이에서 작업반경만 걸러 목록을 그대로 넘긴다.
+    # 개폭 유효성·접근/파지 IK·관절 한계·최소 안전·**접근 적합도**를 보고 통과한 것들 중
+    # 랭킹으로 고른다. planner는 그 사이에서 작업반경만 걸러 목록을 그대로 넘긴다.
     # 이 단계는 "선택지를 잃지 않는 것"까지만 한다.
+    #
+    # **hard_max_deg를 넓혀도 여기서 나가는 수는 top_k로 묶인다.** 각도 정책을 풀면
+    # 통과 후보가 수십 개가 되는데, 그걸 그대로 내보내면 world_state 메시지가 커지고
+    # 웹 오버레이가 빽빽해진다(1차에서 top_k를 둔 이유 그대로).
     kept = np.flatnonzero(keep)
-    order = kept[np.argsort(-score[kept])][:max(1, int(top_k))]
-    diagnostics["topk_count"] = int(len(order))
+    ranked = kept[np.argsort(-score[kept])]
+    # **Top-K를 '점수 상위 K개'가 아니라 '기하 검사를 통과한 상위 K개'로 채운다**
+    # (2026-09-08, 2.6차). 예전에는 상위 K개만 되잡고 끝냈는데, 이제 되잡기가 허공
+    # 후보를 끌어오지 않고 **버리므로** 그대로 두면 published가 K보다 적어진다. 뒤에
+    # 남은 후보로 채우는 것이 Top-K를 둔 이유(선택지를 남긴다)에 맞는다.
+    #
+    # 살펴보는 수에 상한을 둔다 — 되잡기는 후보마다 클라우드 전체를 투영하므로
+    # (물티슈 실측 173k점) 전부 돌리면 관측당 시간이 눈에 띄게 늘어난다.
+    examine_limit = min(len(ranked), max(1, int(top_k)) * _GEOMETRY_EXAMINE_FACTOR)
+    order = ranked[:examine_limit]
+    diagnostics["examined_count"] = int(len(order))
 
     results = []
-    for rank, best in enumerate(int(v) for v in order):
+    geometry_rejects: dict = {}
+    for best in (int(v) for v in order):
+        if len(results) >= max(1, int(top_k)):
+            break
+        rank = len(results)
         T_best = T_base_tcp[best]
         chosen_width_mm = float(width_mm[best])
         refined_shift = None
+        # **단계 분리용 원본.** "후보가 이상하다"가 GraspNet raw부터인지 되잡기에서
+        # 생긴 것인지는 이 둘을 나란히 봐야만 갈린다(2026-09-08).
+        raw_xyz = [round(float(v), 1) for v in T_best[:3, 3]]
+        raw_width = round(float(width_mm[best]), 1)
+        refine_diag: dict = {}
+        lateral_shift = None
         if points_base is not None and len(points_base) >= 30:
-            position, chosen_width_mm = _refine_on_cloud(T_best, points_base, refine_depth_mm)
-            refined_shift = round(float(np.linalg.norm(position - T_best[:3, 3])), 1)
+            position, chosen_width_mm, refine_diag = _refine_on_cloud(
+                T_best, points_base, refine_depth_mm,
+                lateral_tol_mm, min_grip_points)
+            status = refine_diag.get("status", GEOMETRY_OK)
+            if status != GEOMETRY_OK:
+                # **끌어오지 않고 버린다.** 이 후보를 물체 중심으로 옮겨 살리면 Top-K가
+                # 같은 자리로 뭉치고(2.6차가 없앤 문제), 애초에 물체와 안 맞는 자세를
+                # 억지로 실행하게 된다. 다음 후보로 넘어간다.
+                geometry_rejects[status] = geometry_rejects.get(status, 0) + 1
+                continue
+            delta = position - T_best[:3, 3]
+            refined_shift = round(float(np.linalg.norm(delta)), 1)
+            # 접근축 성분은 **의도된** 깊이 보정이다. 문제가 되는 것은 그것과 직교하는
+            # 가로 이동 — 그만큼 파지점이 GraspNet이 고른 자리에서 옆으로 끌려간 것이다.
+            approach_axis = T_best[:3, 2]
+            along = float(delta @ approach_axis)
+            lateral_shift = round(float(np.linalg.norm(delta - along * approach_axis)), 1)
             T_best = T_best.copy()
             T_best[:3, 3] = position
         qx, qy, qz, qw = _quaternion_from_matrix(T_best[:3, :3])
@@ -335,6 +437,20 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
             "width_mm": chosen_width_mm,
             "score": float(np.clip(score[best], 0.0, 1.0)),
             "grasp_depth_mm": float(depth_mm[best]),
+            # 진단·로그 전용. control은 이 값을 쓰지 않고 **실행에 쓰는 접근축**에서 다시
+            # 잰다(dsr_motion.approach_axis_from_pose) — 검사와 실행이 갈라지지 않게.
+            # 두 값은 같아야 한다: 여기 pose의 Z축이 곧 GraspNet 접근축이다
+            # (T_graspnet_tcp_mm이 GraspNet X(접근) → TCP Z(접근)로 맞바꾼다).
+            "approach_angle_deg": float(angle_deg[best]),
+            # 후보 정합성 진단(로그 전용, 메시지로 나가지 않는다). node가 물체 중심과의
+            # 거리까지 붙여 한 줄로 찍는다.
+            "geometry_debug": {
+                "raw_xyz": raw_xyz,
+                "raw_width_mm": raw_width,
+                "refined_shift_mm": refined_shift,
+                "lateral_shift_mm": lateral_shift,
+                **refine_diag,
+            },
             "strategy": STRATEGY,
         }
         if rank == 0:
@@ -360,7 +476,21 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
             })
             entry["debug"] = diagnostics
         results.append(entry)
+    diagnostics["geometry_rejects"] = geometry_rejects
+    diagnostics["topk_count"] = len(results)
     return results, diagnostics
+
+
+def _hard_max_deg(params: dict) -> float:
+    """접근각 hard 상한(도). 이 위의 후보는 아예 만들지 않는다.
+
+    **예전 키(`approach_angle_max_deg`, 기본 30)를 그대로 상한으로 쓰지 않는다.** 그 값은
+    "이보다 기울면 IK가 안 풀리거나 물기 어렵다"는 뜻이었는데, IK는 이제 control이 직접
+    확인하고(grasp_selection) 물기 어려움은 랭킹이 다룬다. 새 키가 없는 설정 파일에서
+    예전 값이 그대로 hard 상한이 되면 2.5차 변경이 아무 효과가 없으므로, 예전 키는
+    **읽지 않는다** — 새 키가 없으면 보수적 기본값을 쓴다.
+    """
+    return float(params.get("approach_angle_hard_max_deg", _DEFAULT_HARD_MAX_DEG))
 
 
 def _infer_via_endpoint(endpoint: str, points_cam_mm: np.ndarray, params: dict) -> list:
@@ -441,20 +571,23 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
     finally:
         _INFERENCE_LOCK.release()
 
+    hard_max_deg = _hard_max_deg(params)
     candidates, diagnostics = _select_candidates(
         raw_candidates, T_base_camera_mm, T_graspnet_tcp_mm,
-        float(params.get("approach_angle_threshold_deg", 15.0)),
-        float(params.get("approach_angle_max_deg", 45.0)),
-        float(params.get("approach_angle_step_deg", 5.0)),
+        hard_max_deg,
+        float(params.get("approach_angle_soft_max_deg",
+                         params.get("approach_angle_max_deg", 30.0))),
         _camera_offset(params),
         np.asarray(points_base, dtype=float) if points_base is not None else None,
         float(params.get("refine_grasp_depth_mm", 8.0)),
-        int(params.get("top_k", 10)))
+        int(params.get("top_k", 10)),
+        float(params.get("cloud_lateral_tolerance_mm", _CLOUD_LATERAL_TOL_MM)),
+        int(params.get("min_grip_material_points", _MIN_GRIP_POINTS)))
     if not candidates:
-        # 추론은 됐는데 임계각 안에 드는 후보가 없다. 빈 리스트로 돌려주면 node가
+        # 추론은 됐는데 hard 상한 안에 드는 후보가 없다. 빈 리스트로 돌려주면 node가
         # "후보 없음"으로 발행하고 planner는 파지 불가로 읽는데, **왜** 걸러졌는지가
         # 로그에 없으면 추적이 안 된다 — 일반 실패와 구분되는 예외로 알린다.
-        max_deg = params.get("approach_angle_max_deg", 45.0)
         raise _NoUprightCandidate(
-            f"수직 대비 {max_deg}도 이내 후보 없음 (기울기 {diagnostics.get('angles_deg')})")
+            f"수직 대비 {hard_max_deg}도(hard 상한) 이내 후보 없음 "
+            f"(기울기 {diagnostics.get('angles_deg')})")
     return candidates

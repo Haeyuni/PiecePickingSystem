@@ -64,7 +64,11 @@ def candidate(rank, width=40.0, score=0.9):
 
 
 def evaluation(candidate_obj, status):
-    return gs.Evaluation(candidate=candidate_obj, status=status,
+    geometry = gs.PickGeometry(
+        target_posx=[400.0, 0.0, 300.0, 0.0, 180.0, 0.0],
+        approach_posx=[400.0, 0.0, 380.0, 0.0, 180.0, 0.0],
+        approach_axis=[0.0, 0.0, -1.0], pad_reference_mm=[400.0, 0.0, 295.0])
+    return gs.Evaluation(candidate=candidate_obj, status=status, geometry=geometry,
                          rejection_reason="" if status == gs.STATUS_SELECTED else "테스트 사유")
 
 
@@ -90,7 +94,11 @@ class Harness:
 
     def _pick_real(self, goal_handle, goal, selected, wrist_pose):
         self.moved.append(("real", selected.candidate.candidate_id))
-        return 33.0, 30.0
+        evidence = {
+            "pre": {"grip": False}, "post": {"grip": True}, "lift": {"grip": True},
+            "lift_width_mm": 33.0,
+        }
+        return 33.0, 30.0, [400.0, 0.0, 300.0, 0.0, 180.0, 0.0], evidence
 
     def _publish_phase(self, goal_handle, phase):
         self.moved.append(("phase", phase))
@@ -105,13 +113,16 @@ class Harness:
         return selected.candidate.candidate_id if selected is not None else ""
 
     def _result(self, success, reason, started, visual_passed=False, torque=None,
-                candidate_id=""):
+                candidate_id="", source_observation_id="", executed_tcp=None):
         result = _Result()
         result.success = success
         result.failure_reason = reason
         result.selected_candidate_id = candidate_id
         result.visual_verification_passed = visual_passed
         result.torque_trace_summary = torque or []
+        result.source_observation_id = source_observation_id
+        result.has_executed_tcp_posx = executed_tcp is not None
+        result.executed_tcp_posx = executed_tcp or []
         return result
 
     def get_logger(self):
@@ -130,7 +141,9 @@ def run_execute(harness, candidate_count=3):
                      succeed=lambda: setattr(harness, "succeeded", True),
                      abort=lambda: setattr(harness, "aborted", True),
                      canceled=lambda: None)
-    goal_handle.request = NS(request_id="rq-1", object_id="obj_001", profile="normal",
+    goal_handle.request = NS(request_id="rq-1", trace_id="tr-1",
+                              object_id="obj_001", profile="normal",
+                             source_observation_id="obs-1",
                              grasp_candidates=[None] * candidate_count)
     harness._cache = NS(get=lambda rid: harness.cache.get(rid),
                         put=lambda rid, result: harness.cache.__setitem__(rid, result))
@@ -234,25 +247,67 @@ class TestGoalAdapters(unittest.TestCase):
         exec(_method("_object_context"), namespace)
         return namespace
 
-    def test_candidate_list_is_converted_in_order(self):
+    def _convert(self, goal, logs=None):
+        """`_candidates_from_goal`을 로거만 갖춘 가짜 self로 부른다."""
         namespace = self._exec_namespace()
+        server = NS(get_logger=lambda: NS(info=(logs if logs is not None else []).append,
+                                          warning=(logs if logs is not None else []).append,
+                                          error=(logs if logs is not None else []).append))
+        return namespace["_candidates_from_goal"](server, goal)
+
+    def test_candidate_list_is_converted_in_order(self):
         raw = [NS(candidate_id="obj_001#0", pose="p0", score=0.9, gripper_width_mm=30.0,
                   strategy="graspnet_baseline"),
                NS(candidate_id="obj_001#1", pose="p1", score=0.5, gripper_width_mm=40.0,
                   strategy="graspnet_baseline")]
-        goal = NS(grasp_candidates=raw, grasp_pose="fallback", gripper_width_mm=0.0)
-        converted = namespace["_candidates_from_goal"].__func__(goal)
+        goal = NS(object_id="obj_001", grasp_candidates=raw, grasp_pose="fallback",
+                  gripper_width_mm=0.0)
+        converted = self._convert(goal)
         self.assertEqual([c.candidate_id for c in converted], ["obj_001#0", "obj_001#1"])
         self.assertEqual([c.rank for c in converted], [0, 1])
 
     def test_empty_list_falls_back_to_single_grasp_pose(self):
-        namespace = self._exec_namespace()
-        goal = NS(grasp_candidates=[], grasp_pose="only", gripper_width_mm=25.0)
-        converted = namespace["_candidates_from_goal"].__func__(goal)
+        goal = NS(object_id="obj_001", grasp_candidates=[], grasp_pose="only",
+                  gripper_width_mm=25.0)
+        converted = self._convert(goal)
         self.assertEqual(len(converted), 1)
         self.assertEqual(converted[0].pose, "only")
         self.assertEqual(converted[0].candidate_id, "")
         self.assertEqual(converted[0].gripper_width_mm, 25.0)
+
+    # --- 명령 대상 물체와의 결속 (2026-09-08) --------------------------------
+    # candidate_id는 "<object_id>#<순위>"라 출처가 값 안에 있다. 다른 물체의 후보가
+    # 섞여 들어오면 점수가 높다는 이유로 명령과 무관한 물체를 집을 수 있다.
+
+    def test_foreign_candidates_are_dropped(self):
+        raw = [NS(candidate_id="obj_009#0", pose="p0", score=0.99, gripper_width_mm=30.0,
+                  strategy="graspnet_baseline"),          # 다른 물체 — 게다가 최고점
+               NS(candidate_id="obj_001#0", pose="p1", score=0.40, gripper_width_mm=40.0,
+                  strategy="graspnet_baseline")]
+        goal = NS(object_id="obj_001", grasp_candidates=raw, grasp_pose="fallback",
+                  gripper_width_mm=0.0)
+        logs = []
+        converted = self._convert(goal, logs)
+        self.assertEqual([c.candidate_id for c in converted], ["obj_001#0"])
+        self.assertEqual(converted[0].rank, 0, "남은 후보의 순위는 다시 매겨져야 한다")
+        self.assertTrue(any("대상불일치" in line for line in logs),
+                        "조용히 버리면 안 된다 — 섞인 사실이 로그에 남아야 한다")
+
+    def test_blank_candidate_id_is_kept(self):
+        """출처를 모르는 후보(예전 planner 형식)는 버리지 않는다 — goal 자체가 그 물체 것이다."""
+        raw = [NS(candidate_id="", pose="p0", score=0.9, gripper_width_mm=30.0,
+                  strategy="")]
+        goal = NS(object_id="obj_001", grasp_candidates=raw, grasp_pose="fallback",
+                  gripper_width_mm=0.0)
+        self.assertEqual(len(self._convert(goal)), 1)
+
+    def test_all_foreign_means_no_candidates(self):
+        """전부 남의 것이면 빈 목록 — 그러면 execute_callback이 no_feasible_grasp로 끝낸다."""
+        raw = [NS(candidate_id="obj_009#0", pose="p0", score=0.99, gripper_width_mm=30.0,
+                  strategy="")]
+        goal = NS(object_id="obj_001", grasp_candidates=raw, grasp_pose="fallback",
+                  gripper_width_mm=0.0)
+        self.assertEqual(self._convert(goal), [])
 
     def test_zero_center_means_not_supplied(self):
         namespace = self._exec_namespace()

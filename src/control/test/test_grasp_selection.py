@@ -393,3 +393,109 @@ class TestPlanPickPosxMatchesLegacyMath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- 물체 밖 자세 차단 (2026-09-08, 2.6차) ------------------------------------
+# 주된 판정은 grasp가 포인트클라우드로 한다(cloud_mismatch / no_grip_material).
+# control에는 클라우드가 없으므로, 클라우드 없이도 확실한 하나 —
+# **파지점이 물체 윗면보다 위** — 만 본다. check_min_safety(지지면=아래쪽)의 반대편이다.
+
+class CheckGraspGeometryTest(unittest.TestCase):
+
+    def setUp(self):
+        self.params = gs.SelectionParams()
+        # 윗면 z=300, 두께 40 → 물체는 z 260~300 구간이다.
+        self.obj = gs.ObjectContext(object_id="obj_001", center_mm=(400.0, 0.0, 300.0),
+                                    height_mm=40.0, depth_valid_ratio=0.9)
+
+    def _candidate(self, z):
+        return gs.Candidate(candidate_id="obj_001#0", rank=0,
+                            pose=NS(position=NS(x=400.0, y=0.0, z=z),
+                                    orientation=NS(x=0.0, y=1.0, z=0.0, w=0.0)),
+                            score=0.5, gripper_width_mm=40.0)
+
+    def test_inside_the_object_passes(self):
+        for z in (262.0, 280.0, 299.0):
+            self.assertEqual(gs.check_grasp_geometry(self._candidate(z), self.obj,
+                                                     self.params), "")
+
+    def test_top_surface_tolerance_is_allowed(self):
+        """손끝 위치가 모델값이라 아래쪽과 같은 크기의 여유를 위쪽에도 준다."""
+        edge = 300.0 + self.params.support_tolerance_mm
+        self.assertEqual(gs.check_grasp_geometry(self._candidate(edge), self.obj,
+                                                 self.params), "")
+
+    def test_above_the_object_is_rejected(self):
+        reason = gs.check_grasp_geometry(self._candidate(330.0), self.obj, self.params)
+        self.assertNotEqual(reason, "")
+        self.assertIn("허공", reason)
+
+    def test_unknown_height_is_not_judged(self):
+        """두께를 모르면 판단하지 않는다 — 모른다는 이유로 후보를 죽이지 않는다."""
+        obj = gs.ObjectContext(object_id="obj_001", center_mm=(400.0, 0.0, 300.0),
+                               height_mm=0.0)
+        self.assertEqual(gs.check_grasp_geometry(self._candidate(500.0), obj,
+                                                 self.params), "")
+
+    def test_unknown_center_is_not_judged(self):
+        obj = gs.ObjectContext(object_id="obj_001", center_mm=None, height_mm=40.0)
+        self.assertEqual(gs.check_grasp_geometry(self._candidate(500.0), obj,
+                                                 self.params), "")
+
+
+class GeometryInvalidInPipelineTest(unittest.TestCase):
+    """평가 파이프라인에 자연스럽게 연결됐는가 — IK 앞에서 걸러 ikin 왕복을 아낀다."""
+
+    def setUp(self):
+        self.obj = gs.ObjectContext(object_id="obj_001", center_mm=(400.0, 0.0, 300.0),
+                                    height_mm=40.0, depth_valid_ratio=0.9)
+        self.ik_calls = []
+
+    def _evaluate(self, z_values):
+        candidates = [
+            gs.Candidate(candidate_id=f"obj_001#{i}", rank=i,
+                         pose=NS(position=NS(x=400.0, y=0.0, z=z),
+                                 orientation=NS(x=0.0, y=1.0, z=0.0, w=0.0)),
+                         score=0.9 - 0.1 * i, gripper_width_mm=40.0)
+            for i, z in enumerate(z_values)]
+
+        def geometry_of(pose):
+            return gs.PickGeometry(
+                target_posx=[400.0, 0.0, float(pose.position.z), 0.0, 180.0, 0.0],
+                approach_posx=[400.0, 0.0, float(pose.position.z) + 80.0, 0.0, 180.0, 0.0],
+                approach_axis=[0.0, 0.0, -1.0],
+                pad_reference_mm=[400.0, 0.0, float(pose.position.z)])
+
+        def ik_verdict_of(posx):
+            self.ik_calls.append(posx)
+            return NS(known=True, ok=True, status="ok", joint_margin_deg=40.0,
+                      posj=[0.0, 0.0, 0.0, 0.0, 80.0, 0.0])
+
+        return gs.evaluate_candidates(candidates, self.obj, gs.SelectionParams(),
+                                      geometry_of, ik_verdict_of)
+
+    def test_air_candidate_is_marked_and_skipped(self):
+        evaluations = self._evaluate([400.0, 280.0])
+        self.assertEqual(evaluations[0].status, gs.STATUS_GEOMETRY_INVALID)
+        self.assertIsNone(evaluations[0].total_score)
+        # 다음 후보는 정상적으로 선택될 수 있어야 한다 (motion 전에 넘어간다)
+        self.assertEqual(gs.select(evaluations).candidate.rank, 1)
+
+    def test_ik_is_not_queried_for_geometry_invalid(self):
+        """ikin 왕복은 후보당 약 66ms — 못 쓸 후보에 쓰지 않는다."""
+        self._evaluate([400.0])
+        self.assertEqual(self.ik_calls, [])
+
+    def test_counts_include_the_new_status(self):
+        tally = gs.counts(self._evaluate([400.0, 280.0]))
+        self.assertEqual(tally[gs.STATUS_GEOMETRY_INVALID], 1)
+
+    def test_rejected_before_motion(self):
+        evaluations = self._evaluate([400.0, 280.0])
+        self.assertTrue(evaluations[0].rejected_before_motion)
+
+    def test_normal_candidates_are_unaffected(self):
+        """Case 5 — 기존 정상 후보는 그대로 통과해야 한다(회귀 없음)."""
+        evaluations = self._evaluate([280.0, 275.0, 290.0])
+        self.assertTrue(all(e.status in (gs.STATUS_VALID, gs.STATUS_SELECTED)
+                            for e in evaluations), [e.status for e in evaluations])

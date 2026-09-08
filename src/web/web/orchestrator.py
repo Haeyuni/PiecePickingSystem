@@ -5,6 +5,7 @@
 것은 `validation_status`뿐이다 — rejected면 어떤 액션도 호출하지 않는다.
 """
 import asyncio
+import copy
 import dataclasses
 import logging
 import os
@@ -58,8 +59,31 @@ traces: dict[str, dict] = {}
 _running_tasks: dict[str, asyncio.Task] = {}
 
 
+@dataclasses.dataclass(frozen=True)
+class PickSnapshot:
+    observation_id: str
+    observation_stamp: tuple[int, int]
+    object_id: str
+    class_name: str
+    selected_candidate_id: str
+    selected_grasp_pose: tuple[float, ...]
+    executed_tcp_posx: tuple[float, ...]
+    footprint_base_mm: tuple[tuple[float, float], ...]
+    object_bottom_z_mm: float
+
+    @property
+    def tcp_to_object_bottom_mm(self) -> float | None:
+        if len(self.executed_tcp_posx) != 6:
+            return None
+        return self.executed_tcp_posx[2] - self.object_bottom_z_mm
+
+
 def snapshot(trace_id: str) -> dict | None:
     return traces.get(trace_id)
+
+
+def has_running_command() -> bool:
+    return any(not task.done() for task in _running_tasks.values())
 
 
 def cancel_running() -> list[str]:
@@ -158,7 +182,13 @@ async def _wait_for_fresh_observation(executor, trace_id: str, mode: str = "full
     while asyncio.get_event_loop().time() < deadline:
         current = executor.get_latest_world_state()
         stamp = (current or {}).get("stamp")
-        if stamp and stamp != before_stamp:
+        expected_observation_id = (observed or {}).get("observation_id")
+        observation_matches = (
+            expected_observation_id
+            and (current or {}).get("observation_id") == expected_observation_id
+            and (current or {}).get("trace_id") == trace_id
+        )
+        if observation_matches or (not expected_observation_id and stamp and stamp != before_stamp):
             return True
         await asyncio.sleep(0.1)
     logger.warning("observe는 성공했지만 /world_state가 갱신되지 않았다 (trace=%s) — "
@@ -176,7 +206,7 @@ _GRASP_RETRY_REASON = "파지 후보가 없습니다"
 
 
 async def _plan_with_grasp_retry(trace_id: str, command_text: str, world_state: dict,
-                                 previous_failure, executor) -> dict:
+                                  previous_failure, executor) -> tuple[dict, dict]:
     """planner에 계획을 묻되, 파지 후보가 없어서 거부되면 새 관측으로 몇 번 더 시도한다.
 
     다른 거부 사유(파지 불가 상태, 작업반경 초과, 물체가 목록에 없음 등)는 관측을 더
@@ -185,9 +215,9 @@ async def _plan_with_grasp_retry(trace_id: str, command_text: str, world_state: 
     result = await planner_client.plan(trace_id, command_text, world_state, previous_failure)
     for attempt in range(1, _GRASP_RETRY_ATTEMPTS + 1):
         if result.get("validation_status") == "approved":
-            return result
+            return result, world_state
         if _GRASP_RETRY_REASON not in (result.get("validation_reason") or ""):
-            return result
+            return result, world_state
         logger.info("파지 후보 없음으로 거부 — 새 관측 대기 후 재시도 %d/%d (trace=%s): %s",
                     attempt, _GRASP_RETRY_ATTEMPTS, trace_id, result.get("validation_reason"))
         # VLM은 다시 안 부른다 — 물체가 무엇인지는 이미 알고, GraspNet이 프레임마다
@@ -195,9 +225,10 @@ async def _plan_with_grasp_retry(trace_id: str, command_text: str, world_state: 
         await _wait_for_fresh_observation(executor, trace_id, mode="reprompt")
         latest = executor.get_latest_world_state()
         if latest is None:
-            return result
+            return result, world_state
+        world_state = latest
         result = await planner_client.plan(trace_id, command_text, latest, previous_failure)
-    return result
+    return result, world_state
 
 
 async def run_command(trace_id: str, command_text: str, executor) -> None:
@@ -222,6 +253,9 @@ async def run_command(trace_id: str, command_text: str, executor) -> None:
 async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
     trace = _new_trace(trace_id, command_text)
     previous_failure = None
+    previous_targets = None
+    # 처음 계획(시도 0)의 pick 대상 클래스. 재계획이 이 범위를 벗어나면 실행하지 않는다.
+    allowed_classes = None
 
     for attempt in range(MAX_REPLANS + 1):
         # 여기 오는 재계획은 pick 계열 실패뿐이다 — place_into 실패는 아래에서 재시도로
@@ -282,7 +316,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
                 return
 
         try:
-            result = await _plan_with_grasp_retry(
+            result, world_state = await _plan_with_grasp_retry(
                 trace_id, command_text, world_state, previous_failure, executor,
             )
         except planner_client.PlannerUnavailable as e:
@@ -324,11 +358,64 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
                 "object_center_mm": s.get("object_center_mm"),
                 "object_height_mm": s.get("object_height_mm"),
                 "depth_valid_ratio": s.get("depth_valid_ratio"),
+                "class_name": class_of(world_state, s["object_id"]),
+                "object_footprint_base_mm": copy.deepcopy(
+                    (_object_of(world_state, s["object_id"]) or {}).get("footprint_base_mm") or []),
+                "source_observation_id": world_state.get("observation_id", ""),
+                "source_observation_stamp": copy.deepcopy(world_state.get("stamp")),
                 "status": "pending",
                 "phase": None,
             }
             for s in steps
         ]
+
+        # **재계획마다 대상 물체가 바뀔 수 있다.** planner는 매 시도 새 world_state로
+        # 명령을 다시 그라운딩하는데, object_id는 관측마다 새로 매겨지므로 같은 물체라도
+        # id가 달라진다. 그래서 대상 비교는 id가 아니라 **클래스명**으로 한다.
+        targets = [(s["skill"], s["object_id"], class_of(world_state, s["object_id"]))
+                   for s in trace["steps"]]
+        logger.info("실행 대상 (trace=%s, 시도 %d): %s", trace_id, attempt,
+                    ", ".join(f"{skill}:{oid}({name or '?'})" for skill, oid, name in targets))
+        if previous_targets is not None and previous_targets != targets:
+            logger.warning(
+                "재계획으로 대상이 바뀌었다 (trace=%s): %s → %s",
+                trace_id,
+                ", ".join(f"{o}({n or '?'})" for _, o, n in previous_targets),
+                ", ".join(f"{o}({n or '?'})" for _, o, n in targets))
+        previous_targets = targets
+
+        # **처음 계획에 없던 물체를 재계획이 새로 데려오면 실행하지 않는다.**
+        # 2026-09-08 실물: "물티슈 왼쪽으로 옮겨줘"가 파지 실패한 뒤, 재계획을 받은 LLM이
+        #   refusal='물티슈는 파지 실패로 인해 건너뛰고, 접이 우산만 옮깁니다.'
+        # 라며 **사용자가 말한 적 없는 우산**을 집으러 갔다. previous_failure를 알려주면
+        # LLM이 "실패한 건 건너뛰고 대신 다른 걸 하자"로 읽는 것인데, 그건 명령의 범위를
+        # 벗어나는 판단이다 — 사람이 물티슈를 옮기라고 했으면 못 옮기는 것이지 다른 물체를
+        # 대신 옮겨도 되는 게 아니다.
+        #
+        # **id가 아니라 클래스로 본다**(id는 관측마다 바뀐다). 실패한 물체를 건너뛰고 원래
+        # 계획의 나머지를 계속하는 것은 허용된다 — 부분집합이면 통과하기 때문이다.
+        # 클래스를 모르는(None) 대상은 새로 들어온 것으로 본다: 판별할 수 없으면 멈추는
+        # 쪽이 엉뚱한 물체를 집는 것보다 낫다.
+        step_classes = {name for skill, _, name in targets if skill == "pick"}
+        if allowed_classes is None:
+            allowed_classes = step_classes
+        else:
+            intruders = {name for name in step_classes if name not in allowed_classes}
+            if intruders:
+                logger.error(
+                    "재계획이 명령에 없던 물체를 대상으로 삼았다 — 실행하지 않고 멈춘다 "
+                    "(trace=%s, 처음 대상=%s, 새 대상=%s)", trace_id,
+                    sorted(n or "?" for n in allowed_classes),
+                    sorted(n or "?" for n in intruders))
+                await hub.broadcast({
+                    "type": "execution_result", "trace_id": trace_id, "request_id": "",
+                    "success": False, "failure_reason": "replan_changed_target",
+                    "validation_reason": (
+                        "재계획이 명령과 다른 물체("
+                        + ", ".join(sorted(n or "?" for n in intruders))
+                        + ")를 대상으로 삼아 중단했습니다."),
+                })
+                return
 
         failure = await _execute_steps(trace, world_state, executor)
         if failure is None:
@@ -482,12 +569,66 @@ def _record_selected_candidate(step: dict, result) -> None:
             return
     logger.warning("control이 고른 후보 %s를 계획 후보 목록에서 못 찾았다 — "
                    "grasp_pose를 1순위인 채로 둔다 (object=%s)",
-                   selected_id, step.get("object_id"))
+                    selected_id, step.get("object_id"))
+
+
+def _object_of(world_state: dict, object_id: str) -> dict | None:
+    for obj in (world_state or {}).get("objects") or []:
+        if obj.get("object_id") == object_id:
+            return obj
+    return None
+
+
+def _pose_tuple(pose: dict | None) -> tuple[float, ...]:
+    pose = pose or {}
+    position = pose.get("position") or {}
+    orientation = pose.get("orientation") or {}
+    return tuple(float(v) for v in (
+        position.get("x", 0.0), position.get("y", 0.0), position.get("z", 0.0),
+        orientation.get("x", 0.0), orientation.get("y", 0.0),
+        orientation.get("z", 0.0), orientation.get("w", 1.0),
+    ))
+
+
+def _freeze_pick_snapshot(step: dict, result) -> PickSnapshot | None:
+    executed = tuple(float(v) for v in (getattr(result, "executed_tcp_posx", None) or []))
+    center = step.get("object_center_mm") or {}
+    height = step.get("object_height_mm")
+    if len(executed) != 6 or center.get("z") is None or height is None:
+        return None
+    footprint = tuple(
+        (float(point["x"]), float(point["y"]))
+        for point in (step.get("object_footprint_base_mm") or [])
+    )
+    stamp = step.get("source_observation_stamp") or {}
+    observation_id = str(step.get("source_observation_id") or "")
+    if not observation_id or "sec" not in stamp or "nanosec" not in stamp:
+        return None
+    return PickSnapshot(
+        observation_id=observation_id,
+        observation_stamp=(int(stamp.get("sec", 0)), int(stamp.get("nanosec", 0))),
+        object_id=str(step["object_id"]),
+        class_name=str(step.get("class_name") or ""),
+        selected_candidate_id=str(getattr(result, "selected_candidate_id", "") or ""),
+        selected_grasp_pose=_pose_tuple(step.get("grasp_pose")),
+        executed_tcp_posx=executed,
+        footprint_base_mm=footprint,
+        object_bottom_z_mm=float(center["z"]) - float(height),
+    )
+
+
+def class_of(world_state: dict, object_id: str) -> str | None:
+    """world_state에서 그 물체의 클래스명. 대상 추적 로그가 id만으로는 안 읽혀서 붙인다."""
+    for obj in (world_state or {}).get("objects") or []:
+        if obj.get("object_id") == object_id:
+            return obj.get("class_name") or obj.get("class_ko")
+    return None
 
 
 async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | None:
     """스텝을 순서대로 실행한다. 실패하면 previous_failure 형태로 반환."""
     class_map = store.object_class_map(world_state)
+    held_snapshot: PickSnapshot | None = None
 
     for index, step in enumerate(trace["steps"]):
         bottom_offset = (_object_bottom_offset_mm(world_state, trace["steps"], index)
@@ -502,14 +643,31 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             request_id=step["request_id"],
             object_id=step["object_id"],
             profile=step["profile"],
+            source_observation_id=(held_snapshot.observation_id
+                                   if step["skill"] == "place_into" and held_snapshot
+                                   else step.get("source_observation_id", "")),
+            source_observation_stamp=(
+                {"sec": held_snapshot.observation_stamp[0],
+                 "nanosec": held_snapshot.observation_stamp[1]}
+                if step["skill"] == "place_into" and held_snapshot
+                else step.get("source_observation_stamp")),
+            class_name=step.get("class_name", ""),
             grasp_pose=step.get("grasp_pose"),
             gripper_width_mm=step.get("gripper_width_mm"),
             grasp_candidates=step.get("grasp_candidates") or [],
             object_center_mm=step.get("object_center_mm"),
             object_height_mm=step.get("object_height_mm"),
             depth_valid_ratio=step.get("depth_valid_ratio"),
+            object_footprint_base_mm=(
+                [{"x": x, "y": y, "z": 0.0} for x, y in held_snapshot.footprint_base_mm]
+                if step["skill"] == "place_into" and held_snapshot
+                else step.get("object_footprint_base_mm") or []),
             bin_id=step.get("bin_id"),
             object_bottom_offset_mm=bottom_offset,
+            pickup_tcp_posx=(list(held_snapshot.executed_tcp_posx)
+                              if step["skill"] == "place_into" and held_snapshot else None),
+            tcp_to_object_bottom_mm=(held_snapshot.tcp_to_object_bottom_mm
+                                     if step["skill"] == "place_into" and held_snapshot else None),
         )
 
         async def on_feedback(request_id, phase, _trace=trace):
@@ -518,7 +676,40 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
         if step["skill"] == "pick":
             result = await executor.call_pick(goal, on_feedback)
             _record_selected_candidate(step, result)
+            if result.success:
+                if (getattr(result, "source_observation_id", "")
+                        != step.get("source_observation_id", "")):
+                    logger.error("Pick result observation 불일치 (goal=%s, result=%s)",
+                                 step.get("source_observation_id"),
+                                 getattr(result, "source_observation_id", ""))
+                    result.success = False
+                    step["snapshot_error"] = "observation_mismatch"
+                    # 물리 pick은 성공했으므로 물체를 들고 있을 수 있다. outer loop의
+                    # post-lift uncertainty 경로로 보내 자동 replan/다음 pick을 막는다.
+                    result.failure_reason = "unreachable"
+                else:
+                    held_snapshot = _freeze_pick_snapshot(step, result)
+                    if held_snapshot is None:
+                        logger.error("Pick 성공 결과에 실제 TCP/object geometry가 없어 중단한다")
+                        result.success = False
+                        step["snapshot_error"] = "missing_pick_snapshot"
+                        result.failure_reason = "unreachable"
+                    else:
+                        step["pick_snapshot"] = dataclasses.asdict(held_snapshot)
+                        logger.info(
+                            "[PickSnapshot] obs=%s object=%s candidate=%s tcp=%s bottom=%.1f",
+                            held_snapshot.observation_id, held_snapshot.object_id,
+                            held_snapshot.selected_candidate_id,
+                            [round(v, 2) for v in held_snapshot.executed_tcp_posx],
+                            held_snapshot.object_bottom_z_mm)
         else:
+            if held_snapshot is None or held_snapshot.object_id != step["object_id"]:
+                logger.error("place_into와 대응하는 frozen PickSnapshot이 없다 (object=%s)",
+                             step["object_id"])
+                return {"sequence_id": trace["sequence_id"],
+                        "request_id": step["request_id"], "object_id": step["object_id"],
+                        "failure_reason": "missing_pick_snapshot", "skill": "place_into",
+                        "cancelled": False}
             result = await executor.call_place_into(goal, on_feedback)
             for retry in range(1, MAX_PLACE_RETRIES + 1):
                 if result.success or result.cancelled:

@@ -33,6 +33,15 @@ async def create_command(body: CommandRequest, request: Request):
     executor = request.app.state.executor
     mode = executor.robot_state().get("mode", "idle")
 
+    # planner/Observe 구간에는 로봇 mode가 아직 idle일 수 있다. mode만 보면 두 명령이
+    # 동시에 서로 다른 observation을 만들 수 있으므로 명령 태스크 자체도 확인한다.
+    if orchestrator.has_running_command():
+        return JSONResponse(
+            status_code=409,
+            content={"schema_version": "1.0.0", "error": {
+                "code": "ROBOT_BUSY", "message": "로봇이 이전 명령을 처리 중입니다"}},
+        )
+
     if mode in BLOCKED_MODES:
         code, message = BLOCKED_MODES[mode]
         # planner를 호출하지 않는다 — 실시간 로봇 상태를 아는 쪽은 web이다(NFR-04)

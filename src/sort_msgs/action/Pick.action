@@ -2,7 +2,10 @@
 string schema_version
 string trace_id
 string request_id
+string source_observation_id
+builtin_interfaces/Time source_observation_stamp
 string object_id
+string class_name
 string profile                 # DetectedObject.profile 값을 그대로 전달 (제어 파라미터 결정)
 # planner가 순위대로 고른 1순위 후보. `grasp_candidates`가 비었을 때(구 planner,
 # 직접 goal을 쏘는 도구)의 유일한 파지 자세이기도 하다 — 그 경우 control은 이 하나만
@@ -22,6 +25,7 @@ sort_msgs/GraspCandidate[] grasp_candidates
 geometry_msgs/Point object_center_mm   # DetectedObject.position_base_mm (base, mm)
 float32 object_height_mm               # DetectedObject.height_mm. 0이면 미상 — 지지면 검사를 건너뛴다
 float32 depth_valid_ratio              # DetectedObject.depth_valid_ratio. 낮으면 좌표 신뢰도가 낮다
+geometry_msgs/Polygon object_footprint_base_mm
 
 int32 max_retries
 ---
@@ -41,6 +45,12 @@ string failure_reason
 # 실제로 실행한 후보의 GraspCandidate.candidate_id. 후보 없이 grasp_pose만 받았거나
 # 하나도 통과하지 못했으면 빈 문자열이다.
 string selected_candidate_id
+
+# 실제 파지 위치에 도달한 TCP pose. [x,y,z,rx,ry,rz], mm/ZYZ deg.
+# candidate pose가 아니라 180도 wrist-equivalent 보정과 tool offset이 반영된 실행값이다.
+string source_observation_id
+bool has_executed_tcp_posx
+float64[6] executed_tcp_posx
 
 int32 retries_used
 float32 cycle_time_ms

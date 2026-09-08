@@ -108,11 +108,21 @@ def _candidate_to_msg(candidate: dict) -> GraspCandidate:
     return msg
 
 
+def _polygon_to_msg(points: list[dict]):
+    from geometry_msgs.msg import Point32, Polygon
+
+    msg = Polygon()
+    msg.points = [Point32(x=float(p["x"]), y=float(p["y"]), z=float(p.get("z", 0.0)))
+                  for p in (points or [])]
+    return msg
+
+
 def _world_state_to_dict(msg: WorldState) -> dict:
     """WorldState.msg → JSON. planner에 넘기는 형태이자 mock 픽스처와 같은 구조다."""
     return {
         "schema_version": msg.schema_version,
         "trace_id": msg.trace_id,
+        "observation_id": msg.observation_id,
         "stamp": {"sec": msg.stamp.sec, "nanosec": msg.stamp.nanosec},
         "frame_id": msg.frame_id,
         "objects": [
@@ -129,6 +139,9 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                 "depth_valid_ratio": o.depth_valid_ratio,
                 # place_into가 놓는 z를 정할 때 쓴다(orchestrator._object_bottom_offset_mm)
                 "height_mm": o.height_mm,
+                "footprint_base_mm": [
+                    {"x": p.x, "y": p.y, "z": p.z} for p in o.footprint_base_mm.points
+                ],
                 "graspable": o.graspable,
                 "not_graspable_reason": o.not_graspable_reason,
                 "mass_g": o.mass_g,
@@ -382,6 +395,8 @@ class RosExecutor:
             "success": result.success,
             "failure_reason": result.failure_reason,
             "object_count": result.object_count,
+            "observation_id": result.observation_id,
+            "stamp": {"sec": result.stamp.sec, "nanosec": result.stamp.nanosec},
             "cycle_time_ms": result.cycle_time_ms or elapsed_ms,
             "cancelled": cancelled,
         }
@@ -445,6 +460,9 @@ class RosExecutor:
             torque_trace=list(getattr(result, "torque_trace_summary", []) or []),
             # pick만 채운다 — Home/PlaceInto.Result에는 없는 필드다.
             selected_candidate_id=getattr(result, "selected_candidate_id", "") or "",
+            source_observation_id=getattr(result, "source_observation_id", "") or "",
+            executed_tcp_posx=(list(result.executed_tcp_posx)
+                               if getattr(result, "has_executed_tcp_posx", False) else None),
             cancelled=cancelled,
         )
 
@@ -453,7 +471,12 @@ class RosExecutor:
         msg.schema_version = SCHEMA_VERSION
         msg.trace_id = goal.trace_id
         msg.request_id = goal.request_id
+        msg.source_observation_id = goal.source_observation_id
+        stamp = goal.source_observation_stamp or {}
+        msg.source_observation_stamp.sec = int(stamp.get("sec", 0))
+        msg.source_observation_stamp.nanosec = int(stamp.get("nanosec", 0))
         msg.object_id = goal.object_id
+        msg.class_name = goal.class_name
         msg.profile = goal.profile
         msg.grasp_pose = _pose_to_msg(goal.grasp_pose)
         msg.gripper_width_mm = float(goal.gripper_width_mm or 0.0)
@@ -466,6 +489,7 @@ class RosExecutor:
         msg.object_center_mm.z = float(center.get("z", 0.0))
         msg.object_height_mm = float(goal.object_height_mm or 0.0)
         msg.depth_valid_ratio = float(goal.depth_valid_ratio or 0.0)
+        msg.object_footprint_base_mm = _polygon_to_msg(goal.object_footprint_base_mm)
         msg.max_retries = goal.max_retries
         return await self._send(self._node.pick_client, msg, goal.request_id, on_feedback)
 
@@ -474,11 +498,18 @@ class RosExecutor:
         msg.schema_version = SCHEMA_VERSION
         msg.trace_id = goal.trace_id
         msg.request_id = goal.request_id
+        msg.source_observation_id = goal.source_observation_id
         msg.object_id = goal.object_id
         msg.profile = goal.profile
         msg.bin_id = goal.bin_id or ""
         msg.use_pose_override = False
         msg.object_bottom_offset_mm = float(goal.object_bottom_offset_mm or 0.0)
+        msg.has_pick_snapshot = bool(
+            goal.pickup_tcp_posx and goal.tcp_to_object_bottom_mm is not None)
+        if goal.pickup_tcp_posx:
+            msg.pickup_tcp_posx = [float(v) for v in goal.pickup_tcp_posx]
+        msg.tcp_to_object_bottom_mm = float(goal.tcp_to_object_bottom_mm or 0.0)
+        msg.object_footprint_base_mm = _polygon_to_msg(goal.object_footprint_base_mm)
         msg.max_retries = goal.max_retries
         return await self._send(self._node.place_client, msg, goal.request_id, on_feedback)
 

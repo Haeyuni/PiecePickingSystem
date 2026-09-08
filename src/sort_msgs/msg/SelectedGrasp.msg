@@ -1,0 +1,4 @@
+string schema_version
+string trace_id
+string observation_id
+GraspCandidate candidate

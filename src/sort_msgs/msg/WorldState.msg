@@ -3,6 +3,7 @@
 
 string schema_version
 string trace_id
+string observation_id          # Observe.Goal.request_id. 한 번의 on-demand 관측을 끝까지 식별
 builtin_interfaces/Time stamp
 string frame_id                # 보통 "base"
 
