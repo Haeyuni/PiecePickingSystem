@@ -123,7 +123,8 @@ cd src/perception_common && python -m pytest test/ -v
 cd web/frontend && npm run build
 
 # SAM+VLM 파이프라인만 정지 이미지로 (OPENAI_API_KEY 필요, 호출당 비용 발생)
-.venv/bin/python tools/scripts/vlm_sam_test.py services/planner/image.png \
+# 이미지는 test_image/에 넣는다. 결과는 test_result/에 남는다.
+.venv/bin/python tools/scripts/vlm_sam_test.py test_image/scene1.png \
     --command "치약 왼쪽으로"
 
 # MOCK_MODE 전체 E2E (로봇/GPU 없이 web 흐름 전체)

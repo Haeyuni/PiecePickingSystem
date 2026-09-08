@@ -26,7 +26,10 @@ geometry_msgs/Polygon footprint_base_mm
 bool graspable
 string not_graspable_reason    # graspable=false일 때만 값 있음, 아니면 빈 문자열
 
-# --- 속성 (objects.yaml / object_attributes 테이블과 1:1 대응) ---
+# --- 속성 ---
+# detector=yolo:    objects.yaml / object_attributes 테이블과 1:1 대응
+# detector=vlm_sam: 사진을 본 VLM의 판단 (attr_source=llm_suggested, needs_confirmation=true)
+#                   — docs/vlm_sam_pipeline.md의 [클래스 어휘를 주지 않는다]
 float32 mass_g
 bool fragile
 bool deformable

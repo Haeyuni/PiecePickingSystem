@@ -45,8 +45,8 @@ class SamRepromptDetector:
     def prime(self, previous: list[dict], base2gripper, gripper2camera, intrinsics) -> int:
         """직전 관측의 물체들을 지금 프레임의 박스로 되돌린다. 프롬프트로 쓸 개수를 반환한다.
 
-        previous의 각 항목은 `class_name / name_ko / is_new_class / confidence /
-        position_base_mm(x,y,z) / extent_base_mm([(x,y,z), ...])`를 갖는다.
+        previous의 각 항목은 `class_name / confidence / attrs / position_base_mm(x,y,z) /
+        extent_base_mm([(x,y,z), ...])`를 갖는다.
         **base2gripper는 지금 TCP 자세로 만든 것**이어야 한다 — 그것이 시점 변화를 흡수하는
         지점이다.
 
@@ -107,9 +107,11 @@ class SamRepromptDetector:
         detections = []
         for item, mask in zip(self.expected, masks):
             # 빈 마스크는 mask=None으로 낸다 — 노드가 REASON_NO_MASK로 처리하고, 좌표를
-            # 지어내지 않는다.
+            # 지어내지 않는다. 라벨과 함께 **속성도** 물려받는다: VLM을 다시 부르지
+            # 않으므로 여기서 잃으면 재관측한 물체만 속성 조회 경로로 떨어져 프로파일이
+            # 스텝 사이에 달라진다.
             detections.append(detection(item["class_name"], item["confidence"],
-                                        mask if mask.any() else None))
+                                        mask if mask.any() else None, item.get("attrs")))
         return detections, self._draw(color_bgr, masks)
 
     def _draw(self, color_bgr, masks):

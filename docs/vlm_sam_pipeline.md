@@ -9,8 +9,9 @@ YOLO(`models/best.pt`, 7클래스)가 하던 "무엇이 어디에 있는가"를 
 UI "치약 왼쪽으로"
   → 현재 프레임 캡처
   → [1] SAM으로 장면을 조각냄 (everything 모드)      ← 좌표는 SAM이 만든다
-  → [2] 조각에 번호를 그려 VLM에 질의                 ← 이름은 VLM이 붙인다
-        · 몇 번이 무엇인가 → class_name / name_ko / is_new_class
+  → [2] 조각에 번호를 그려 VLM에 질의                 ← 판단은 VLM이 한다
+        · 몇 번이 무엇인가 → class_name / name_ko
+        · 어떻게 다뤄야 하나 → mass_g / fragile / deformable / transparent / profile
         · 몇 번은 물체가 아닌가 → 작업대·케이블·그림자
         · 한 물체가 여러 조각이면 → part_of로 묶는다
   → 마스크 + depth → 3D 좌표 (기존 perception 계산 그대로)
@@ -24,8 +25,8 @@ UI "치약 왼쪽으로"
 찍기)을 갈라 놓았다. 원래 순서는 `--mode box`로 남겨 뒀다 — grounding이 되는 모델
 (gpt-5 계열, Gemini 등)을 쓰게 되면 더 단순하고 빨라서 다시 유리해질 수 있다.
 
-**역할 분리는 기존과 같다.** 모델이 정하는 것은 "어떤 물체를 어디로"까지고, 파지 자세·
-파지력은 코드가 정한다(NFR-03a).
+**역할 분리.** 파지 자세와 3D 좌표는 코드가 만든다(마스크 + depth). 파지력·접근속도를
+정하는 `profile`은 **2026-09-08부터 VLM이 고른다** — 아래 [클래스 어휘를 주지 않는다] 참조.
 
 ### 인지 단계는 지시를 보지 않는다
 
@@ -34,12 +35,30 @@ UI "치약 왼쪽으로"
 텍스트로 받는 `llm_client.plan`이 정한다 — 원래 그 모듈의 일이다(FR-10/FR-11).
 덕분에 같은 프레임에 지시를 여러 번 물어도 인지 결과는 그대로다.
 
-### 클래스 어휘
+### 클래스 어휘를 주지 않는다 (2026-09-08 변경)
 
-프롬프트에 `src/perception/config/objects.yaml`의 등록 클래스를 함께 넣는다. 어휘를 안 주면
-같은 물체를 매번 다른 이름으로 부르고(치약/toothpaste/tube) 전부 신규품목으로 떨어져
-fragile 프로파일이 강제된다(FR-05b) — 오류로 보이지 않고 느려지기만 하는 종류의 문제다.
-목록에 없는 물체는 `is_new_class=true`로 표시되어 신규품목 경로를 탄다.
+**예전:** 프롬프트에 `src/perception/config/objects.yaml`의 등록 클래스를 함께 넣고 VLM은
+이름만 답했다. 무게·파손위험·프로파일은 그 이름으로 objects.yaml에서 조회했고, 목록에 없는
+물체는 `is_new_class=true`로 신규품목이 되어 fragile 프로파일이 강제됐다(FR-05b).
+
+**지금:** 어휘를 주지 않는다. VLM이 사진만 보고 이름과 속성(`mass_g` / `fragile` /
+`deformable` / `transparent`)과 파지 프로파일까지 정하고, 그 값이 `attr_source=llm_suggested`,
+`needs_confirmation=true`로 `DetectedObject`에 그대로 실린다. objects.yaml을 지나지 않는다.
+
+바꾼 이유는 등록 표가 이 경로의 목적과 맞지 않았기 때문이다. 학습 클래스에 갇히지 않으려고
+VLM을 쓰는데, 어휘를 주면 모델이 그 목록 안에서 답하고 목록 밖 물건은 전부 fragile로
+떨어져 "무엇이든 알아본다"는 이점이 파지 단계에서 사라졌다.
+
+**맞바꾼 것:** 파지력을 정하는 값이 모델 출력이 되었다. 원래 NFR-03a가 금지하던 것이고,
+받아 낸 대가는 세 겹으로 막는다.
+
+1. 프롬프트가 profile을 고르는 규칙과 각 값의 실제 힘(20N/12N/5N)을 명시하고, 확신이
+   없으면 조심스러운 쪽으로 내리라고 지시한다 (`vlm_detect.SYSTEM_PROMPT_MARKS`).
+2. `vlm_detect._normalize_marks`가 `fragile=true`인데 다른 profile을 답한 조합을 강등한다.
+3. `validator.resolve_profile`은 값이 유효하지 않으면 여전히 fragile로 떨어뜨린다.
+
+**되돌리려면** `detector:=yolo`가 그대로 남아 있다 — 그 경로는 objects.yaml의
+`model_labels`/`objects`를 예전대로 쓴다.
 
 ## 테스트
 
@@ -49,37 +68,36 @@ python3.12 -m venv .venv
 .venv/bin/pip install ultralytics openai        # torch는 ultralytics가 함께 받는다
 cp .env.example .env && $EDITOR .env            # OPENAI_API_KEY
 
+# 테스트 이미지는 test_image/에 넣는다 (인자 없이 돌리면 그 안 전부를 돈다)
+cp services/planner/image.png test_image/
+
 # 기본 경로(som): SAM 먼저 → VLM이 이름 → planner가 지시 해석 (3단계 전부)
-.venv/bin/python tools/scripts/vlm_sam_test.py services/planner/image.png \
+.venv/bin/python tools/scripts/vlm_sam_test.py test_image/image.png \
     --command "치약 왼쪽으로"
 
 # SAM 전체 분할(CPU 26초)만 재사용하고 지시만 바꿔 가며
-.venv/bin/python tools/scripts/vlm_sam_test.py services/planner/image.png \
+.venv/bin/python tools/scripts/vlm_sam_test.py test_image/image.png \
     --reuse-marks --command "우산 왼쪽으로"
 
 # 원래 물어본 경로 (VLM 박스 → SAM 프롬프트)
-.venv/bin/python tools/scripts/vlm_sam_test.py services/planner/image.png \
+.venv/bin/python tools/scripts/vlm_sam_test.py test_image/image.png \
     --mode box --command "치약 왼쪽으로" --plan
-
-# API를 안 부르고 뒤 단계만 반복
-.venv/bin/python tools/scripts/vlm_sam_test.py services/planner/image.png \
-    --from-json data/samples/vlm_sam/image_scene.json
 ```
 
-GPU에서 돌리려면 `--device 0`. MobileSAM 가중치(~40MB)는 첫 실행에 자동으로 받아
-`models/mobile_sam.pt`에 둔다(`*.pt`는 커밋하지 않는다).
+GPU에서 돌리려면 `--device 0`. SAM2 base 가중치(~310MB, 2026-09-08부터 기본값 —
+[SAM1/SAM2/SAM3 추론 속도 비교](#sam1sam2sam3-추론-속도-비교-2026-09-08) 참조)는 첫 실행에
+자동으로 받아 `models/sam2_b.pt`에 둔다(`*.pt`는 커밋하지 않는다). `--sam-model mobile_sam.pt`로
+예전 기본값으로 되돌릴 수 있다.
 
-출력은 `data/samples/vlm_sam/`에 남는다.
+출력은 `test_result/`에 남는다(입력은 기본 `test_image/` 전체 — 파일 하나만 지정할 수도 있다).
+json은 안 만들고, "LLM에 보내기 전"과 "VLM이 걸러낸 후"를 나란히 볼 수 있게 둘 다 남긴다.
 
 | 파일 | 내용 |
 | --- | --- |
-| `*_marks.png` | SAM 조각에 번호를 그린 이미지 — **VLM에 실제로 보낸 그림** (som) |
-| `*_marks.npz` | 번호별 bool 마스크 (`--reuse-marks`가 읽는다) |
-| `*_scene.json` | VLM 원본 응답 (`--from-json`으로 재사용) |
-| `*_boxes.png` | 물체 박스 오버레이 |
-| `*_masks.png` | 물체 마스크 오버레이 |
-| `*_masks.npz` | object_id별 bool 마스크 |
-| `*_result.json` | 마스크 통계까지 포함한 전체 결과 |
+| `*_before.png` | SAM 원본 조각에 번호만 붙인 것 — **LLM에 실제로 보낸 그림** (`--no-vlm`이면 안 만든다) |
+| `*_after.png` | 전체 이미지에 물체별 윤곽선+라벨을 그린 **최종 결과** — 웹에서 보는 `/grasp/debug_image`와 같은 스타일(채우기 없음) |
+| `*_objects/<object_id>.png` | 물체별로 배경을 지우고 마스크만 잘라낸 컷아웃(투명 PNG) |
+| `*_before.npz` | 번호별 원시 마스크 (`--reuse-marks`가 SAM 전체 분할을 건너뛸 때 읽는 캐시 — 이미지 아님) |
 
 같은 stem의 `*_depth.npy` / `*_info.json`이 옆에 있으면(=`perception_capture.py`로 뜬 프레임)
 마스크 기준 카메라 좌표(mm)와 `depth_valid_ratio`까지 함께 뽑는다.
@@ -100,7 +118,7 @@ GPU에서 돌리려면 `--device 0`. MobileSAM 가중치(~40MB)는 첫 실행에
 
 | | 결과 |
 | --- | --- |
-| 무엇이 있는지 | **된다.** `wet_wipes` / `fabric_spray` / `toothpaste`를 objects.yaml 어휘 그대로 맞혔다 |
+| 무엇이 있는지 | **된다.** `wet_wipes` / `fabric_spray` / `toothpaste`를 objects.yaml 어휘 그대로 맞혔다 (당시에는 어휘를 프롬프트에 넣었다 — 위 [클래스 어휘를 주지 않는다] 참조) |
 | 바운딩박스 좌표 | **못 쓴다.** 좌표가 100px 단위로 뭉개지고 물체 위에 얹히지 않는다 |
 | 왕복 시간 | 8~12초 (detail=high, 1280x720) |
 
@@ -181,6 +199,26 @@ gpt-4o는 배너의 **글자를 읽고** 그것을 치약의 일부라고 답했
 **다음 측정은 오버레이가 없는 원본 프레임으로 해야 한다**
 (`tools/scripts/perception_capture.py`로 뜬 `data/samples/*.png`).
 
+### SAM1/SAM2/SAM3 추론 속도 비교 (2026-09-08)
+
+같은 사진·같은 파라미터(`--points-stride 10 --min-area 0.008`)·같은 기기(Apple M3 Pro,
+`--device mps`)로 everything 모드 분할 시간만 쟀다. 모델 로딩 시간은 뺐다.
+
+| 모델 | 가중치 크기 | 추론 시간 |
+| --- | --- | --- |
+| SAM1 (mobile_sam) | ~40MB | 1.1초 |
+| SAM2 (sam2_b, base) | ~310MB | 1.4초 |
+| SAM3 (sam3.pt) | ~3.4GB (840M 파라미터) | 11.4초 |
+
+**SAM2 base를 기본값으로 골랐다.** mobile_sam 대비 속도 차이가 크지 않은데(1.1초→1.4초)
+세그멘테이션 완성도가 눈에 띄게 나았다(실측 사진 기준, 물체 경계가 더 깔끔하게 갈린다).
+SAM3는 마스크 하나는 더 정확할 수 있어도, 이 파이프라인이 쓰는 "그리드로 전체를 훑는"
+everything 모드에서는 오히려 실제 물체(우산·치약)를 통째로 놓치는 경우가 나왔다 — SAM3의
+설계 의도 자체가 이 방식(픽셀 그리드 프롬프트)보다는 텍스트 개념 프롬프트
+(`SAM3SemanticPredictor`)에 가깝기 때문으로 보인다. 게다가 가중치가 접근 승인제라
+자동 배포에도 안 맞는다. SAM3를 다시 보려면 `SAM3SemanticPredictor` 기반으로 파이프라인을
+따로 설계해야 할 것이다 — 지금 구조에 파일명만 바꿔 끼우는 방식으로는 안 된다.
+
 ## 아직 안 된 것
 
 - **런타임 노드에 붙지 않았다.** 지금은 정지 이미지 스크립트뿐이고, `perception/node.py`는
@@ -192,5 +230,11 @@ gpt-4o는 배너의 **글자를 읽고** 그것을 치약의 일부라고 답했
 - **오염되지 않은 사진으로 다시 재야 한다** (위 "테스트 사진의 오염").
 - **범주 지시("화장품")가 gpt-4o에서 불안정하다.** 선크림·젤네일이 실제로 있는 장면에서
   다시 확인해야 한다.
-- 신규 클래스 등록(FR-05a~c)과 이어지지 않았다. `is_new_class=true`가 나와도 지금은
-  `object_attributes`에 기록되지 않는다.
+- 신규 클래스 등록(FR-05a~c)과 이어지지 않았다. VLM이 낸 속성은 `needs_confirmation=true`로
+  발행될 뿐 `object_attributes`에 기록되지 않는다 — 사람이 확인해도 다음 관측에서 다시
+  VLM 추정값으로 돌아온다. 확인한 값을 DB에 쓰고 그 클래스만 DB 값을 우선 쓰는 경로가
+  아직 없다.
+- **VLM이 고른 `profile`이 실제 파지에서 맞는지 재지 않았다.** 이름을 맞히는 것은
+  2026-09-07에 확인했지만(위 실측), 같은 물체에 대해 profile이 실행마다 같게 나오는지와
+  그 값이 실물에 적절한지는 별개다. `check_label_marks.py`가 같은 프레임을 여러 번 물어
+  보는 것으로 재현성부터 확인할 수 있다.

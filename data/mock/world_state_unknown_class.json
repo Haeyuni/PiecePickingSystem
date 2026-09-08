@@ -62,11 +62,11 @@
       "graspable": true,
       "not_graspable_reason": "",
       "mass_g": 150.0,
-      "fragile": false,
+      "fragile": true,
       "deformable": false,
       "transparent": false,
-      "profile": "normal",
-      "attr_source": "vlm_suggested",
+      "profile": "fragile",
+      "attr_source": "llm_suggested",
       "needs_confirmation": true,
       "grasp_candidates": [
         {

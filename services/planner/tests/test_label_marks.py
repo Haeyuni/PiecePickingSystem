@@ -38,9 +38,13 @@ class LabelMarksTest(unittest.TestCase):
             return vlm_detect.VlmMarkScene(marks=[
                 vlm_detect.MarkLabel(mark_id=1, is_object=True, part_of=0,
                                      class_name="toothpaste", name_ko="치약",
-                                     is_new_class=False, confidence=0.9),
+                                     mass_g=150.0, fragile=False, deformable=True,
+                                     transparent=False, profile="deformable",
+                                     confidence=0.9),
                 vlm_detect.MarkLabel(mark_id=2, is_object=False, part_of=0, class_name="",
-                                     name_ko="", is_new_class=False, confidence=0.9),
+                                     name_ko="", mass_g=0.0, fragile=False,
+                                     deformable=False, transparent=False,
+                                     profile="fragile", confidence=0.9),
             ])
 
         vlm_detect.label_marks = fake
@@ -57,6 +61,25 @@ class LabelMarksTest(unittest.TestCase):
         self.assertEqual(body["prompt_version"], vlm_detect.MARKS_PROMPT_VERSION)
         self.assertEqual([m["mark_id"] for m in body["marks"]], [1, 2])
         self.assertEqual(body["marks"][0]["class_name"], "toothpaste")
+
+    def test_attributes_reach_perception(self):
+        """무게·파지 프로파일까지 응답에 실려야 한다 — perception은 objects.yaml을 안 본다."""
+        mark = post().json()["marks"][0]
+
+        self.assertEqual(mark["mass_g"], 150.0)
+        self.assertTrue(mark["deformable"])
+        self.assertEqual(mark["profile"], "deformable")
+
+    def test_registered_classes_are_not_sent_to_the_vlm(self):
+        """등록 클래스 어휘를 주지 않는 것이 이 경로의 전제다 (vlm_detect 상단 주석).
+
+        어휘를 넣으면 모델이 그 목록 안에서만 답해 처음 보는 물건이 목록의 이름으로
+        불리고, 그 물체에 맞지 않는 속성이 붙는다.
+        """
+        prompt = vlm_detect.build_marks_prompt([1, 2])
+
+        self.assertNotIn("등록된 클래스", prompt)
+        self.assertIn("[그려진 번호] 1, 2", prompt)
 
     def test_image_reaches_vlm_as_data_url(self):
         """파일 경로가 아니라 본문을 그대로 넘겨야 한다 — planner에는 그 파일이 없다."""

@@ -252,6 +252,14 @@ data/scenes/*
 data/observations/*
 !data/observations/.gitkeep
 
+# SAM 파라미터 튜닝용 정지 이미지/결과 (tools/scripts/vlm_sam_test.py)
+test_image/*
+!test_image/.gitkeep
+!test_image/README.md
+test_result/*
+!test_result/.gitkeep
+!test_result/README.md
+
 # web/frontend 빌드 산출물
 web/frontend/node_modules/
 web/frontend/dist/

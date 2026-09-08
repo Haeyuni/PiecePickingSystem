@@ -26,7 +26,7 @@ import rclpy
 import yaml
 from rclpy.node import Node
 from sensor_msgs.msg import CameraInfo, Image
-from sort_msgs.msg import InstanceMasks, WorldState
+from sort_msgs.msg import DetectedObject, InstanceMasks, WorldState
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 OBJECTS_YAML = ROOT / "src" / "perception" / "config" / "objects.yaml"
@@ -143,6 +143,15 @@ def main() -> int:
     # --- 속성이 seed와 일치하는가 --------------------------------------------
     mismatched = []
     for o in all_objects:
+        # detector=vlm_sam은 objects.yaml을 조회하지 않는다 — 속성의 출처가 사진을 본
+        # VLM이므로 seed와 다른 것이 정상이다(docs/vlm_sam_pipeline.md).
+        if o.attr_source == DetectedObject.SOURCE_LLM:
+            if not o.needs_confirmation:
+                mismatched.append(f"{o.class_name}: VLM 추정인데 needs_confirmation=false")
+            if o.profile not in (DetectedObject.PROFILE_NORMAL, DetectedObject.PROFILE_FRAGILE,
+                                 DetectedObject.PROFILE_DEFORMABLE):
+                mismatched.append(f"{o.class_name}: 모르는 profile {o.profile!r}")
+            continue
         s = seed_objects.get(o.class_name)
         if s is None:
             if not o.needs_confirmation:
@@ -151,7 +160,8 @@ def main() -> int:
         if o.name_ko != (s.get("name_ko") or "") or o.profile != s.get("profile"):
             mismatched.append(f"{o.class_name}: name_ko/profile이 seed와 다름 "
                               f"({o.name_ko}/{o.profile} vs {s.get('name_ko')}/{s.get('profile')})")
-    check("속성이 objects.yaml과 일치한다", not mismatched, "; ".join(sorted(set(mismatched))))
+    check("속성이 출처와 일치한다 (yaml seed / VLM 추정)", not mismatched,
+          "; ".join(sorted(set(mismatched))))
 
     # --- 마스크 ---------------------------------------------------------------
     mask_problems = []

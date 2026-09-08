@@ -17,10 +17,12 @@ def box_mask(x1, y1, x2, y2, shape=(100, 200)):
 
 
 def mark(mark_id, *, is_object=False, part_of=0, class_name="", name_ko="",
-         is_new_class=False, confidence=0.9):
+         mass_g=0.0, fragile=False, deformable=False, transparent=False,
+         profile="normal", confidence=0.9):
     return {"mark_id": mark_id, "is_object": is_object, "part_of": part_of,
-            "class_name": class_name, "name_ko": name_ko,
-            "is_new_class": is_new_class, "confidence": confidence}
+            "class_name": class_name, "name_ko": name_ko, "mass_g": mass_g,
+            "fragile": fragile, "deformable": deformable, "transparent": transparent,
+            "profile": profile, "confidence": confidence}
 
 
 def test_object_without_pieces_passes_through():
@@ -97,3 +99,28 @@ def test_out_of_range_mark_ids_are_ignored():
 
 def test_bbox_area_of_empty_mask():
     assert sam_marks.bbox_area(np.zeros((10, 10), dtype=bool)) == 0
+
+
+def test_vlm_attributes_ride_along_as_attrs():
+    """이 경로에는 objects.yaml 조회가 없다 — VLM이 낸 값이 그대로 DetectedObject가 된다."""
+    masks = [box_mask(10, 10, 40, 40)]
+    objects = sam_marks.merge_marks(
+        [mark(1, is_object=True, class_name="toothpaste", name_ko="치약",
+              mass_g=150.0, deformable=True, profile="deformable")], masks)
+
+    attrs = objects[0]["attrs"]
+    assert attrs["mass_g"] == 150.0
+    assert attrs["deformable"] is True
+    assert attrs["profile"] == "deformable"
+    # 사람이 확인한 값이 아니라는 표시가 함께 간다 (FR-05b의 확인 대기 목록)
+    assert attrs["attr_source"] == "llm_suggested"
+    assert attrs["needs_confirmation"] is True
+
+
+def test_unknown_profile_value_falls_back_to_fragile():
+    """스크립트 경로(tools/scripts)는 planner의 _normalize_marks를 안 지난다."""
+    masks = [box_mask(10, 10, 40, 40)]
+    objects = sam_marks.merge_marks(
+        [mark(1, is_object=True, class_name="mystery", profile="turbo")], masks)
+
+    assert objects[0]["attrs"]["profile"] == "fragile"

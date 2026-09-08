@@ -46,7 +46,12 @@ def describe_for_prompt(world_state: dict, bins: dict) -> str:
             attrs.append("변형가능")
         if o.get("transparent"):
             attrs.append("투명")
-        if o.get("needs_confirmation"):
+        # 속성의 출처를 구분해 보여 준다. SAM+VLM 경로는 물체가 전부 미확인이라
+        # (objects.yaml을 안 거친다) 같은 딱지를 붙이면 목록 전체가 "미확인"이 되어
+        # 아무것도 구분해 주지 못한다.
+        if o.get("attr_source") == "llm_suggested":
+            attrs.append("속성 VLM추정")
+        elif o.get("needs_confirmation"):
             attrs.append("미확인 신규품목")
         if not o.get("graspable", True):
             attrs.append(f"파지불가({o.get('not_graspable_reason') or '사유없음'})")
