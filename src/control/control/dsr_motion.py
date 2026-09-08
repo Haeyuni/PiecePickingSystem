@@ -945,20 +945,66 @@ def gripper_width_mm(pose_client, joint_angle: float, timeout_s: float = 1.5) ->
 
 
 def wait_gripper_settled(get_joint_angle, goal_handle, timeout_s: float = 8.0,
-                         poll_interval_s: float = 0.2, stable_polls: int = 3) -> float | None:
-    """그리퍼 관절각(rad)이 더 안 바뀔 때까지 기다린다. `/onrobot/sendCommand`는 완료
-    신호가 없는 fire-and-forget이라(모듈 docstring 참조) 직접 폴링해서 확인한다.
+                         poll_interval_s: float = 0.2, stable_polls: int = 3,
+                         get_status=None, status_max_age_s: float = 1.0,
+                         motion_start_timeout_s: float = 2.0) -> float | None:
+    """그리퍼 동작이 끝날 때까지 기다린다. `/onrobot/sendCommand`는 완료 신호가 없는
+    fire-and-forget이라(모듈 docstring 참조) 직접 확인해야 한다.
 
-    `get_joint_angle`은 최신 관절각을 돌려주는 콜러블(없으면 None) — 호출부가
+    `get_joint_angle`은 최신 관절각(rad)을 돌려주는 콜러블(없으면 None) — 호출부가
     `/onrobot_joint_states` 구독의 최신값을 캡처해 넘긴다. 취소되거나 타임아웃되면 None.
+
+    **관절각 정지로 완료를 추측하지 않는다.** RG2가 `gsta` bit0(Busy)로 "지금 움직이는
+    중"을 직접 알려주므로(onrobot_rg_msgs/OnRobotRGInput) 그걸 쓴다. `get_status`는
+    `(수신시각_monotonic, gsta, ...)` 또는 None을 돌려주는 콜러블이다.
+
+    **왜 바꿨나 (2026-09-08 실물)**: 예전엔 관절각이 `stable_polls`회(0.6초) 안 변하면
+    완료로 봤는데, 그 판정은 세 가지를 구분하지 못한다 — ①진짜 완료 ②명령이 아직
+    시작되지 않음 ③피드백이 끊겨 값이 얼어붙음. 실측에서 닫기 명령의 시작 지연이
+    약 0.6초였고 그게 `stable_polls * poll_interval_s`와 정확히 같아서, 닫기 목표
+    17.3mm인데 **52.7mm에서 완료 판정**이 났다. 그 시점의 상태가 그대로 파지 성공
+    판정의 근거(`post`)로 쓰여, 닫히는 도중의 과도값으로 성패를 가르고 있었다.
+
+    `status_max_age_s`는 "관측이 살아 있는가"의 기준이다 — 낡았으면 Busy를 안 쓰고
+    아래 폴백으로 내려간다. 값이 얼어붙은 것을 정지로 오독하던 ③이 여기서 갈린다.
+
+    `motion_start_timeout_s`는 물리량이 아니라 **명령→동작개시 지연의 상한**이다.
+    이 안에 Busy가 한 번도 서지 않으면 "움직일 필요가 없었다"(이미 목표 개폭)로 보고
+    끝낸다 — 기동 시 이미 열려 있는 그리퍼를 다시 여는 경우가 그렇다. 실측 지연
+    약 0.6초의 3배 여유로 잡았다.
+
+    `/onrobot/status`를 발행하지 않는 드라이버(2026-09-07 이전 빌드)에서는 `get_status`가
+    없거나 계속 낡은 값만 오므로, 그때는 **예전 관절각 안정 판정 그대로** 동작한다.
     """
-    deadline = time.monotonic() + timeout_s
+    started = time.monotonic()
+    deadline = started + timeout_s
     last = None
     stable = 0
+    saw_busy = False
+    last_angle = None
     while time.monotonic() < deadline:
         if goal_handle.is_cancel_requested:
             return None
         current = get_joint_angle()
+        if current is not None:
+            last_angle = current
+
+        status = get_status() if get_status is not None else None
+        now = time.monotonic()
+        if status is not None and now - status[0] <= status_max_age_s:
+            if status[1] & 0x01:            # Busy — 동작 중
+                saw_busy = True
+            elif saw_busy:                  # 움직였고, 이제 멈췄다
+                return last_angle
+            elif now - started >= motion_start_timeout_s:
+                # 지연 상한이 지나도록 Busy가 서지 않았다 = 움직일 필요가 없었다.
+                return last_angle
+            stable = 0                      # Busy를 쓰는 동안 각도 안정은 보지 않는다
+            last = current
+            time.sleep(poll_interval_s)
+            continue
+
+        # 폴백: 상태 토픽이 없거나 낡았다 — 예전대로 관절각 정지로 판단한다.
         if current is not None and last is not None and abs(current - last) < 1e-3:
             stable += 1
             if stable >= stable_polls:

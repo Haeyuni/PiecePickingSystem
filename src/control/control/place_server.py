@@ -20,6 +20,7 @@ from rclpy.node import Node
 
 from dsr_msgs2.action import MovelH2r
 from dsr_msgs2.srv import GetCurrentPosx, Ikin
+from onrobot_rg_msgs.msg import OnRobotRGInput
 from onrobot_rg_msgs.srv import SetCommand
 from sensor_msgs.msg import JointState
 from sort_msgs.action import PlaceInto
@@ -138,6 +139,14 @@ class PlaceServer(Node):
         self._gripper_joint_angle: float | None = None
         self.create_subscription(JointState, dsr_motion.GRIPPER_JOINT_STATES_TOPIC,
                                  self._on_gripper_state, 5, callback_group=callbacks)
+        # RG2가 보고하는 동작 상태. wait_gripper_settled가 gsta bit0(Busy)로 "다 열렸다"를
+        # 판단한다 — 관절각 정지로 추측하면 명령 시작 전 정지 구간을 완료로 오독한다
+        # (dsr_motion.wait_gripper_settled 참조, 2026-09-08 실물). 여기서 안 넘기면
+        # place의 열기도 pick의 닫기와 같은 조기 종료를 겪는다: 아직 덜 열린 채로
+        # release가 끝났다고 보고 물러나면 물체가 손가락에 끌려간다.
+        self._gripper_status: tuple[float, int, float] | None = None
+        self.create_subscription(OnRobotRGInput, dsr_motion.GRIPPER_STATUS_TOPIC,
+                                 self._on_gripper_status, 5, callback_group=callbacks)
 
         self.get_logger().info(
             f"place_into 액션 서버 준비 (목적지 {list(self._bins)}, "
@@ -146,6 +155,9 @@ class PlaceServer(Node):
     def _on_gripper_state(self, msg: JointState) -> None:
         if msg.position:
             self._gripper_joint_angle = msg.position[0]
+
+    def _on_gripper_status(self, msg: OnRobotRGInput) -> None:
+        self._gripper_status = (time.monotonic(), int(msg.gsta), float(msg.gwdf) / 10.0)
 
     def _cancel_callback(self, goal_handle):
         self.get_logger().warning("place_into 취소 요청 수신")
@@ -533,7 +545,9 @@ class PlaceServer(Node):
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("그리퍼 열기 명령 전송 실패")
-        if dsr_motion.wait_gripper_settled(lambda: self._gripper_joint_angle, goal_handle) is None:
+        if dsr_motion.wait_gripper_settled(
+                lambda: self._gripper_joint_angle, goal_handle,
+                get_status=lambda: self._gripper_status) is None:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("그리퍼가 열리는 동안 응답이 없다")

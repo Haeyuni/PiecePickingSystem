@@ -80,7 +80,7 @@ class PickDepthDiagnosticsTest(unittest.TestCase):
                     move_linear=move,
                     gripper_width_command=lambda w, f: w,
                     send_gripper_command=lambda c, command: commands.append(command) or True,
-                    wait_gripper_settled=lambda *a: 0.0,
+                    wait_gripper_settled=lambda *a, **kw: 0.0,
                 )
                 server = NS(
                     _posx_client=None, _movel_client=None, _gripper_cmd_client=None,

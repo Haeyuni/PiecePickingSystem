@@ -234,7 +234,8 @@ class PickServer(Node):
         # wait_gripper_settled는 취소를 볼 goal_handle을 요구한다 — 기동 시점에는 취소할
         # goal이 없으므로 "취소 안 됨"만 답하는 더미를 넘긴다.
         if dsr_motion.wait_gripper_settled(
-                lambda: self._gripper_joint_angle, _NeverCancelled()) is None:
+                lambda: self._gripper_joint_angle, _NeverCancelled(),
+                get_status=lambda: self._gripper_status) is None:
             self.get_logger().warning("기동 그리퍼 열기: 여는 동안 응답이 없다(타임아웃)")
             return
         self.get_logger().info(
@@ -809,7 +810,8 @@ class PickServer(Node):
                     raise _Canceled
                 raise RuntimeError(f"그리퍼 {what} 명령 전송 실패")
             if dsr_motion.wait_gripper_settled(
-                    lambda: self._gripper_joint_angle, goal_handle) is None:
+                    lambda: self._gripper_joint_angle, goal_handle,
+                    get_status=lambda: self._gripper_status) is None:
                 if goal_handle.is_cancel_requested:
                     raise _Canceled
                 raise RuntimeError(f"그리퍼가 {what} 동안 응답이 없다")
@@ -942,7 +944,8 @@ class PickServer(Node):
                 return None
             raise RuntimeError("그리퍼 닫기 명령 전송 실패")
         final_angle = dsr_motion.wait_gripper_settled(
-            lambda: self._gripper_joint_angle, goal_handle)
+            lambda: self._gripper_joint_angle, goal_handle,
+            get_status=lambda: self._gripper_status)
         if final_angle is None:
             if goal_handle.is_cancel_requested:
                 return None
