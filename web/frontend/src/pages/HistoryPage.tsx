@@ -60,7 +60,10 @@ export default function HistoryPage() {
     <div className="app">
       <div className="nav">
         <h1>이력</h1>
-        <Link to="/">← 제어 화면</Link>
+        <div style={{ display: 'flex', gap: 16 }}>
+          <Link to="/">← 제어 화면</Link>
+          <Link to="/datasets">데이터셋 →</Link>
+        </div>
       </div>
 
       <div className="filters">

@@ -95,6 +95,21 @@ export interface ExecutionLog {
   executed_at: string
 }
 
+/** 데이터셋 화면(Roboflow 스타일) 항목 하나 — dataset_items 한 행. */
+export interface DatasetItem {
+  item_id: string
+  trace_id: string
+  captured_at: string
+  image_path: string
+  label_path: string
+  class_name: string | null
+  name_ko: string | null
+  attr_source: 'yaml_seed' | 'llm_suggested' | 'user_confirmed' | null
+  confidence: number | null
+  reasoning: string | null
+  reviewed: boolean
+}
+
 export interface ObjectConfirmation {
   class_name: string
   suggested_name_ko: string | null

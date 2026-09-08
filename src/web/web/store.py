@@ -165,3 +165,49 @@ def object_class_map(world_state: dict | None) -> dict[str, str]:
     if not world_state:
         return {}
     return {o["object_id"]: o.get("class_name") for o in world_state.get("objects", [])}
+
+
+# --- 데이터셋 화면 (Roboflow 스타일 수집+브라우징, database/migrations/003) ---------------
+
+def query_dataset_items(class_name: str | None = None, since: str | None = None,
+                        until: str | None = None, limit: int = 50) -> list[dict]:
+    """`query_executions`와 같은 필터 패턴. planner의 /internal/label-marks가 쓴 행을
+    web이 읽기만 한다 — 쓰기는 이 서비스의 일이 아니다."""
+    where, params = [], []
+    if class_name:
+        where.append("class_name = %s")
+        params.append(class_name)
+    if since:
+        where.append("captured_at >= %s")
+        params.append(since)
+    if until:
+        where.append("captured_at <= %s")
+        params.append(until)
+
+    sql = """
+        SELECT item_id, trace_id, captured_at, image_path, label_path,
+               class_name, name_ko, attr_source, confidence, reasoning, reviewed
+        FROM dataset_items
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY captured_at DESC LIMIT %s"
+    params.append(min(limit, 500))
+
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        columns = [c.name for c in cur.description]
+        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    for row in rows:
+        row["item_id"] = str(row["item_id"])
+        row["captured_at"] = row["captured_at"].isoformat()
+    return rows
+
+
+def get_dataset_item_image_path(item_id: str) -> str | None:
+    """이미지 서빙(`GET /api/datasets/{item_id}/image`)용. 없으면 None."""
+    with connect() as conn, conn.cursor() as cur:
+        cur.execute("SELECT image_path FROM dataset_items WHERE item_id = %s", (item_id,))
+        row = cur.fetchone()
+    return row[0] if row else None

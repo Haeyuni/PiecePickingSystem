@@ -175,7 +175,10 @@ export default function ControlPage() {
     <div className="app">
       <div className="nav">
         <h1>피스피킹 분류 시스템</h1>
-        <Link to="/history">이력 보기 →</Link>
+        <div style={{ display: 'flex', gap: 16 }}>
+          <Link to="/history">이력 보기 →</Link>
+          <Link to="/datasets">데이터셋 →</Link>
+        </div>
       </div>
 
       <StatusBar robot={robot} connected={connected} warning={warning} awaitingApproval={approval !== null} />

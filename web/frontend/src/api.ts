@@ -1,5 +1,5 @@
 /** web 백엔드 호출 (웹_인터페이스_정의서.md 2절). */
-import type { ApprovalAction, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
+import type { ApprovalAction, DatasetItem, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
 
 export interface ApiError {
   code: string
@@ -91,6 +91,11 @@ export function submitApproval(traceId: string, body: ApprovalAction) {
     `/api/executions/${traceId}/approval`,
     { method: 'POST', body: JSON.stringify({ schema_version: '1.0.0', ...body }) },
   )
+}
+
+export function getDatasetItems(params: Record<string, string> = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request<{ items: DatasetItem[] }>(`/api/datasets${query ? `?${query}` : ''}`)
 }
 
 export interface SttResult {
