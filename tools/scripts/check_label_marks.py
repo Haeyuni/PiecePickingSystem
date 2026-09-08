@@ -7,10 +7,11 @@
 
   docker compose up -d db planner
   python3 tools/scripts/check_label_marks.py                     # 기본 프레임 사용
-  python3 tools/scripts/check_label_marks.py --image 다른_marks.png --marks 1,2,3
+  python3 tools/scripts/check_label_marks.py --image 다른_before.png --marks 1,2,3
 
-기본 프레임은 vlm_sam_test.py가 남긴 *_marks.png다. 없으면 먼저 그것을 돌린다:
-  .venv/bin/python tools/scripts/vlm_sam_test.py services/planner/image.png --device cpu
+기본 프레임은 vlm_sam_test.py가 남긴 *_before.png(LLM에 보내는 번호 오버레이)다.
+없으면 먼저 그것을 돌린다:
+  .venv/bin/python tools/scripts/vlm_sam_test.py test_image/scene1.png --device cpu
 """
 import argparse
 import json
@@ -21,8 +22,7 @@ import urllib.request
 import uuid
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
-DEFAULT_IMAGE = REPO / "data" / "samples" / "vlm_sam" / "image_marks.png"
-DEFAULT_MARKS_JSON = REPO / "data" / "samples" / "vlm_sam" / "image_scene.json"
+DEFAULT_IMAGE = REPO / "test_result" / "scene1_before.png"
 
 
 def multipart(fields: dict, image_name: str, image_bytes: bytes) -> tuple[bytes, str]:
@@ -41,30 +41,19 @@ def multipart(fields: dict, image_name: str, image_bytes: bytes) -> tuple[bytes,
     return b"".join(parts), f"multipart/form-data; boundary={boundary}"
 
 
-def default_marks(image: pathlib.Path) -> str:
-    """같은 실행이 남긴 scene.json에서 마크 개수를 읽는다. 없으면 1..8로 찍는다."""
-    if DEFAULT_MARKS_JSON.exists() and image == DEFAULT_IMAGE:
-        scene = json.loads(DEFAULT_MARKS_JSON.read_text(encoding="utf-8"))
-        count = (scene.get("sam_everything") or {}).get("marks")
-        if count:
-            return ",".join(str(i) for i in range(1, count + 1))
-    return "1,2,3,4,5,6,7,8"
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8100")
-    ap.add_argument("--image", default=str(DEFAULT_IMAGE))
-    ap.add_argument("--marks", default=None, help="쉼표로 구분한 번호. 미지정 시 자동")
+    ap.add_argument("--image", default=str(DEFAULT_IMAGE), help="번호가 그려진 프레임")
+    ap.add_argument("--marks", default="1,2,3,4,5,6,7,8", help="쉼표로 구분한 번호")
     args = ap.parse_args()
 
     image = pathlib.Path(args.image)
     if not image.exists():
-        print(f"이미지가 없다: {image}\n  먼저 vlm_sam_test.py를 돌려 *_marks.png를 만든다",
-              file=sys.stderr)
+        print(f"이미지가 없다: {image}", file=sys.stderr)
         return 1
 
-    marks = args.marks or default_marks(image)
+    marks = args.marks
     trace_id = f"tr-check-{uuid.uuid4().hex[:8]}"
     body, content_type = multipart(
         {"mark_ids": marks, "trace_id": trace_id}, image.name, image.read_bytes())
@@ -96,14 +85,26 @@ def main() -> int:
     for m in payload["marks"]:
         note = (f"{m['class_name']} ({m['name_ko']})" if m["is_object"]
                 else (f"→ {m['part_of']}번의 조각" if m["part_of"] else "물체 아님"))
-        print(f"  [{m['mark_id']}] {note}  conf={m['confidence']:.2f}"
-              + (" [신규클래스]" if m["is_new_class"] else ""))
+        # 속성도 VLM이 판단하므로 여기서 눈으로 확인할 수 있어야 한다 — 파지력을 정하는
+        # 값이라, 이름만 맞고 profile이 엉뚱하면 로봇이 물체를 부순다.
+        extra = ""
+        if m["is_object"]:
+            flags = [k for k in ("fragile", "deformable", "transparent") if m.get(k)]
+            extra = (f"  {m['profile']} {m['mass_g']:g}g"
+                     + (f" [{','.join(flags)}]" if flags else ""))
+        print(f"  [{m['mark_id']}] {note}  conf={m['confidence']:.2f}{extra}")
 
     if not objects:
         failures.append("물체로 판단된 마크가 하나도 없다 — 프레임이나 프롬프트를 확인한다")
     for m in objects:
         if not m["class_name"]:
             failures.append(f"마크 {m['mark_id']}: is_object인데 class_name이 비었다")
+        if m["profile"] not in ("normal", "fragile", "deformable"):
+            failures.append(f"마크 {m['mark_id']}: 모르는 profile {m['profile']!r} — "
+                            "이 값이 그대로 파지력이 된다")
+        if m["fragile"] and m["profile"] != "fragile":
+            failures.append(f"마크 {m['mark_id']}: fragile인데 profile={m['profile']} — "
+                            "planner의 _normalize_marks가 걸렀어야 한다")
 
     for f in failures:
         print(f"  실패: {f}", file=sys.stderr)

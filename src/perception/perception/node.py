@@ -12,7 +12,8 @@ docs/on-demand-perception.md(전환 설계, D-1~D-8)
         → (vlm_sam이면) 라벨링이 끝난 뒤 새 프레임을 다시 찍어 재투영 박스로 SAM 1패스 (D-8 —
           그래야 발행 stamp가 촬영 시각에서 10초씩 벌어지지 않는다)
         → 마스크 안쪽 median depth로 카메라 좌표 3D → base 좌표 (eye-in-hand 변환)
-        → 속성 조회 (object_attributes → objects.yaml → fallback)
+        → 속성: 검출기가 함께 냈으면 그것(vlm_sam — 사진을 본 VLM이 판단한다),
+          안 냈으면 class_name으로 조회 (object_attributes → objects.yaml → fallback)
         → object_id 유지 (프레임 간 추적)
         → /perception/world_state_raw + /perception/instance_masks 동시 발행
 
@@ -403,6 +404,7 @@ class PerceptionNode(Node):
 
         previous = [
             {"class_name": d["class_name"], "confidence": d["confidence"],
+             "attrs": d["attrs"],
              "position_base_mm": d["position"], "extent_base_mm": d["extent_base_mm"]}
             for d in detections_a if d["position"] is not None and d["extent_base_mm"]
         ]
@@ -540,10 +542,13 @@ class PerceptionNode(Node):
             class_name = item["class_name"]
             confidence = item["confidence"]
             mask = item["mask"]
+            # 검출기가 속성까지 알아냈으면(SAM+VLM) 그것을 쓴다. None이면 _publish가
+            # class_name으로 AttributeSource를 조회한다 — YOLO 경로가 그쪽이다.
+            attrs = item.get("attrs")
 
             if mask is None:
                 detections.append(self._detection(class_name, confidence, None, None, 0.0,
-                                                  REASON_NO_MASK, 0.0))
+                                                  REASON_NO_MASK, 0.0, attrs=attrs))
                 continue
 
             point_cam, valid_ratio = mask_utils.mask_3d(mask, depth, self._intrinsics)
@@ -574,8 +579,8 @@ class PerceptionNode(Node):
 
             reason = self._not_graspable_reason(mask, point_cam, valid_ratio, position)
             detections.append(self._detection(class_name, confidence, position, mask,
-                                              valid_ratio, reason, height_mm, extent))
-            self._maybe_save_unknown_crop(class_name, color, mask)
+                                              valid_ratio, reason, height_mm, extent, attrs))
+            self._maybe_save_unknown_crop(class_name, color, mask, attrs)
 
         return detections
 
@@ -588,7 +593,7 @@ class PerceptionNode(Node):
 
     @staticmethod
     def _detection(class_name, confidence, position, mask, valid_ratio, reason,
-                   height_mm, extent=()) -> dict:
+                   height_mm, extent=(), attrs=None) -> dict:
         return {
             "class_name": class_name,
             "confidence": confidence,
@@ -599,6 +604,8 @@ class PerceptionNode(Node):
             "height_mm": height_mm,
             # base 좌표 mm. 메시지에는 안 나가고 다음 관측의 프롬프트로만 쓴다.
             "extent_base_mm": list(extent),
+            # 검출기가 함께 낸 속성(detectors/base.py). None이면 _publish가 조회한다.
+            "attrs": attrs,
         }
 
     # --- 발행 ---------------------------------------------------------------
@@ -625,7 +632,10 @@ class PerceptionNode(Node):
         needs_reobserve = []
 
         for object_id, detection in zip(object_ids, detections):
-            attributes = self._attributes.attributes(detection["class_name"])
+            # 검출기가 사진을 보고 속성까지 판단했으면(SAM+VLM) 그것이 출처다. 아니면
+            # class_name으로 조회한다(object_attributes → objects.yaml → fallback).
+            attributes = (detection["attrs"]
+                          or self._attributes.attributes(detection["class_name"]))
             graspable = not detection["not_graspable_reason"]
 
             obj = DetectedObject()
@@ -660,6 +670,8 @@ class PerceptionNode(Node):
                 last_objects.append({
                     "class_name": detection["class_name"],
                     "confidence": detection["confidence"],
+                    # 재관측은 VLM을 부르지 않으므로(D-1) 속성도 여기서 물려줘야 한다.
+                    "attrs": detection["attrs"],
                     "position_base_mm": detection["position"],
                     "extent_base_mm": detection["extent_base_mm"],
                 })
@@ -720,14 +732,19 @@ class PerceptionNode(Node):
         except OSError as e:
             self.get_logger().warning(f"관측 사진 저장 실패({e}) — 발행은 계속한다")
 
-    def _maybe_save_unknown_crop(self, class_name: str, color: np.ndarray, mask) -> None:
-        """신규 클래스는 크롭을 남긴다 (시스템명세서 4.4절 — VLM 제안·사람 확인의 입력).
+    def _maybe_save_unknown_crop(self, class_name: str, color: np.ndarray, mask,
+                                 attrs: dict | None = None) -> None:
+        """확인 대기 물체는 크롭을 남긴다 (시스템명세서 4.4절 — VLM 제안·사람 확인의 입력).
 
         클래스당 한 번만 저장한다. 프레임마다 쓰면 같은 물체로 디스크가 찬다.
+
+        SAM+VLM 경로는 속성이 전부 모델 추정이라 클래스마다 한 장씩 쌓인다 — 사람이
+        확인해야 할 목록이 실제로 그만큼이므로 맞는 동작이다.
         """
         if mask is None or class_name in self._saved_unknown_crops:
             return
-        if not self._attributes.attributes(class_name)["needs_confirmation"]:
+        attributes = attrs or self._attributes.attributes(class_name)
+        if not attributes["needs_confirmation"]:
             return
         crop = mask_utils.crop_bgr(color, mask)
         if crop is None:

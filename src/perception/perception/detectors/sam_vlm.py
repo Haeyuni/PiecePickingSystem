@@ -1,7 +1,12 @@
 """SAM+VLM 검출기: 장면 전체를 조각내고(SAM) 번호에 이름을 붙인다(VLM).
 
-YOLO와 달리 학습한 클래스에 갇히지 않는다 — 처음 보는 물건도 이름이 붙어
-`is_new_class=true`로 신규품목 경로를 탄다(FR-05).
+YOLO와 달리 학습한 클래스에 갇히지 않는다 — 처음 보는 물건도 이름이 붙는다.
+
+**objects.yaml을 지나지 않는다.** 이름뿐 아니라 무게·파손위험·변형·투명 여부와 파지
+프로파일까지 사진을 본 VLM이 답하고, 그 값이 그대로 `DetectedObject`에 실린다
+(`attr_source=llm_suggested`, `needs_confirmation=true`). 등록되지 않은 물건도 그 물건에
+맞게 다뤄지지만 파지력을 정하는 값이 모델 출력이 되었다는 뜻이기도 하다 —
+`planner/src/vlm_detect.py` 상단의 [속성도 VLM이 판단한다]에 그 맞바꿈을 적어 뒀다.
 
 **VLM은 여기서 부르지 않고 planner에 물어본다.** planner는 ROS를 모르는 서비스이고
 OPENAI_API_KEY도 거기에만 있다 — perception이 직접 부르면 ROS 컨테이너에 API 키와 인터넷
@@ -67,7 +72,10 @@ class SamVlmDetector:
         self.last_marks, self.last_objects = masks, objects
         self._log.info(f"VLM 라벨링: 마크 {len(masks)}개 중 물체 {len(objects)}개")
 
-        detections = [detection(o["class_name"], o["confidence"], o["mask"]) for o in objects]
+        # attrs가 함께 나간다 — 이 경로에서는 무게·파손위험·파지 프로파일도 VLM이 답한다
+        # (objects.yaml 조회 없음, base.py의 detection() 주석 참조).
+        detections = [detection(o["class_name"], o["confidence"], o["mask"], o["attrs"])
+                      for o in objects]
         return detections, marked
 
     def _label(self, marked_bgr: np.ndarray, mark_ids: list[int], trace_id: str) -> list[dict]:

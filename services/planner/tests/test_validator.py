@@ -170,16 +170,28 @@ class TestSafetyGate(unittest.TestCase):
 
 
 class TestProfileForcing(unittest.TestCase):
-    def test_unconfirmed_class_is_forced_to_fallback(self):
-        """VLM 제안값(normal)을 그대로 쓰면 안 된다 — NFR-03a, FR-05b."""
+    """프로파일은 값이 유효하면 그대로 쓴다 (resolve_profile 주석 참조).
+
+    예전에는 needs_confirmation=true면 무조건 fragile로 강제했다. SAM+VLM 경로가
+    objects.yaml 어휘 없이 돌기 시작하면서 그 경로의 물체가 전부 미확인이 되어,
+    강제가 걸리면 프로파일 구분 자체가 사라진다.
+    """
+
+    def test_vlm_suggested_profile_is_used(self):
         obj = make_object(profile="normal", needs_confirmation=True,
                           attr_source="llm_suggested")
-        self.assertEqual(resolve_profile(obj), "fragile")
+        self.assertEqual(resolve_profile(obj), "normal")
         steps = validate(pick_place(), world(obj), BINS)
-        self.assertTrue(all(s.profile == "fragile" for s in steps))
+        self.assertTrue(all(s.profile == "normal" for s in steps))
 
     def test_unknown_profile_value_falls_back(self):
+        """값을 못 읽으면 아는 것이 없다는 뜻이므로 조심스러운 쪽으로 간다."""
         self.assertEqual(resolve_profile(make_object(profile="turbo")), "fragile")
+
+    def test_missing_profile_falls_back(self):
+        obj = make_object()
+        del obj["profile"]
+        self.assertEqual(resolve_profile(obj), "fragile")
 
     def test_confirmed_class_keeps_its_profile(self):
         obj = make_object(profile="deformable", needs_confirmation=False)

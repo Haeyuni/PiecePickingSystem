@@ -23,7 +23,7 @@ def test_detection_shape():
     mask = np.zeros((4, 6), dtype=bool)
     d = detection("toothpaste", 0.9, mask)
 
-    assert set(d) == {"class_name", "confidence", "mask"}
+    assert set(d) == {"class_name", "confidence", "mask", "attrs"}
     assert d["class_name"] == "toothpaste"
     assert isinstance(d["confidence"], float)
     assert d["mask"] is mask
