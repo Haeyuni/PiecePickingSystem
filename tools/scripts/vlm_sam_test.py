@@ -57,10 +57,12 @@ import numpy as np
 REPO = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_IMAGE_DIR = REPO / "test_image"
 DEFAULT_OUT = REPO / "test_result"
-# MobileSAM 가중치(~40MB). models/에 있으면 그것을 쓰고, 없으면 ultralytics가 이름을 보고
+# SAM2 base 가중치(~310MB). models/에 있으면 그것을 쓰고, 없으면 ultralytics가 이름을 보고
 # 자동으로 내려받는다(첫 실행 때 한 번). *.pt는 커밋하지 않는다(.gitignore).
-DEFAULT_SAM = str(REPO / "models" / "mobile_sam.pt") \
-    if (REPO / "models" / "mobile_sam.pt").exists() else "mobile_sam.pt"
+# 2026-09-08: mobile_sam → SAM2 base로 기본값 교체 (docker-compose.yml SAM_MODEL과 맞춤 —
+# 실측 근거는 docs/vlm_sam_pipeline.md). mobile_sam으로 되돌리려면 --sam-model mobile_sam.pt.
+DEFAULT_SAM = str(REPO / "models" / "sam2_b.pt") \
+    if (REPO / "models" / "sam2_b.pt").exists() else "sam2_b.pt"
 
 # 오버레이 색 (BGR). 물체 순서대로 돌려 쓴다.
 COLORS = [(0, 200, 255), (0, 255, 120), (255, 120, 0), (255, 0, 200),
@@ -443,7 +445,7 @@ def main() -> int:
     ap.add_argument("--model", default=None, help="VLM 모델 (기본: .env의 VLM_MODEL/OPENAI_MODEL)")
     ap.add_argument("--detail", default="high", choices=["high", "low", "auto"],
                     help="이미지 입력 해상도. low는 싸지만 작은 물체 박스가 뭉개진다")
-    ap.add_argument("--sam-model", default=DEFAULT_SAM, help="SAM 가중치 (기본 MobileSAM)")
+    ap.add_argument("--sam-model", default=DEFAULT_SAM, help="SAM 가중치 (기본 SAM2 base)")
     ap.add_argument("--device", default=None, help="0 이면 GPU, cpu 면 CPU")
     ap.add_argument("--points-stride", type=int, default=10,
                     help="som 모드의 SAM 샘플 격자. 촘촘할수록 느리고 조각이 늘어난다")

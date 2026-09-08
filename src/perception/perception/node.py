@@ -240,7 +240,7 @@ class PerceptionNode(Node):
             from .detectors.sam_vlm import SamVlmDetector
 
             weights = self.get_parameter("sam_model_path").value or str(
-                find_repo_path("models", "mobile_sam.pt", env_var="SAM_MODEL"))
+                find_repo_path("models", "sam2_b.pt", env_var="SAM_MODEL"))
             planner_url = (self.get_parameter("planner_url").value
                            or os.environ.get("PLANNER_URL", "http://localhost:8100"))
             detector = SamVlmDetector(
@@ -266,7 +266,7 @@ class PerceptionNode(Node):
         from .detectors.sam_reprompt import SamRepromptDetector
 
         weights = self.get_parameter("sam_model_path").value or str(
-            find_repo_path("models", "mobile_sam.pt", env_var="SAM_MODEL"))
+            find_repo_path("models", "sam2_b.pt", env_var="SAM_MODEL"))
         detector = SamRepromptDetector(
             weights, device=self.get_parameter("device").value or None,
             logger_=_LoggerAdapter(self.get_logger()))

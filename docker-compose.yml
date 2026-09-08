@@ -42,8 +42,11 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-piece_picking}:${POSTGRES_PASSWORD}@localhost:5432/${POSTGRES_DB:-piece_picking}
       # *.pt는 이미지에 굽지 않는다(.gitignore) — 아래 볼륨이 가리키는 호스트 파일을 그대로 쓴다.
       PERCEPTION_MODEL: /models/best.pt
-      # detector=vlm_sam일 때 쓰는 SAM 가중치(MobileSAM, ~40MB). 같은 볼륨에서 온다.
-      SAM_MODEL: /models/mobile_sam.pt
+      # detector=vlm_sam일 때 쓰는 SAM 가중치. 같은 볼륨에서 온다.
+      # 2026-09-08: SAM2 base(~310MB)로 교체 — mobile_sam 대비 정확도가 낫다(실측:
+      # docs/vlm_sam_pipeline.md). sam_marks.segment_everything이 파일명으로 SAM/SAM2/SAM3를
+      # 갈라 쓰므로 여기 파일명만 바꾸면 된다.
+      SAM_MODEL: /models/sam2_b.pt
       # VLM 라벨링을 planner에 물어본다(API 키가 거기에만 있다). host 네트워크라 서비스 이름
       # DNS가 없어 게시된 포트로 부른다 — web_ros/DATABASE_URL과 같은 이유.
       PLANNER_URL: http://localhost:8100

@@ -84,8 +84,10 @@ cp services/planner/image.png test_image/
     --mode box --command "치약 왼쪽으로" --plan
 ```
 
-GPU에서 돌리려면 `--device 0`. MobileSAM 가중치(~40MB)는 첫 실행에 자동으로 받아
-`models/mobile_sam.pt`에 둔다(`*.pt`는 커밋하지 않는다).
+GPU에서 돌리려면 `--device 0`. SAM2 base 가중치(~310MB, 2026-09-08부터 기본값 —
+[SAM1/SAM2/SAM3 추론 속도 비교](#sam1sam2sam3-추론-속도-비교-2026-09-08) 참조)는 첫 실행에
+자동으로 받아 `models/sam2_b.pt`에 둔다(`*.pt`는 커밋하지 않는다). `--sam-model mobile_sam.pt`로
+예전 기본값으로 되돌릴 수 있다.
 
 출력은 `test_result/`에 남는다(입력은 기본 `test_image/` 전체 — 파일 하나만 지정할 수도 있다).
 json은 안 만들고, "LLM에 보내기 전"과 "VLM이 걸러낸 후"를 나란히 볼 수 있게 둘 다 남긴다.
@@ -196,6 +198,26 @@ gpt-4o는 배너의 **글자를 읽고** 그것을 치약의 일부라고 답했
 기하 검사를 넣어(대표 조각보다 크거나 외접 사각형을 1.6배 넘게 키우면 버린다) 걸러내지만,
 **다음 측정은 오버레이가 없는 원본 프레임으로 해야 한다**
 (`tools/scripts/perception_capture.py`로 뜬 `data/samples/*.png`).
+
+### SAM1/SAM2/SAM3 추론 속도 비교 (2026-09-08)
+
+같은 사진·같은 파라미터(`--points-stride 10 --min-area 0.008`)·같은 기기(Apple M3 Pro,
+`--device mps`)로 everything 모드 분할 시간만 쟀다. 모델 로딩 시간은 뺐다.
+
+| 모델 | 가중치 크기 | 추론 시간 |
+| --- | --- | --- |
+| SAM1 (mobile_sam) | ~40MB | 1.1초 |
+| SAM2 (sam2_b, base) | ~310MB | 1.4초 |
+| SAM3 (sam3.pt) | ~3.4GB (840M 파라미터) | 11.4초 |
+
+**SAM2 base를 기본값으로 골랐다.** mobile_sam 대비 속도 차이가 크지 않은데(1.1초→1.4초)
+세그멘테이션 완성도가 눈에 띄게 나았다(실측 사진 기준, 물체 경계가 더 깔끔하게 갈린다).
+SAM3는 마스크 하나는 더 정확할 수 있어도, 이 파이프라인이 쓰는 "그리드로 전체를 훑는"
+everything 모드에서는 오히려 실제 물체(우산·치약)를 통째로 놓치는 경우가 나왔다 — SAM3의
+설계 의도 자체가 이 방식(픽셀 그리드 프롬프트)보다는 텍스트 개념 프롬프트
+(`SAM3SemanticPredictor`)에 가깝기 때문으로 보인다. 게다가 가중치가 접근 승인제라
+자동 배포에도 안 맞는다. SAM3를 다시 보려면 `SAM3SemanticPredictor` 기반으로 파이프라인을
+따로 설계해야 할 것이다 — 지금 구조에 파일명만 바꿔 끼우는 방식으로는 안 된다.
 
 ## 아직 안 된 것
 
