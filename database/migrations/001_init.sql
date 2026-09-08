@@ -79,9 +79,9 @@ CREATE TABLE IF NOT EXISTS experiment_runs (
 -- ---------------------------------------------------------------------------
 -- 스킬 단위 실행 결과
 --
--- object_id는 런타임 인스턴스 식별자(obj_003)라 object_attributes(class_name)를
--- 참조할 수 없다. 속성 조인을 위해 class_name을 별도 컬럼으로 둔다
--- (시스템명세서 2.2절 ERD의 "object_id 참조" 표기를 이 구조로 확정).
+-- object_id는 런타임 인스턴스 식별자(obj_003)이고, class_name은 실행 당시의 물체
+-- 클래스를 보존하는 스냅샷이다. object_attributes 수명과 실행 이력을 분리하기 위해
+-- class_name에는 FK를 두지 않는다.
 --
 -- stop/home은 trace_id·sequence_id 없이 기록된다(웹_인터페이스_정의서 2.6절).
 -- ---------------------------------------------------------------------------
@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS execution_logs (
     trace_id                   text,
     request_id                 text,
     object_id                  text,
-    class_name                 text REFERENCES object_attributes (class_name),
+    class_name                 text,
     -- 스킬셋: pick/place_into(FR-14) + 로봇 직접 제어(웹 인터페이스 2.6절)
     skill_name                 text NOT NULL
                                CHECK (skill_name IN ('pick', 'place_into', 'stop', 'home')),
