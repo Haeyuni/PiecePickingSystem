@@ -17,10 +17,34 @@ logger = logging.getLogger(__name__)
 
 # 프롬프트를 고칠 때마다 올린다. task_sequences.prompt_version으로 DB에 기록되어
 # 평가셋 결과를 프롬프트 버전별로 비교할 수 있게 한다 (NFR-09).
-PROMPT_VERSION = "plan-v5"
+PROMPT_VERSION = "plan-v6"
 
 # 기본값은 이 계정에서 사용 가능한 모델. 변경 시 .env의 OPENAI_MODEL로 덮어쓴다.
 DEFAULT_MODEL = "gpt-4o"
+
+# 도메인별 **계획 해석 규칙** — build_user_prompt가 [장면 맥락]으로 넣는다.
+# 같은 문장도 도메인에 따라 목적이 다르다:
+# - 약국: 지시가 증상으로 와도 검출된 **약 이름에서 효능을 추론**해 정확한 약을 고른다.
+# - 재활용: 목적은 **재질별 분리**이므로 이름의 재질과 지시의 목적지를 매칭한다.
+# `home`(가정)은 special 규칙이 없어 general과 같으므로 별도 도메인이 아니다.
+DOMAIN_CONTEXT_PLAN = {
+    "pharmacy": """\
+이 작업은 **약국** 시나리오다.
+- 지시가 증상·효능으로 와도('머리가 아플 때 먹는 약 줘'), 검출된 **약 이름 자체에서 효능을
+  추론**해 그에 맞는 약을 정확히 고른다. e.g. 이부프로펜정/타이레놀정 → 해열진통제(두통),
+  비타민C → 영양제.
+- 예: 지시가 '머리가 아플 때 먹는 약 줘'이고 검출이 [이부프로펜정, 비타민C]이면
+  **이부프로펜정만** 대상으로 삼는다.
+- 지시한 효능에 맞는 약이 목록에 없으면, 없는 약을 지어내지 말고 기존 규칙대로 거부한다.
+- 여러 약이 같은 효능이면 전부 대상으로 삼되, 파지 불가나 모호한 것은 기존 규칙을 따른다.""",
+    "recycle": """\
+이 작업은 **재활용(분리수거)** 시나리오다.
+- 목적은 **재질별 분리**다. 검출된 물체의 이름에 담긴 재질(플라스틱/캔/유리/종이 등)을 보고
+  지시가 말한 목적지(bin)로 보낸다. e.g. pet_plastic_bottle → 왼쪽, aluminum_can → 오른쪽.
+- '전부/모두/다'로 오면 재질과 무관하게 재활용 대상 물체를 하나도 빠뜨리지 않는다.
+- 이름에서 재질을 특정할 수 없는 물체는 추측하지 않는다 — 기존 규칙 5(가능한 것만)와
+  7(모호하면 거부)을 그대로 따른다.""",
+}
 
 SYSTEM_PROMPT = """\
 당신은 협동로봇 분류 시스템의 태스크 플래너다. 사용자의 자연어 지시를 로봇이 실행할 \
@@ -73,8 +97,13 @@ def model_name() -> str:
 
 
 def build_user_prompt(command_text: str, world_summary: str,
-                      previous_failure: dict | None = None) -> str:
+                      previous_failure: dict | None = None,
+                      domain: str = "general") -> str:
     parts = [world_summary, "", f"[지시]\n{command_text}"]
+    if domain and domain != "general":
+        context = DOMAIN_CONTEXT_PLAN.get(domain)
+        if context:
+            parts.insert(1, "[장면 맥락(도메인)]\n" + context)
     if previous_failure:
         parts += [
             "",
@@ -87,20 +116,20 @@ def build_user_prompt(command_text: str, world_summary: str,
 
 
 def plan(command_text: str, world_summary: str,
-         previous_failure: dict | None = None) -> LlmPlan:
+         previous_failure: dict | None = None, domain: str = "general") -> LlmPlan:
     """스킬 시퀀스를 생성한다. 반환값은 스키마가 보장된 LlmPlan."""
     client = _client()
     model = model_name()
     response = client.responses.parse(
         model=model,
         instructions=SYSTEM_PROMPT,          # 고정 프리픽스
-        input=build_user_prompt(command_text, world_summary, previous_failure),
+        input=build_user_prompt(command_text, world_summary, previous_failure, domain),
         text_format=LlmPlan,
         temperature=0,                        # 같은 입력에 같은 계획 (NFR-09 재현성)
     )
     parsed = response.output_parsed
     logger.info(
-        "LLM 계획 생성: model=%s steps=%d refusal=%r",
-        model, len(parsed.steps), parsed.refusal_reason,
+        "LLM 계획 생성: model=%s domain=%s steps=%d refusal=%r",
+        model, domain, len(parsed.steps), parsed.refusal_reason,
     )
     return parsed

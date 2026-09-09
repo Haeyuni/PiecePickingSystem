@@ -370,7 +370,7 @@ class RosExecutor:
         if self._node:
             self._node.on_event = bridge
 
-    async def observe(self, trace_id: str, mode: str = "full") -> dict | None:
+    async def observe(self, trace_id: str, mode: str = "full", domain: str = "general") -> dict | None:
         """온디맨드 관측 트리거 (executor.Executor.observe, docs/on-demand-perception.md).
 
         Home과 같은 이유로 액션이다 — SAM+VLM 왕복이 수 초~10초대라 Stop으로 취소할 수
@@ -382,6 +382,7 @@ class RosExecutor:
         msg.request_id = f"rq-observe-{uuid.uuid4().hex[:8]}"
         msg.mode = (Observe.Goal.MODE_REPROMPT if mode == "reprompt"
                    else Observe.Goal.MODE_FULL)
+        msg.domain = domain
 
         async def _ignore_feedback(_request_id: str, _phase: str) -> None:
             """관측 진행률(CAPTURING/SEGMENTING/...)은 아직 화면에 안 낸다 — pick/place의

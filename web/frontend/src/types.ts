@@ -4,6 +4,10 @@
  */
 
 export type RobotMode = 'idle' | 'busy' | 'error' | 'estopped'
+/** 시나리오 도메인. 어떤 명령도 기본값은 general — 도메인별 VLM 프롬프트를 쓰는
+ *  시나리오 버튼(가정/약국/재활용)만 명시적인 domain을 싣는다. 가정은 special 규칙이
+ *  없으므로 general과 같다. */
+export type Domain = 'general' | 'pharmacy' | 'recycle'
 /** 파지력 5단계: 1=가장 강하게(40N) ~ 5=가장 약하게(20N), 5N 간격. */
 export type GripLevel = 1 | 2 | 3 | 4 | 5
 

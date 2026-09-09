@@ -26,6 +26,9 @@ BLOCKED_MODES = {
 class CommandRequest(BaseModel):
     schema_version: str = "1.0.0"
     command_text: str
+    # 시나리오 도메인 (가정/약국/재활용). 일반 명령은 "general". 이 값이 planner까지
+    # 전달되어 VLM 프롬프트가 도메인별로 분기된다.
+    domain: str = "general"
 
 
 @router.post("/api/commands")
@@ -62,8 +65,8 @@ async def create_command(body: CommandRequest, request: Request):
         )
 
     trace_id = f"tr-{uuid.uuid4().hex[:12]}"
-    logger.info("명령 접수 trace=%s: %s", trace_id, body.command_text)
-    orchestrator.start_command(trace_id, body.command_text, executor)
+    logger.info("명령 접수 trace=%s domain=%s: %s", trace_id, body.domain, body.command_text)
+    orchestrator.start_command(trace_id, body.command_text, executor, domain=body.domain)
 
     # 이후 진행 상황은 폴링이 아니라 WebSocket으로 간다(4절)
     return JSONResponse(

@@ -53,5 +53,6 @@ def detection(class_name: str, confidence: float, mask: np.ndarray | None,
 
 class Detector(Protocol):
     def detect(self, color_bgr: np.ndarray, trace_id: str = "",
-               on_phase: OnPhase | None = None) -> tuple[list[dict], np.ndarray | None]:
+               on_phase: OnPhase | None = None,
+               domain: str = "general") -> tuple[list[dict], np.ndarray | None]:
         ...

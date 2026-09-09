@@ -84,6 +84,7 @@ class PickDepthDiagnosticsTest(unittest.TestCase):
                 )
                 server = NS(
                     _posx_client=None, _movel_client=None, _gripper_cmd_client=None,
+                    _torque_client=None,
                     # 도달 불가 알람 감시자(dsr_motion.MotionErrorMonitor). 이 테스트는
                     # 알람 없는 정상 경로만 보므로 move_linear에 그대로 넘겨지기만 하면 된다.
                     _motion_errors=None,
@@ -96,7 +97,21 @@ class PickDepthDiagnosticsTest(unittest.TestCase):
                     _min_grip_width_mm=5.0, _grip_close_ratio=0.8, _grip_level_force_n={},
                     get_logger=lambda: NS(info=logs.append, warning=logs.append),
                 )
+                # compliance.py는 이 테스트가 보는 좌표/로그 경로와 무관한 진단용 부가 기록이라
+                # (torque_trace_summary — pick_server 주석 참조) 실제 서비스를 안 부르는 스텁으로
+                # 대신한다. TorqueTrace.sample()이 그냥 흘려보내면 되므로 값은 검증하지 않는다.
+                class _StubTorqueTrace:
+                    def sample(self, client, label, timeout_s=0.5):
+                        return None
+
+                    def summary(self):
+                        return []
+
+                    def log_line(self):
+                        return ""
+
                 namespace = dict(math=math, dsr_motion=motion, _Canceled=type("Canceled", (Exception,), {}),
+                                 compliance=NS(TorqueTrace=_StubTorqueTrace),
                                  Pick=NS(Feedback=NS(PHASE_APPROACHING=1, PHASE_CONTACT_DETECTED=2)))
                 exec(code, namespace)
                 if canceled:

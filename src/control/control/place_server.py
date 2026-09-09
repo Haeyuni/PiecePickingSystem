@@ -6,6 +6,7 @@
 control은 planner를 거치지 않는 호출(재전송, 수동 테스트, 향후 다른 클라이언트)도 받는다.
 좌표를 실제로 아는 쪽에서 마지막으로 확인하는 것이 옳다.
 """
+import math
 import os
 import pathlib
 import threading
@@ -19,13 +20,13 @@ from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
 from dsr_msgs2.action import MovelH2r
-from dsr_msgs2.srv import GetCurrentPosx, Ikin
+from dsr_msgs2.srv import GetCurrentPosx, GetToolForce, Ikin
 from onrobot_rg_msgs.msg import OnRobotRGInput
 from onrobot_rg_msgs.srv import SetCommand
 from sensor_msgs.msg import JointState
 from sort_msgs.action import PlaceInto
 
-from . import box_geometry, dsr_motion
+from . import box_geometry, compliance, dsr_motion
 from .config_paths import skill_params_path
 from .request_cache import RequestCache
 from .robot_state_publisher import is_fake_robot, store
@@ -124,6 +125,17 @@ class PlaceServer(Node):
         # 물러난 높이(approach 지점)에서 바로 관절이동을 시작하면 바구니 테두리 바로 위라
         # 여유가 적어, 그만큼 더 올라간 뒤에 home으로 넘어가도록 한다.
         self._home_rise_mm = float(motion.get("home_rise_mm", 200.0))
+
+        # 순응 하강(compliance.py) — 기본은 꺼져 있다(skill_params.yaml compliance 블록
+        # 주석 참조. 이 저장소엔 dsr_msgs2가 없어 실물 검증을 못 했다).
+        params = load_skill_params()
+        compliance_cfg = params.get("compliance") or {}
+        self._place_descent_enabled = bool(compliance_cfg.get("place_descent_enabled", False))
+        self._place_descent_step_mm = float(compliance_cfg.get("place_descent_step_mm", 5.0))
+        # 접촉 임계값(N) — place_into는 물체별 grip_level을 받지 않으므로(PlaceInto.action
+        # 참조) profile/grip_level별로 나누지 않고 고정값 하나만 쓴다. 0/미설정이면
+        # 순응 하강을 건너뛴다(임계값 없이 "접촉했다"고 판단할 기준이 없다).
+        self._place_contact_threshold_n = float(compliance_cfg.get("contact_threshold_n", 0.0) or 0.0)
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
                                           callback_group=callbacks)
         # 컨트롤러가 "이 목표는 못 간다"고 내는 알람을 지켜본다 — 없으면 movel이
@@ -136,6 +148,10 @@ class PlaceServer(Node):
             GetCurrentPosx, dsr_motion.GET_CURRENT_POSX_SERVICE, callback_group=callbacks)
         self._gripper_cmd_client = self.create_client(
             SetCommand, dsr_motion.GRIPPER_COMMAND_SERVICE, callback_group=callbacks)
+        # 순응 하강(compliance.contact_exceeded)용 — place_descent_enabled가 꺼져 있으면
+        # 이 클라이언트는 만들어지되 쓰이지 않는다.
+        self._tool_force_client = self.create_client(
+            GetToolForce, dsr_motion.GET_TOOL_FORCE_SERVICE, callback_group=callbacks)
         self._gripper_joint_angle: float | None = None
         self.create_subscription(JointState, dsr_motion.GRIPPER_JOINT_STATES_TOPIC,
                                  self._on_gripper_state, 5, callback_group=callbacks)
@@ -376,6 +392,12 @@ class PlaceServer(Node):
         geometry mode에서는 frozen pick orientation과 box 계산 좌표이고, legacy mode에서는
         기존 taught bin pose에 높이 보정을 더한 좌표다.
         성공 True, 취소 None, 그 외 실패는 RuntimeError.
+
+        순응 하강 여부는 self._place_descent_enabled/self._place_contact_threshold_n
+        (skill_params.yaml compliance 블록의 고정값)이 정한다 — 켜져 있고 임계값이
+        설정돼 있을 때만 마지막 하강(바구니 접근 높이 → 목표 높이)을 스텝으로 쪼개
+        GetToolForce로 접촉을 확인한다. 나머지 구간(안전고도 이동, 물러나기)은 그대로
+        위치제어다 — 접촉 위험이 있는 구간은 바구니 안으로 들어가는 그 한 구간뿐이다.
         """
         target_posx = list(target_posx)
         approach_posx = list(target_posx)
@@ -414,6 +436,44 @@ class PlaceServer(Node):
             if last_pose is None:
                 return None
             return [xyz[0], xyz[1], xyz[2], last_pose[3], last_pose[4], last_pose[5]]
+
+        def descend_compliant(xy, start_pose, target_z, threshold_n, step_mm):
+            """`start_pose`의 z에서 `target_z`까지 `step_mm` 간격으로 내려가며 매 스텝
+            사이 GetToolForce로 접촉을 확인한다. 임계값을 넘으면 그 자리에서 멈추고
+            더 내려가지 않는다 — 깨지기 쉬운 물체를 계산된 목표까지 위치제어로
+            밀어붙이지 않기 위해서다(compliance.py 모듈 docstring 참조).
+
+            반환: (ok, 최종 pose, 접촉으로 조기 정지했는지). ok=False면 호출부가 다른
+            move() 실패와 똑같이 취소/RuntimeError로 처리한다 — 취소는 `move()`가 내부에서
+            이미 감지하므로 여기서 또 확인할 필요는 없다(그 결과를 그대로 돌려준다).
+            """
+            start_z = start_pose[2]
+            remaining = start_z - target_z
+            if remaining <= 0.0:
+                # 이미 목표 높이거나 더 낮다 — 쪼갤 게 없다.
+                return (*move([xy[0], xy[1], target_z,
+                              start_pose[3], start_pose[4], start_pose[5]]), False)
+            steps = max(1, math.ceil(remaining / step_mm))
+            current = start_pose
+            for i in range(1, steps + 1):
+                z = start_z - remaining * i / steps
+                waypoint = next_target([xy[0], xy[1], z], current)
+                if waypoint is None:
+                    return False, None, False
+                ok, pose = move(waypoint)
+                if not ok:
+                    return False, pose, False
+                current = pose if pose is not None else waypoint
+                if goal_handle.is_cancel_requested:
+                    return True, current, False
+                hit = compliance.contact_exceeded(self._tool_force_client, threshold_n)
+                if hit:
+                    self.get_logger().warning(
+                        f"[COMPLIANCE] place 하강 접촉 감지(임계값 {threshold_n:.1f}N) — "
+                        f"z={z:.1f}mm에서 멈춤 (목표 {target_z:.1f}mm, {i}/{steps}스텝) "
+                        "— 그 아래로는 안 내려간다")
+                    return True, current, True
+            return True, current, False
 
         # place_into 접근은 **수직·수평만** 쓴다: ①제자리 수직 상승 ②제자리 회전
         # ③안전고도 수평 이동 ④바구니 바로 위에서 수직 하강.
@@ -528,16 +588,25 @@ class PlaceServer(Node):
             raise RuntimeError("접근 위치로 이동 실패")
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_INSERTING)
-        insert_posx = next_target(target_xyz, approach_pose)
-        if insert_posx is None:
-            if goal_handle.is_cancel_requested:
-                return None
-            raise RuntimeError("현재 자세를 읽지 못했다")
-        insert_ok, insert_pose = move(insert_posx)
+        if self._place_descent_enabled and self._place_contact_threshold_n > 0.0:
+            insert_ok, insert_pose, contact_stopped = descend_compliant(
+                approach_xyz, approach_pose, target_xyz[2], self._place_contact_threshold_n,
+                self._place_descent_step_mm)
+        else:
+            insert_posx = next_target(target_xyz, approach_pose)
+            if insert_posx is None:
+                if goal_handle.is_cancel_requested:
+                    return None
+                raise RuntimeError("현재 자세를 읽지 못했다")
+            insert_ok, insert_pose = move(insert_posx)
+            contact_stopped = False
         if not insert_ok:
             if goal_handle.is_cancel_requested:
                 return None
             raise RuntimeError("배치 위치로 이동 실패")
+        if contact_stopped:
+            self.get_logger().info(
+                "[COMPLIANCE] 목표 높이 전에 접촉으로 멈췄다 — 이 높이에서 그대로 놓는다")
 
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_RELEASING)
         width_command = dsr_motion.gripper_width_command(self._gripper_open_m)
@@ -588,8 +657,9 @@ class PlaceServer(Node):
             raise RuntimeError("home 이동 전 상승 실패")
 
         self.get_logger().warning(
-            "위치제어만으로 place_into 완료 — compliance/visual_verification 미구현이라 "
-            "실제 배치 여부는 확인되지 않았다")
+            "place_into 완료 — visual_verification 미구현이라 손목 카메라로는 확인되지 "
+            "않았다. 순응 하강은 " + ("켜짐" if self._place_descent_enabled else "꺼짐(기본값)") +
+            " — 꺼져 있으면 위치제어만으로 목표까지 내려간다")
         return True
 
     def _result(self, success, reason, started):

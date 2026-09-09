@@ -67,6 +67,13 @@ IKIN_SERVICE = "/dsr01/dsr_controller2/motion/ikin"
 FKIN_SERVICE = "/dsr01/dsr_controller2/motion/fkin"
 GET_CURRENT_SOLUTION_SPACE_SERVICE = (
     "/dsr01/dsr_controller2/aux_control/get_current_solution_space")
+# safety_monitor.py / compliance.py가 쓴다. 이 저장소엔 dsr_msgs2가 마운트로만 존재해(위
+# GET_CURRENT_POSX_SERVICE 등과 같은 사정) 서비스 이름·필드는 doosan-robot2 GitHub
+# 소스(dsr_controller2.cpp의 svc_prefix_ 등록부, jazzy 브랜치, 2026-09-08 확인)로만
+# 검증했다 — 실물로는 확인하지 못했다.
+GET_ROBOT_STATE_SERVICE = "/dsr01/dsr_controller2/system/get_robot_state"
+GET_EXTERNAL_TORQUE_SERVICE = "/dsr01/dsr_controller2/aux_control/get_external_torque"
+GET_TOOL_FORCE_SERVICE = "/dsr01/dsr_controller2/aux_control/get_tool_force"
 
 # M0609 관절 한계(도). dsr_description2/urdf/m0609.urdf의 <limit lower/upper>를 도로 옮긴 값
 # (±6.2832 rad = ±360도, J3만 ±2.618 rad = ±150도). 컨트롤러의 소프트 리밋이 더 좁게
@@ -149,6 +156,53 @@ def current_solution_space(client, default: int = 2, timeout_s: float = 2.0) -> 
         return int(default)
     return int(result.sol_space)
 
+
+# GetRobotState.srv의 robot_state 값(dsr_msgs2, jazzy 브랜치) 중 safety_monitor.py가
+# 쓰는 두 값만 옮긴다. 나머지(SAFE_OFF류 등)는 문서 버전마다 번호가 어긋나 있어(예:
+# msg 주석은 STATE_SAFE_STOP2=10, srv 주석은 9) 여기서는 두 문서가 일치하는 값만 쓴다.
+ROBOT_STATE_SAFE_STOP = 5
+ROBOT_STATE_EMERGENCY_STOP = 6
+
+
+def get_robot_state(client, timeout_s: float = 1.0) -> int | None:
+    """`system/get_robot_state`로 컨트롤러의 robot_state 코드를 읽는다. 무응답/실패면 None."""
+    from dsr_msgs2.srv import GetRobotState
+
+    result = _call_service(client, GetRobotState.Request(), timeout_s)
+    if result is None or not result.success:
+        return None
+    return int(result.robot_state)
+
+
+def get_external_torque(client, timeout_s: float = 1.0) -> list[float] | None:
+    """`aux_control/get_external_torque`로 외부 관절토크(Nm, 6축)를 읽는다. 무응답/실패면 None.
+
+    실제 로봇에 진짜 힘이 걸렸는지(순응제어)가 아니라, 지금 흐르는 값을 그대로 옮긴다 —
+    임계값 판정은 compliance.py가 한다.
+    """
+    from dsr_msgs2.srv import GetExternalTorque
+
+    result = _call_service(client, GetExternalTorque.Request(), timeout_s)
+    if result is None or not result.success:
+        return None
+    return [float(v) for v in result.ext_torque[:6]]
+
+
+def get_tool_force(client, ref: int = 0, timeout_s: float = 1.0) -> list[float] | None:
+    """`aux_control/get_tool_force`로 툴에 걸린 힘·모멘트(N, Nm, 6축 = [Fx,Fy,Fz,Mx,My,Mz])를
+    읽는다. `ref`: DR_BASE(0, 기본)/DR_TOOL(1)/DR_WORLD(2). 무응답/실패면 None.
+
+    place_server.py의 순응 하강(compliance.py 참조)이 여기 앞 3축(힘, N)을 쓴다 —
+    skill_params.yaml의 compliance.contact_threshold_n이 같은 단위(N)다.
+    """
+    from dsr_msgs2.srv import GetToolForce
+
+    request = GetToolForce.Request()
+    request.ref = int(ref)
+    result = _call_service(client, request, timeout_s)
+    if result is None or not result.success:
+        return None
+    return [float(v) for v in result.tool_force[:6]]
 
 ARM_JOINT_STATES_TOPIC = "/dsr01/joint_states"
 # `/dsr01/joint_states`가 쓰는 이름. 순서를 가정하지 않고 이 이름으로 골라낸다.
@@ -500,6 +554,16 @@ ERROR_GROUP_MOTION = 2
 # 매번 60초씩 기다렸다(총 3분, place_failed).
 ALARM_NOT_REACHABLE = 1206
 BLOCKING_MOTION_ALARMS = frozenset({ALARM_NOT_REACHABLE})
+
+# safety_monitor.py가 쓰는 나머지 RobotError.group 값. MOTION(위)은 "이 자세로 못 간다"류
+# 계획 거부라 안전 이벤트가 아니다 — SAFETY_CONTROLLER만 컨트롤러의 안전 기능(충돌·안전
+# 입력 등)이 낸 알람이다.
+ERROR_GROUP_SYSTEM = 1
+ERROR_GROUP_SAFETY_CONTROLLER = 5
+# RobotError.level (dsr_msgs2/msg/RobotError.msg).
+ERROR_LEVEL_INFO = 1
+ERROR_LEVEL_WARN = 2
+ERROR_LEVEL_ERROR = 3
 
 
 class MotionErrorMonitor:

@@ -150,6 +150,7 @@ def internal_plan(req: PlanRequest):
             req.command_text,
             grounding.describe_for_prompt(req.world_state, bins),
             req.previous_failure.model_dump() if req.previous_failure else None,
+            req.domain,
         )
     except Exception as e:
         logger.exception("LLM 호출 실패")
@@ -276,10 +277,10 @@ async def internal_label_marks(
     mark_ids: str = Form(..., description="이미지에 그려진 번호. 쉼표로 구분 (예: 1,2,3)"),
     trace_id: str = Form(""),
     detail: str = Form("high"),
+    domain: str = Form("general", description="시나리오 도메인(가정/약국/재활용). VLM 프롬프트 분기에 쓴다"),
     mask_polys: str = Form("", description="mark_id → 윤곽선 다각형 좌표 (JSON)"),
     original_image: UploadFile | None = File(
         default=None, description="오버레이가 없는 원본 프레임 (YOLO 학습용 이미지)"),
-    domain: str = Form("general", description="시나리오 컨텍스트 (general/pharmacy/recycle)"),
 ):
     """번호가 그려진 프레임 → 번호별 "무엇인가" 판단 (좌표는 묻지 않는다).
 

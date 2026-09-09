@@ -8,7 +8,7 @@ import { useRef, useState } from 'react'
 import { sendCommand, transcribeAudio } from '../api'
 import type { ApiError } from '../api'
 import { useWakeWord } from '../hooks/useWakeWord'
-import type { RobotMode } from '../types'
+import type { Domain, RobotMode } from '../types'
 
 const WAKE_PHRASE = 'hello rokey'
 // 웨이크워드 감지 후 명령을 녹음할 고정 길이. 무음 감지 대신 단순 타이머로 자른다 —
@@ -21,12 +21,13 @@ const DISABLED_REASON: Record<string, string> = {
   estopped: '비상정지 상태입니다 — 수동 리셋이 필요합니다',
 }
 
-// 시나리오별 계획 능력을 보여주는 테스트용 원클릭 명령. 인지 로직은 바꾸지 않고
-// 기존 /api/commands 파이프라인에 미리 정해 둔 문구를 그대로 보낸다.
-const SCENARIOS: { label: string; text: string }[] = [
-  { label: '가정', text: '생활용품 왼쪽으로' },
-  { label: '약국', text: '머리가 아플 때 먹는 약 줘' },
-  { label: '재활용', text: '플라스틱 왼쪽, 캔 오른쪽' },
+// 시나리오별 계획 능력을 보여주는 테스트용 원클릭 명령. 단순히 문구를 그대로 보내는 것이
+// 아니라 `domain`과 함께 보내, 백엔드가 어떤 시나리오인지 알고 **도메인에 맞는 다른
+// VLM 프롬프트**로 분기 처리하게 한다 (vlm_detect.py의 도메인 프롬프트 참조).
+const SCENARIOS: { label: string; domain: Domain; text: string }[] = [
+  { label: '가정', domain: 'general', text: '생활용품 왼쪽으로' },
+  { label: '약국', domain: 'pharmacy', text: '머리가 아플 때 먹는 약 줘' },
+  { label: '재활용', domain: 'recycle', text: '플라스틱 왼쪽, 캔 오른쪽' },
 ]
 
 export default function CommandInput({
@@ -45,12 +46,15 @@ export default function CommandInput({
   const chunksRef = useRef<Blob[]>([])
   const blocked = mode !== 'idle'
 
-  const submit = async (commandText: string = text.trim()) => {
+  const submit = async (
+    commandText: string = text.trim(),
+    domain: Domain = 'general',
+  ) => {
     if (!commandText) return
     setSending(true)
     setError(null)
     try {
-      const { trace_id } = await sendCommand(commandText)
+      const { trace_id } = await sendCommand(commandText, domain)
       onAccepted(trace_id, commandText)
       setText('')
     } catch (e) {
@@ -60,9 +64,9 @@ export default function CommandInput({
     }
   }
 
-  const runScenario = (scenarioText: string) => {
+  const runScenario = (scenarioText: string, domain: Domain) => {
     setText(scenarioText)
-    submit(scenarioText)
+    submit(scenarioText, domain)
   }
 
   // 마이크 버튼(2.2.9절) — 클릭으로 녹음 시작/종료를 토글한다(누르고 있는 방식이 아니다).
@@ -132,7 +136,7 @@ export default function CommandInput({
             type="button"
             disabled={blocked || sending}
             title={s.text}
-            onClick={() => runScenario(s.text)}
+            onClick={() => runScenario(s.text, s.domain)}
           >
             {s.label}
           </button>

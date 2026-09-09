@@ -20,11 +20,13 @@ class PlannerUnavailable(Exception):
 
 async def plan(trace_id: str, command_text: str, world_state: dict,
                previous_failure: dict | None = None,
-               active_safety_events: list[dict] | None = None) -> dict:
+               active_safety_events: list[dict] | None = None,
+               domain: str = "general") -> dict:
     payload = {
         "schema_version": "1.0.0",
         "trace_id": trace_id,
         "command_text": command_text,
+        "domain": domain,
         "world_state": world_state,
         "active_safety_events": active_safety_events or [],
     }

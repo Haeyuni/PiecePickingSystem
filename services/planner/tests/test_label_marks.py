@@ -210,6 +210,40 @@ class LabelMarksTest(unittest.TestCase):
         _, _, kwargs = self.calls[0]
         self.assertNotIn("command_text", kwargs)
 
+    def test_domain_reaches_the_vlm(self):
+        """시나리오 도메인(가정/약국/재활용)이 VLM에 전달돼 프롬프트가 분기된다."""
+        post(domain="pharmacy", trace_id="tr-1")
+
+        _, _, kwargs = self.calls[0]
+        self.assertEqual(kwargs.get("domain"), "pharmacy")
+
+    def test_domain_defaults_to_general(self):
+        """domain을 안 주면 기본값 general — 도메인 없는 일반 명령은 분기가 없다."""
+        post(trace_id="tr-1")
+
+        _, _, kwargs = self.calls[0]
+        self.assertEqual(kwargs.get("domain"), "general")
+
+    def test_domain_context_in_prompt_builder(self):
+        """build_marks_prompt는 도메인을 [장면 맥락]으로 넣지만 등록 클래스 어휘는
+        여전히 넣지 않는다 (인지 전제 유지)."""
+        prompt = vlm_detect.build_marks_prompt([1, 2], domain="pharmacy")
+
+        self.assertIn("[장면 맥락(도메인)]", prompt)
+        self.assertIn("정확한 약품명", prompt)
+        self.assertIn("약국", prompt)
+        self.assertNotIn("등록된 클래스", prompt)
+
+        general = vlm_detect.build_marks_prompt([1, 2])
+        self.assertNotIn("장면 맥락", general)
+
+    def test_recycle_domain_requires_material_in_name(self):
+        """재활용 도메인의 이름 규칙: 재질이 이름에 반드시 드러나야 한다고 프롬프트에 적는다."""
+        prompt = vlm_detect.build_marks_prompt([1, 2], domain="recycle")
+
+        self.assertIn("재질이 반드시 드러나야", prompt)
+        self.assertIn("pet_plastic_bottle", prompt)
+
     def test_rejects_unparsable_mark_ids(self):
         response = post(mark_ids="1,둘,3")
 

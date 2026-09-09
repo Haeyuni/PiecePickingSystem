@@ -1,11 +1,15 @@
 # control: rclpy 스킬 실행기(pick/place_into/home) + robot_state/safety_events 발행.
 #
-# **실물 경로: home은 완전히, pick/place_into는 위치제어만 구현되어 있다** (2026-09-04).
-# compliance.py(접촉감지·토크판정)와 visual_verification.py는 아직 빈 스텁이라 grasp_pose/
-# bin_pose를 그대로 믿고 movel_h2r + 그리퍼(/onrobot/sendCommand, dsr_motion.py 참조
-# — 표준 GripperCommand 액션은 실물에서 신뢰할 수 없어 안 쓴다)로만 움직인다. MoveIt2/
-# ros2_control은 여전히 안 쓴다(dsr_msgs2 액션을 직접 부른다). 순응제어가 실제로
-# 붙는 시점에 이 Dockerfile로 돌아와 그 스택을 추가한다.
+# **실물 경로: home은 완전히 구현되어 있다** (2026-09-04). pick/place_into는 기본이
+# 위치제어지만, compliance.py가 두 가지를 더한다(2026-09-08) — (1) pick: GetExternalTorque로
+# 외부토크를 읽어 진단용 torque_trace_summary만 채운다(판정은 RG2 'Grip detected' 비트가
+# 한다, pick_server.py 참조). (2) place_into: GetToolForce로 하강 중 접촉을 감지해 목표
+# 높이 전에 멈출 수 있다 — 단 **기본은 꺼져 있다**(skill_params.yaml compliance.
+# place_descent_enabled) — 이 저장소엔 dsr_msgs2가 없어(마운트로만 존재) 임계값을 실물로
+# 검증하지 못했다. visual_verification.py는 아직 빈 스텁이라 grasp_pose/bin_pose를 그대로
+# 믿고 movel_h2r + 그리퍼(/onrobot/sendCommand, dsr_motion.py 참조 — 표준 GripperCommand
+# 액션은 실물에서 신뢰할 수 없어 안 쓴다)로만 움직인다. MoveIt2/ros2_control은 여전히 안
+# 쓴다(dsr_msgs2 액션을 직접 부른다).
 #
 # **빌드 컨텍스트는 저장소 루트다** (docker-compose.yml) — sort_msgs·perception_common이
 # src/control 밖에 있어서 그것부터 이미지 안에서 빌드해야 한다(src/web/Dockerfile과 같은 이유).

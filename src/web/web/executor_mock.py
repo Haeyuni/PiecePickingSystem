@@ -36,6 +36,7 @@ class MockExecutor:
         self._mode = "idle"
         self._current_skill = "none"
         self._current_request_id: str | None = None
+        self._gripper_width_mm = 0.0
         self._cancelled: set[str] = set()
         self._on_event: Callable[[dict], Awaitable[None]] | None = None
         # observe()가 찍는다. 픽스처 파일 자체는 고정 스냅샷이라 stamp가 안 바뀌므로(예:
@@ -78,7 +79,8 @@ class MockExecutor:
             "schema_version": "1.0.0",
             "mode": self._mode,
             "current_skill": self._current_skill,
-            "gripper_width_mm": 0.0 if self._current_skill == "none" else 42.0,
+            "gripper_width_mm": (self._gripper_width_mm
+                                  if self._current_skill == "none" else 42.0),
         }
 
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
@@ -94,7 +96,7 @@ class MockExecutor:
     def latest_depth_jpeg(self) -> bytes | None:
         return None
 
-    async def observe(self, trace_id: str, mode: str = "full") -> dict | None:
+    async def observe(self, trace_id: str, mode: str = "full", domain: str = "general") -> dict | None:
         """SAM·VLM 없이 신선도만 흉내 낸다 — 픽스처 내용(물체 목록)은 그대로 두고
         stamp만 지금 시각으로 찍는다. orchestrator는 "새 관측이 왔는가"만 보므로 이걸로
         충분하고, 실물처럼 초 단위로 기다리게 하면 mock의 존재 이유(로봇·GPU 없이 빠르게
@@ -105,7 +107,8 @@ class MockExecutor:
         self._trace_id = trace_id
         world = self.get_latest_world_state()
         object_count = len((world or {}).get("objects", []))
-        logger.info("mock 관측 트리거 (mode=%s, trace=%s) — 물체 %d개", mode, trace_id, object_count)
+        logger.info("mock 관측 트리거 (mode=%s, domain=%s, trace=%s) — 물체 %d개",
+                    mode, domain, trace_id, object_count)
         return {"success": True, "failure_reason": "none", "object_count": object_count,
                 "observation_id": self._observation_id, "stamp": self._stamp_override,
                 "cycle_time_ms": 0.0, "cancelled": False}
@@ -175,11 +178,14 @@ class MockExecutor:
         logger.info("mock 정지 요청 (취소 대상=%s)", cancelled)
         return cancelled
 
-    async def home(self) -> None:
+    async def home(self, open_gripper: bool = False) -> None:
         self._mode = "busy"
         self._current_skill = "home"
         await self._emit_state()
         await asyncio.sleep(PHASE_DELAY_S * 2)
+        if open_gripper:
+            await asyncio.sleep(PHASE_DELAY_S)
+            self._gripper_width_mm = 110.0
         self._mode = "idle"
         self._current_skill = "none"
         await self._emit_state()

@@ -150,7 +150,8 @@ def _world_state_age_s(world_state: dict | None) -> float | None:
 
 
 async def _wait_for_fresh_observation(executor, trace_id: str, mode: str = "full",
-                                      timeout_s: float | None = None) -> bool:
+                                      timeout_s: float | None = None,
+                                      domain: str = "general") -> bool:
     """관측을 **트리거하고**, 그 결과가 새 /world_state로 들어올 때까지 기다린다.
 
     온디맨드 전환 전에는 이 함수가 순수 폴링이었다 — perception이 주기 발행 중이니
@@ -173,7 +174,8 @@ async def _wait_for_fresh_observation(executor, trace_id: str, mode: str = "full
     before_stamp = (before or {}).get("stamp")
 
     try:
-        observed = await asyncio.wait_for(executor.observe(trace_id, mode), timeout=timeout_s)
+        observed = await asyncio.wait_for(
+            executor.observe(trace_id, mode, domain=domain), timeout=timeout_s)
     except asyncio.TimeoutError:
         logger.warning("관측 트리거 시간 초과 (%.0fs, trace=%s, mode=%s)",
                        timeout_s, trace_id, mode)
@@ -213,13 +215,14 @@ _GRASP_RETRY_REASON = "파지 후보가 없습니다"
 
 
 async def _plan_with_grasp_retry(trace_id: str, command_text: str, world_state: dict,
-                                  previous_failure, executor) -> tuple[dict, dict]:
+                                  previous_failure, executor, domain: str = "general") -> tuple[dict, dict]:
     """planner에 계획을 묻되, 파지 후보가 없어서 거부되면 새 관측으로 몇 번 더 시도한다.
 
     다른 거부 사유(파지 불가 상태, 작업반경 초과, 물체가 목록에 없음 등)는 관측을 더
     받는다고 달라지지 않으므로 그대로 돌려준다 — 무의미한 LLM 호출을 반복하지 않는다.
     """
-    result = await planner_client.plan(trace_id, command_text, world_state, previous_failure)
+    result = await planner_client.plan(trace_id, command_text, world_state,
+                                       previous_failure, domain=domain)
     for attempt in range(1, _GRASP_RETRY_ATTEMPTS + 1):
         if result.get("validation_status") == "approved":
             return result, world_state
@@ -229,16 +232,17 @@ async def _plan_with_grasp_retry(trace_id: str, command_text: str, world_state: 
                     attempt, _GRASP_RETRY_ATTEMPTS, trace_id, result.get("validation_reason"))
         # VLM은 다시 안 부른다 — 물체가 무엇인지는 이미 알고, GraspNet이 프레임마다
         # 자세가 조금씩 달라 후보를 놓쳤을 뿐이다(위 주석). reprompt로 depth만 새로 잰다.
-        await _wait_for_fresh_observation(executor, trace_id, mode="reprompt")
+        await _wait_for_fresh_observation(executor, trace_id, mode="reprompt", domain=domain)
         latest = executor.get_latest_world_state()
         if latest is None:
             return result, world_state
         world_state = latest
-        result = await planner_client.plan(trace_id, command_text, latest, previous_failure)
+        result = await planner_client.plan(trace_id, command_text, latest,
+                                           previous_failure, domain=domain)
     return result, world_state
 
 
-async def run_command(trace_id: str, command_text: str, executor) -> None:
+async def run_command(trace_id: str, command_text: str, executor, domain: str = "general") -> None:
     """명령 하나를 끝까지 처리한다. 백그라운드 태스크로 실행된다.
 
     `cancel_running()`이 이 태스크를 취소하면 `CancelledError`가 현재 멈춰있던 await
@@ -247,7 +251,7 @@ async def run_command(trace_id: str, command_text: str, executor) -> None:
     되어 `task.cancelled()`가 False를 반환하고, 취소 여부를 확인하는 다른 코드(테스트,
     로깅)가 오판할 수 있다."""
     try:
-        await _run_command_body(trace_id, command_text, executor)
+        await _run_command_body(trace_id, command_text, executor, domain)
     except asyncio.CancelledError:
         logger.info("명령 취소됨 (trace=%s)", trace_id)
         await hub.broadcast({
@@ -257,7 +261,7 @@ async def run_command(trace_id: str, command_text: str, executor) -> None:
         raise
 
 
-async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
+async def _run_command_body(trace_id: str, command_text: str, executor, domain: str = "general") -> None:
     trace = _new_trace(trace_id, command_text)
     previous_failure = None
     previous_targets = None
@@ -284,7 +288,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
         # None이다 — perception이 더는 알아서 발행하지 않는다(docs/on-demand-perception.md).
         # 매 시도마다 전체 스캔(full)을 다시 한다 — 재계획은 장면이 통째로 달라졌을 수
         # 있다고 보는 경로이므로 라벨을 재사용하는 reprompt로는 부족하다.
-        await _wait_for_fresh_observation(executor, trace_id, mode="full")
+        await _wait_for_fresh_observation(executor, trace_id, mode="full", domain=domain)
 
         world_state = executor.get_latest_world_state()
         if world_state is None:
@@ -307,7 +311,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
             # home 복귀와 별개다: 여기는 애초에 최초 관측이 오래된 경우도 잡는다.
             logger.warning("world_state가 오래됨 (%.1fs > %.1fs, trace=%s) — 새 관측 대기",
                             age_s, MAX_WORLD_STATE_AGE_S, trace_id)
-            await _wait_for_fresh_observation(executor, trace_id, mode="full")
+            await _wait_for_fresh_observation(executor, trace_id, mode="full", domain=domain)
             world_state = executor.get_latest_world_state()
             age_s = _world_state_age_s(world_state)
             trace["world_state_age_s"] = age_s
@@ -325,6 +329,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
         try:
             result, world_state = await _plan_with_grasp_retry(
                 trace_id, command_text, world_state, previous_failure, executor,
+                domain=domain,
             )
         except planner_client.PlannerUnavailable as e:
             logger.error("planner 도달 실패: %s", e)
@@ -353,7 +358,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor) -> None:
 
         trace["objects"] = world_state.get("objects", [])
         decision = await _await_approval(trace, world_state, command_text,
-                                         previous_failure, executor)
+                                         previous_failure, executor, domain)
         if decision is None:
             if trace["validation_status"] == "rejected":
                 # correct_label로 재계획했는데 이번엔 검증을 못 지났다 — 사용자 거부가
@@ -610,7 +615,7 @@ def _apply_label_correction(world_state: dict, message: dict) -> None:
 
 
 async def _await_approval(trace: dict, world_state: dict, command_text: str,
-                          previous_failure, executor) -> tuple[dict, list[dict]] | None:
+                          previous_failure, executor, domain: str = "general") -> tuple[dict, list[dict]] | None:
     """계획된 시퀀스를 실행하기 전에 브라우저의 승인을 기다린다(명령 1건당 1회 원칙).
 
     라벨 수정(`correct_label`)이 오면 world_state를 고쳐 재계획하고, 그 결과를 다시
@@ -638,7 +643,8 @@ async def _await_approval(trace: dict, world_state: dict, command_text: str,
 
             _apply_label_correction(world_state, message)
             result = await _plan_with_grasp_retry(
-                trace_id, command_text, world_state, previous_failure, executor)
+                trace_id, command_text, world_state, previous_failure, executor,
+                domain=domain)
             trace["sequence_id"] = result.get("sequence_id")
             trace["validation_status"] = result.get("validation_status")
             trace["validation_reason"] = result.get("validation_reason")
@@ -930,14 +936,14 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
     return None
 
 
-def start_command(trace_id: str, command_text: str, executor) -> asyncio.Task:
+def start_command(trace_id: str, command_text: str, executor, domain: str = "general") -> asyncio.Task:
     """명령 처리를 백그라운드로 띄운다 — HTTP 응답(202)은 즉시 돌려준다.
 
     태스크를 `_running_tasks`에 등록해야 `cancel_running()`(Stop 처리)이 이걸 찾아
     취소할 수 있다 — 등록하지 않으면 반환값을 호출자가 그냥 버리므로(기존 코드가 그랬다),
     Stop을 눌러도 활성 ROS goal이 없는 구간(재계획 대기, planner 호출 등)에서는 이 태스크가
     계속 돌아 잠시 후 다음 Pick을 그대로 실행해버린다(2026-09-05 실물에서 확인한 사고)."""
-    task = asyncio.create_task(run_command(trace_id, command_text, executor))
+    task = asyncio.create_task(run_command(trace_id, command_text, executor, domain))
     _running_tasks[trace_id] = task
     task.add_done_callback(lambda t: _running_tasks.pop(trace_id, None))
     return task

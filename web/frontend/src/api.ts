@@ -1,5 +1,5 @@
 /** web 백엔드 호출 (웹_인터페이스_정의서.md 2절). */
-import type { ApprovalAction, DatasetItem, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
+import type { ApprovalAction, DatasetItem, Domain, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
 
 export interface ApiError {
   code: string
@@ -20,10 +20,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T
 }
 
-export function sendCommand(commandText: string) {
+export function sendCommand(commandText: string, domain: Domain = 'general') {
   return request<{ trace_id: string; status: string }>('/api/commands', {
     method: 'POST',
-    body: JSON.stringify({ schema_version: '1.0.0', command_text: commandText }),
+    body: JSON.stringify({
+      schema_version: '1.0.0',
+      command_text: commandText,
+      domain,
+    }),
   })
 }
 
@@ -70,6 +74,10 @@ export function stopRobot() {
 
 export function homeRobot() {
   return request<{ status: string }>('/api/robot/home', { method: 'POST' })
+}
+
+export function homeAndOpenGripper() {
+  return request<{ status: string }>('/api/robot/home?open_gripper=true', { method: 'POST' })
 }
 
 /** 개발용 상태 확인. 아직 /world_state 전용 엔드포인트가 없어 /health가 요약을 준다. */
