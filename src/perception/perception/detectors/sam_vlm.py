@@ -47,7 +47,7 @@ class SamVlmDetector:
         return f"{self.weights} → {self.planner_url}/internal/label-marks"
 
     def detect(self, color_bgr: np.ndarray, trace_id: str = "",
-               on_phase=None) -> tuple[list[dict], np.ndarray | None]:
+               on_phase=None, domain: str = "general") -> tuple[list[dict], np.ndarray | None]:
         if on_phase:
             on_phase("segmenting")
         masks, elapsed = sam_marks.segment_everything(
@@ -64,7 +64,7 @@ class SamVlmDetector:
         if on_phase:
             on_phase("labeling")
         labels = self._label(marked, list(range(1, len(masks) + 1)), trace_id, masks,
-                             original_bgr=color_bgr)
+                             original_bgr=color_bgr, domain=domain)
 
         def rejected(piece, parent):
             self._log.warning(f"마크 {piece}는 {parent}의 조각으로 보기 어렵다 — 합치지 않는다")
@@ -81,12 +81,16 @@ class SamVlmDetector:
 
     def _label(self, marked_bgr: np.ndarray, mark_ids: list[int], trace_id: str,
                masks: list[np.ndarray] | None = None,
-               original_bgr: np.ndarray | None = None) -> list[dict]:
+               original_bgr: np.ndarray | None = None,
+               domain: str = "general") -> list[dict]:
         """번호를 그린 프레임을 planner로 보내 번호별 판단을 받는다.
 
         masks를 넘기면 각 마스크의 윤곽선 좌표를 JSON으로 직렬화해 함께 보낸다 —
         planner가 YOLO 학습용 라벨을 만들 때 쓴다. original_bgr를 넘기면 오버레이가
         없는 원본 프레임을 함께 보내 planner가 학습용 원본 이미지로 저장하게 한다.
+
+        domain은 planner /internal/label-marks의 [장면 맥락]으로 전달되어 도메인별
+        VLM 프롬프트 분기를 낸다(가정/약국/재활용).
         """
         import cv2
         import httpx
@@ -103,6 +107,7 @@ class SamVlmDetector:
         payload: dict = {
             "mark_ids": ",".join(str(i) for i in mark_ids),
             "trace_id": trace_id,
+            "domain": domain,
         }
         if masks:
             import json
@@ -128,11 +133,22 @@ class SamVlmDetector:
             if polys_by_id:
                 payload["mask_polys"] = json.dumps(polys_by_id)
 
+        # connect만 짧게 끊는다 — VLM 응답 자체(read)는 web_search가 여러 번 걸리면
+        # 수십 초까지 정상적으로 걸린다(label_marks의 max_output_tokens 참조). 반면 접속
+        # 자체가 안 되는 상황(2026-09-08 실물: planner가 5번째 요청까지는 멀쩡히 답하다가
+        # 갑자기 접속조차 안 잡히고 120초를 통째로 날렸다 — planner 쪽엔 요청이 도착한
+        # 흔적조차 없었다, 순간적인 도커 네트워크/포트포워딩 결함으로 추정)까지 read와
+        # 같은 시간을 주면, 그 한 번의 접속 실패가 이 observe 하나만이 아니라 **뒤이은
+        # 재시도까지** 막는다 — perception은 이 goal이 끝나야 `_observing` 락을 풀고, 그
+        # 전까지는 orchestrator가 새로 보내는 관측도 "이미 진행 중"으로 거절된다. 접속을
+        # 빨리 포기하면 최소한 다음 재시도가 곧바로 새 접속을 시도할 수 있다.
+        timeout = httpx.Timeout(connect=10.0, read=self._timeout_s,
+                                write=30.0, pool=self._timeout_s)
         response = httpx.post(
             f"{self.planner_url}/internal/label-marks",
             files=files,
             data=payload,
-            timeout=self._timeout_s,
+            timeout=timeout,
         )
         response.raise_for_status()
         return response.json()["marks"]
