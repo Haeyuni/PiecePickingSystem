@@ -107,18 +107,46 @@ export interface ExecutionLog {
   executed_at: string
 }
 
-/** 데이터셋 화면(Roboflow 스타일) 항목 하나 — dataset_items 한 행. */
-export interface DatasetItem {
-  item_id: string
+/** 데이터셋 화면(Roboflow 스타일) 카드 하나 = 이미지(trace_id) 하나.
+ *
+ * dataset_items는 물체 하나당 한 행이라 이미지 한 장에 물체가 여럿이면 행도 여럿이다 —
+ * web/store.py의 query_dataset_items가 trace_id로 묶어 objects 배열로 내려준다. */
+export interface DatasetImage {
   trace_id: string
   captured_at: string
-  image_path: string
-  label_path: string
+  /** 그 이미지의 dataset_items 행이 전부 reviewed=true인지 — 승인/거부는 이미지 전체
+   *  단위라(routers/datasets.py review 엔드포인트) 정상적으로는 다 같은 값이다. */
+  reviewed: boolean
+  objects: { class_name: string | null; name_ko: string | null }[]
+}
+
+/** 어노테이션 오버레이 폴리곤 하나 (GET /api/datasets/{trace_id}/annotations). points는
+ *  이미지 크기 기준 정규화(0~1) 좌표 — <img> 렌더 크기에 곱해서 그린다. */
+export interface AnnotationPolygon {
   class_name: string | null
   name_ko: string | null
-  attr_source: 'yaml_seed' | 'llm_suggested' | 'user_confirmed' | null
-  confidence: number | null
-  reviewed: boolean
+  points: [number, number][]
+}
+
+/** 파지(grasp) 학습/분석용 데이터 한 건 — execution_logs의 pick 행 그대로다(새 수집
+ *  경로가 아니다, GET /api/grasp-attempts). trace_id로 데이터셋 이미지를 연결해 볼 수
+ *  있지만(같은 trace_id가 dataset_items에도 있으면), 없을 수도 있다 — 그 이미지는 이미
+ *  다른 관측으로 덮여 있을 수 있다(재관측·재계획). */
+export interface GraspAttempt {
+  log_id: string
+  trace_id: string | null
+  object_id: string | null
+  class_name: string | null
+  grip_level_used: GripLevel | null
+  grasp_strategy: 'heuristic_pca' | 'contact_graspnet' | 'graspnet_baseline' | null
+  grasp_pose: {
+    position: { x: number; y: number; z: number }
+    orientation: { x: number; y: number; z: number; w: number }
+  } | null
+  visual_verification_passed: boolean | null
+  result: 'success' | 'failure'
+  failure_reason: string
+  executed_at: string
 }
 
 /** 실행 전 승인 대기(명령 1건당 1회). 검증을 통과해도 이 이벤트를 받은 뒤에야 로봇이

@@ -44,3 +44,51 @@ async def plan(trace_id: str, command_text: str, world_state: dict,
         return response.json()
     except ValueError as e:
         raise PlannerUnavailable(f"planner 응답을 해석할 수 없습니다: {response.text[:200]}") from e
+
+
+# --- 데이터셋 큐레이션 (DatasetPage) ------------------------------------------------
+# dataset_items 쓰기는 planner가 소유한다(store.py 상단 주석 참조) — web은 그대로 넘긴다.
+
+async def review_dataset_item(trace_id: str, approved: bool) -> dict:
+    payload = {"approved": approved}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                f"{PLANNER_URL}/internal/datasets/{trace_id}/review", json=payload)
+    except httpx.HTTPError as e:
+        raise PlannerUnavailable(str(e)) from e
+    try:
+        return {"status_code": response.status_code, "body": response.json()}
+    except ValueError as e:
+        raise PlannerUnavailable(f"planner 응답을 해석할 수 없습니다: {response.text[:200]}") from e
+
+
+async def bulk_review_dataset_items(trace_ids: list[str], approved: bool) -> dict:
+    payload = {"trace_ids": trace_ids, "approved": approved}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(
+                f"{PLANNER_URL}/internal/datasets/bulk-review", json=payload)
+    except httpx.HTTPError as e:
+        raise PlannerUnavailable(str(e)) from e
+    try:
+        return {"status_code": response.status_code, "body": response.json()}
+    except ValueError as e:
+        raise PlannerUnavailable(f"planner 응답을 해석할 수 없습니다: {response.text[:200]}") from e
+
+
+async def export_dataset() -> tuple[bytes, str]:
+    """승인된 데이터셋을 YOLO zip으로 받아온다. 데이터셋 규모에 따라 수 초 걸릴 수 있어
+    타임아웃을 넉넉히 둔다. 반환: (zip bytes, 파일명)."""
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.get(f"{PLANNER_URL}/internal/datasets/export")
+    except httpx.HTTPError as e:
+        raise PlannerUnavailable(str(e)) from e
+    if response.status_code != 200:
+        raise PlannerUnavailable(f"내보내기 실패 ({response.status_code}): {response.text[:200]}")
+    filename = "dataset_export.zip"
+    disposition = response.headers.get("content-disposition", "")
+    if "filename=" in disposition:
+        filename = disposition.split("filename=", 1)[1].strip('"')
+    return response.content, filename

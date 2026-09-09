@@ -225,9 +225,22 @@ tbody tr:hover { background: var(--panel-2); }
   cursor: pointer; background: var(--panel-2); border: 1px solid var(--line);
   border-radius: var(--radius); overflow: hidden;
 }
+.dataset-thumb-wrap { position: relative; }
 .dataset-thumb { width: 100%; height: 120px; object-fit: cover; display: block; background: var(--panel); }
+.dataset-card-check {
+  position: absolute; top: 6px; left: 6px; width: 18px; height: 18px; margin: 0;
+  accent-color: var(--busy); cursor: pointer;
+}
+.dataset-bulk-bar {
+  display: flex; align-items: center; gap: 12px; margin-top: 10px; font-size: 13px;
+}
+.dataset-select-all { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .dataset-card-body { padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
-.dataset-detail-image { width: 100%; max-height: 320px; object-fit: contain; margin-top: 10px; border-radius: var(--radius); }
+/* position:relative라야 AnnotationOverlay(SVG, absolute inset:0)가 이미지의 실제
+   렌더 박스와 정확히 겹친다 — img가 height:auto라 이 wrap이 그 박스에 그대로 맞춰진다
+   (max-height로 자르면 SVG 좌표 매핑이 어긋난다, AnnotationOverlay.tsx 참조). */
+.dataset-detail-image-wrap { position: relative; margin-top: 10px; line-height: 0; }
+.dataset-detail-image { width: 100%; height: auto; display: block; border-radius: var(--radius); }
 .modal dl { display: grid; grid-template-columns: 90px 1fr; gap: 4px 12px; margin: 10px 0 0; font-size: 13px; }
 .modal dt { color: var(--muted); }
 .modal dd { margin: 0; }

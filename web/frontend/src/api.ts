@@ -1,5 +1,8 @@
 /** web 백엔드 호출 (웹_인터페이스_정의서.md 2절). */
-import type { ApprovalAction, DatasetItem, Domain, ExecutionLog, Trace, WorldState } from './types'
+import type {
+  AnnotationPolygon, ApprovalAction, DatasetImage, Domain, ExecutionLog, GraspAttempt, Trace,
+  WorldState,
+} from './types'
 
 export interface ApiError {
   code: string
@@ -89,8 +92,37 @@ export function submitApproval(traceId: string, body: ApprovalAction) {
 
 export function getDatasetItems(params: Record<string, string> = {}) {
   const query = new URLSearchParams(params).toString()
-  return request<{ items: DatasetItem[] }>(`/api/datasets${query ? `?${query}` : ''}`)
+  return request<{ items: DatasetImage[] }>(`/api/datasets${query ? `?${query}` : ''}`)
 }
+
+export function getDatasetAnnotations(traceId: string) {
+  return request<{ polygons: AnnotationPolygon[] }>(`/api/datasets/${traceId}/annotations`)
+}
+
+export function reviewDatasetItem(traceId: string, approved: boolean) {
+  return request<{ trace_id: string; approved: boolean }>(`/api/datasets/${traceId}/review`, {
+    method: 'POST',
+    body: JSON.stringify({ approved }),
+  })
+}
+
+export function bulkReviewDatasetItems(traceIds: string[], approved: boolean) {
+  return request<{ trace_ids: string[]; approved: boolean; rows_affected: number }>(
+    '/api/datasets/bulk-review',
+    { method: 'POST', body: JSON.stringify({ trace_ids: traceIds, approved }) },
+  )
+}
+
+/** `<a href>`에 그대로 거는 URL — 클릭하면 브라우저가 zip을 네이티브로 받는다. */
+export const DATASET_EXPORT_URL = '/api/datasets/export'
+
+export function getGraspAttempts(params: Record<string, string> = {}) {
+  const query = new URLSearchParams(params).toString()
+  return request<{ items: GraspAttempt[] }>(`/api/grasp-attempts${query ? `?${query}` : ''}`)
+}
+
+/** `<a href>`에 그대로 거는 URL — 필터 쿼리스트링을 그대로 붙여 쓴다. */
+export const GRASP_ATTEMPTS_EXPORT_URL = '/api/grasp-attempts/export'
 
 export interface SttResult {
   recognized_text: string

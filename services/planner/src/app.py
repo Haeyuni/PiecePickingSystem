@@ -14,12 +14,16 @@ import json
 import logging
 import os
 import pathlib
+import random
+import shutil
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 
 import psycopg
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from pydantic import BaseModel
 
 from . import db, grounding, llm_client, validator, vlm_detect
 from .schema import SCHEMA_VERSION, PlanRequest, PlanResponse
@@ -183,25 +187,42 @@ def _error(status: int, code: str, message: str, trace_id: str = "") -> JSONResp
     return JSONResponse(status_code=status, content=body)
 
 
-def _marks_to_yolo(marks: list[dict], mask_polys: dict[int, list[list[list[float]]]]) -> str:
+def _assign_class_indices(marks: list[dict]) -> dict[str, int]:
+    """이미지 한 장(marks) 안에서 클래스명 → 로컬 인덱스. 등장 순서대로 매긴다.
+
+    **이 인덱스는 이미지마다 독립적이다** — 이미지 A의 0번과 이미지 B의 0번이 다른
+    클래스일 수 있다. `_marks_to_yolo`(라벨 TXT 생성)와 `_save_dataset_items`(DB에
+    local_class_index 저장, database/migrations/007 참조) 둘 다 이 함수 **하나**를 써야
+    한다 — 각자 따로 계산하면 다시 어긋난다. 여러 이미지를 하나의 학습셋으로 합칠 때
+    이 로컬 인덱스를 전역 인덱스로 치환하는 쪽은 export 쪽(/internal/datasets/export)의 일이다.
+    """
+    class_index: dict[str, int] = {}
+    for mark in marks:
+        if not mark.get("is_object"):
+            continue
+        cls = mark.get("class_name") or ""
+        if cls and cls not in class_index:
+            class_index[cls] = len(class_index)
+    return class_index
+
+
+def _marks_to_yolo(marks: list[dict], mask_polys: dict[int, list[list[list[float]]]],
+                   class_index: dict[str, int]) -> str:
     """VLM 마크 + 마스크 윤곽선 → YOLO 세그멘테이션 TXT 라벨.
 
-    클래스 인덱스는 TXT에 등장하는 순서대로 매긴다(같은 class_name은 같은 인덱스).
-    is_object=false(배경·조각)는 라벨에서 제외한다.
+    is_object=false(배경·조각)는 라벨에서 제외한다. `class_index`는 `_assign_class_indices`가
+    이 marks에 대해 만든 것과 같은 것이어야 한다(호출부가 하나만 계산해 공유한다).
 
     `mask_polys`는 mark_id → [poly, ...] 형태이고, poly는 [[x,y], ...] 정규화(0~1) 좌표다.
     """
     lines: list[str] = []
-    class_index: dict[str, int] = {}
     for mark in marks:
         if not mark.get("is_object"):
             continue
         mark_id = int(mark.get("mark_id") or 0)
         cls = mark.get("class_name") or ""
-        if not cls:
+        if not cls or cls not in class_index:
             continue
-        if cls not in class_index:
-            class_index[cls] = len(class_index)
         polys = mask_polys.get(mark_id, [])
         for poly in polys:
             flat = []
@@ -228,6 +249,9 @@ def _save_dataset_items(trace_id: str, image_bytes: bytes, marks: list[dict],
         return
 
     mask_polys = mask_polys or {}
+    # _marks_to_yolo(라벨 TXT)와 아래 INSERT(local_class_index)가 같은 매핑을 보게
+    # 여기서 한 번만 계산한다 — _assign_class_indices 주석 참조.
+    class_index = _assign_class_indices(marks)
     date_dir = DATASETS_DIR / datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     images_dir = date_dir / "images"
     labels_dir = date_dir / "labels"
@@ -241,7 +265,7 @@ def _save_dataset_items(trace_id: str, image_bytes: bytes, marks: list[dict],
         image_bytes = _strip_overlay(image_bytes) if _HAS_CV2 else image_bytes
         image_path.write_bytes(image_bytes)
 
-        yolo_text = _marks_to_yolo(marks, mask_polys)
+        yolo_text = _marks_to_yolo(marks, mask_polys, class_index)
         label_path.write_text(yolo_text, encoding="utf-8")
     except OSError:
         logger.exception("데이터셋 파일 저장 실패 (trace_id=%s)", trace_id)
@@ -254,13 +278,13 @@ def _save_dataset_items(trace_id: str, image_bytes: bytes, marks: list[dict],
                     """
                     INSERT INTO dataset_items (
                         item_id, trace_id, image_path, label_path,
-                        class_name, name_ko, attr_source, confidence
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        class_name, name_ko, attr_source, confidence, local_class_index
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(uuid.uuid4()), trace_id, str(image_path), str(label_path),
                         obj.get("class_name"), obj.get("name_ko"), "llm_suggested",
-                        obj.get("confidence"),
+                        obj.get("confidence"), class_index.get(obj.get("class_name") or ""),
                     ),
                 )
             conn.commit()
@@ -342,6 +366,152 @@ async def internal_label_marks(
         "prompt_version": vlm_detect.MARKS_PROMPT_VERSION,
         "marks": marks,
     }
+
+
+class ReviewRequest(BaseModel):
+    approved: bool
+
+
+@app.post("/internal/datasets/{trace_id}/review")
+def review_dataset_item(trace_id: str, req: ReviewRequest):
+    """이미지(trace_id) 하나 단위로 데이터셋 큐레이션 승인/거부 (web DatasetPage).
+
+    dataset_items는 물체 하나당 한 행이라 이미지 하나에 여러 행이 붙는다(같은
+    image_path/label_path). 물체 단위로 승인/거부하려면 "이 물체의 폴리곤 줄만 라벨
+    파일에서 빼기"가 필요한데 그건 사실상 라벨 편집이라 범위 밖이다 — 그래서 이미지
+    (trace_id) 전체를 단위로 다룬다. 승인=reviewed를 true로, 거부=행을 아예 지운다
+    (이미지/라벨 파일 자체는 안 지운다 — 디스크 정리는 범위 밖).
+    """
+    with psycopg.connect(db.dsn(), connect_timeout=3) as conn, conn.cursor() as cur:
+        if req.approved:
+            cur.execute("UPDATE dataset_items SET reviewed = true WHERE trace_id = %s",
+                       (trace_id,))
+        else:
+            cur.execute("DELETE FROM dataset_items WHERE trace_id = %s", (trace_id,))
+        affected = cur.rowcount
+        conn.commit()
+    if affected == 0:
+        return _error(404, "NOT_FOUND", f"trace_id={trace_id}인 데이터셋 항목이 없습니다")
+    return {"schema_version": SCHEMA_VERSION, "trace_id": trace_id,
+            "approved": req.approved, "rows_affected": affected}
+
+
+class BulkReviewRequest(BaseModel):
+    trace_ids: list[str]
+    approved: bool
+
+
+@app.post("/internal/datasets/bulk-review")
+def bulk_review_dataset_items(req: BulkReviewRequest):
+    """DatasetPage의 "전체선택" 승인/거부 — review_dataset_item과 같은 규칙(이미지 단위)을
+    trace_id 목록 전체에 한 번의 쿼리로 적용한다. 프론트가 선택한 개수만큼 요청을
+    왕복하지 않게 하려는 것뿐, 판정 로직 자체는 단건과 동일하다."""
+    if not req.trace_ids:
+        return _error(400, "EMPTY_TRACE_IDS", "trace_ids가 비어 있습니다")
+    with psycopg.connect(db.dsn(), connect_timeout=5) as conn, conn.cursor() as cur:
+        if req.approved:
+            cur.execute("UPDATE dataset_items SET reviewed = true WHERE trace_id = ANY(%s)",
+                       (req.trace_ids,))
+        else:
+            cur.execute("DELETE FROM dataset_items WHERE trace_id = ANY(%s)", (req.trace_ids,))
+        affected = cur.rowcount
+        conn.commit()
+    return {"schema_version": SCHEMA_VERSION, "trace_ids": req.trace_ids,
+            "approved": req.approved, "rows_affected": affected}
+
+
+@app.get("/internal/datasets/export")
+def export_dataset():
+    """승인된(reviewed=true) 이미지를 YOLO 세그멘테이션 데이터셋(zip)으로 묶어 돌려준다.
+
+    각 이미지의 라벨 TXT는 그 이미지 **안에서만** 유효한 로컬 클래스 인덱스를 쓴다
+    (_assign_class_indices 참조) — 그래서 그대로 합치면 클래스가 뒤섞인다. 여기서
+    전체 대상의 class_name을 모아 정렬한 **전역** 인덱스를 만들고, 이미지별로 원본
+    라벨의 로컬 인덱스를 전역 인덱스로 치환해서 내보낸다. local_class_index가 없는
+    행(마이그레이션 007 이전에 쌓인 것)은 치환할 방법이 없어 제외한다.
+    """
+    with psycopg.connect(db.dsn(), connect_timeout=3) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT trace_id, image_path, label_path, class_name, local_class_index
+            FROM dataset_items
+            WHERE reviewed = true AND local_class_index IS NOT NULL
+            """
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        return _error(404, "EMPTY_EXPORT",
+                     "승인된 항목이 없습니다(또는 전부 local_class_index가 없는 옛 항목입니다)")
+
+    # trace_id(이미지)별로 묶는다 — 한 이미지 안의 로컬 인덱스 → class_name 매핑.
+    images: dict[str, dict] = {}
+    for trace_id, image_path, label_path, class_name, local_idx in rows:
+        entry = images.setdefault(
+            trace_id, {"image_path": image_path, "label_path": label_path, "local_to_class": {}})
+        entry["local_to_class"][local_idx] = class_name
+
+    # 전역 클래스 목록 — 정렬해서 재현 가능한 순서로 만든다(내보낼 때마다 같은 입력이면
+    # 같은 data.yaml이 나와야 diff로 비교할 수 있다).
+    all_classes = sorted({cls for e in images.values() for cls in e["local_to_class"].values()})
+    global_index = {cls: i for i, cls in enumerate(all_classes)}
+
+    # 85/15 train/val, 고정 시드 — 같은 승인 목록이면 같은 분할이 나온다.
+    trace_ids = sorted(images.keys())
+    shuffled = trace_ids[:]
+    random.Random(0).shuffle(shuffled)
+    split_at = max(1, int(len(shuffled) * 0.85)) if len(shuffled) > 1 else len(shuffled)
+    train_ids = set(shuffled[:split_at])
+
+    export_id = f"export-{datetime.datetime.now(datetime.timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:8]}"
+    export_root = DATASETS_DIR / "exports" / export_id
+    for split in ("train", "val"):
+        (export_root / "images" / split).mkdir(parents=True, exist_ok=True)
+        (export_root / "labels" / split).mkdir(parents=True, exist_ok=True)
+
+    exported = 0
+    for trace_id, entry in images.items():
+        split = "train" if trace_id in train_ids else "val"
+        src_image = pathlib.Path(entry["image_path"])
+        src_label = pathlib.Path(entry["label_path"])
+        if not src_image.exists() or not src_label.exists():
+            logger.warning("내보내기: 원본 파일 없음 (trace_id=%s) — 건너뜀", trace_id)
+            continue
+        remapped_lines = []
+        for line in src_label.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            local_idx_str, rest = line.split(" ", 1)
+            cls = entry["local_to_class"].get(int(local_idx_str))
+            if cls is None:
+                # 이 줄의 로컬 인덱스가 이번 승인 대상 행에 없다 — 거부된 물체이거나
+                # DB와 파일이 어긋난 것. 조용히 빼는 게 지어내는 것보다 안전하다.
+                continue
+            remapped_lines.append(f"{global_index[cls]} {rest}")
+        dest_image = export_root / "images" / split / f"{trace_id}.jpg"
+        dest_label = export_root / "labels" / split / f"{trace_id}.txt"
+        shutil.copyfile(src_image, dest_image)
+        dest_label.write_text("\n".join(remapped_lines), encoding="utf-8")
+        exported += 1
+
+    data_yaml = (
+        f"path: {export_root}\n"
+        "train: images/train\n"
+        "val: images/val\n"
+        f"nc: {len(all_classes)}\n"
+        f"names: {json.dumps(all_classes, ensure_ascii=False)}\n"
+    )
+    (export_root / "data.yaml").write_text(data_yaml, encoding="utf-8")
+
+    zip_path = export_root.with_suffix(".zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in export_root.rglob("*"):
+            if path.is_file():
+                zf.write(path, path.relative_to(export_root.parent))
+
+    logger.info("데이터셋 내보내기 완료: export_id=%s 이미지=%d/%d 클래스=%d",
+               export_id, exported, len(images), len(all_classes))
+    return FileResponse(zip_path, media_type="application/zip", filename=f"{export_id}.zip")
 
 
 def main():
