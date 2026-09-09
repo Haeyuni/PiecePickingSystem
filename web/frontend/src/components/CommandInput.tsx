@@ -21,9 +21,11 @@ const DISABLED_REASON: Record<string, string> = {
   estopped: '비상정지 상태입니다 — 수동 리셋이 필요합니다',
 }
 
-// 시나리오별 계획 능력을 보여주는 테스트용 원클릭 명령. 단순히 문구를 그대로 보내는 것이
-// 아니라 `domain`과 함께 보내, 백엔드가 어떤 시나리오인지 알고 **도메인에 맞는 다른
-// VLM 프롬프트**로 분기 처리하게 한다 (vlm_detect.py의 도메인 프롬프트 참조).
+// 시나리오 버튼 = **도메인 선택**이다. 누른다고 바로 명령이 나가지 않는다 — 도메인을
+// 골라 두면(+예시 문구를 입력창에 채워 두면) 그 뒤에 실제로 보내는 명령(직접 입력이든
+// 음성이든 이 예시 문구 그대로든)이 그 도메인으로 나간다. 백엔드는 이 domain으로
+// **도메인에 맞는 다른 VLM 프롬프트**로 분기한다 (vlm_detect.py의 도메인 프롬프트 참조).
+// 기본 도메인은 '가정'(general) — 페이지를 열면 이미 선택돼 있다.
 const SCENARIOS: { label: string; domain: Domain; text: string }[] = [
   { label: '가정', domain: 'general', text: '생활용품 왼쪽으로' },
   { label: '약국', domain: 'pharmacy', text: '머리가 아플 때 먹는 약 줘' },
@@ -37,6 +39,9 @@ export default function CommandInput({
   onAccepted: (traceId: string, commandText: string) => void
 }) {
   const [text, setText] = useState('')
+  // 페이지를 열면 '가정'(general)이 기본으로 선택돼 있다 — 시나리오 버튼을 누르지 않고
+  // 바로 명령을 보내도 '가정' 도메인으로 나간다.
+  const [domain, setDomain] = useState<Domain>('general')
   const [error, setError] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
   const [recording, setRecording] = useState(false)
@@ -46,10 +51,10 @@ export default function CommandInput({
   const chunksRef = useRef<Blob[]>([])
   const blocked = mode !== 'idle'
 
-  const submit = async (
-    commandText: string = text.trim(),
-    domain: Domain = 'general',
-  ) => {
+  // domain은 파라미터로 받지 않고 항상 지금 선택된 상태(domain state)를 쓴다 — 실제로
+  // 전송되는 순간의 도메인이 그 명령의 도메인이어야 하기 때문이다(시나리오 버튼은
+  // 도메인만 미리 골라 둘 뿐, 그 자체로 전송을 일으키지 않는다).
+  const submit = async (commandText: string = text.trim()) => {
     if (!commandText) return
     setSending(true)
     setError(null)
@@ -64,9 +69,12 @@ export default function CommandInput({
     }
   }
 
-  const runScenario = (scenarioText: string, domain: Domain) => {
-    setText(scenarioText)
-    submit(scenarioText, domain)
+  // 시나리오 버튼 클릭 = 도메인 선택 + 예시 문구 채우기. **여기서 submit()을 부르지
+  // 않는다** — 사용자가 문구를 확인/수정한 뒤 직접 전송을 눌러야 명령이 나간다
+  // (음성 인식 결과를 자동 전송하지 않는 것과 같은 원칙, FR-24).
+  const selectScenario = (s: (typeof SCENARIOS)[number]) => {
+    setDomain(s.domain)
+    setText(s.text)
   }
 
   // 마이크 버튼(2.2.9절) — 클릭으로 녹음 시작/종료를 토글한다(누르고 있는 방식이 아니다).
@@ -134,9 +142,10 @@ export default function CommandInput({
           <button
             key={s.label}
             type="button"
+            className={domain === s.domain ? 'scenario-active' : undefined}
             disabled={blocked || sending}
-            title={s.text}
-            onClick={() => runScenario(s.text, s.domain)}
+            title={`도메인: ${s.label} (예시: ${s.text})`}
+            onClick={() => selectScenario(s)}
           >
             {s.label}
           </button>

@@ -127,7 +127,6 @@ img.view { width: 100%; height: 100%; object-fit: cover; padding: 0; border-styl
   border: 1px solid var(--line); border-radius: var(--radius);
 }
 .object-row .name { flex: 1; }
-.object-row .reasoning { flex-basis: 100%; font-size: 12px; }
 .badge {
   font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid;
 }
@@ -160,6 +159,8 @@ img.view { width: 100%; height: 100%; object-fit: cover; padding: 0; border-styl
 
 /* --- 명령 입력 (2.2.9) --- */
 .scenarios { display: flex; gap: 8px; }
+/* 지금 선택된 도메인 — 클릭해도 명령이 바로 나가지 않고 도메인만 바뀐다 */
+.scenario-active { color: var(--busy); border-color: var(--busy); font-weight: 700; }
 .command { display: flex; gap: 8px; margin-top: 12px; }
 .command input { flex: 1; }
 .mic-recording { color: var(--danger); border-color: var(--danger); }
@@ -193,7 +194,6 @@ img.view { width: 100%; height: 100%; object-fit: cover; padding: 0; border-styl
   padding: 9px 10px; background: var(--panel-2);
   border: 1px solid var(--line); border-radius: var(--radius);
 }
-.approval-step .reasoning { margin-top: 4px; font-size: 12px; }
 
 /* --- 이력 화면 (3절) --- */
 .filters { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
