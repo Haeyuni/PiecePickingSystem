@@ -47,15 +47,15 @@ launch가 `.venv/bin/python`을 prefix로 붙인다 — `ros2 run`이 만드는 
 파이썬 셔뱅이라 ultralytics를 못 찾는다. 직접 띄우려면:
 
 ```bash
-DATABASE_URL=postgresql://... .venv/bin/python -m perception.node
+.venv/bin/python -m perception.node
 ```
 
 **필요한 것**: 카메라(`realsense2_camera`)와 로봇 드라이버가 떠 있어야 한다. 로봇 드라이버가
 필요한 이유는 카메라가 그리퍼에 붙어 있어서(eye-in-hand) base 좌표 변환에 현재 TCP 자세가
-들어가기 때문이다 — `get_current_posx` 서비스를 부른다. `DATABASE_URL`은 없어도 동작하며,
-그때는 `objects.yaml` seed 값을 쓴다.
+들어가기 때문이다 — `get_current_posx` 서비스를 부른다. 속성 조회는 `objects.yaml` 하나만
+보므로 `DATABASE_URL`은 perception에는 필요 없다(`attribute_db.py`).
 
-**`detector:=vlm_sam`은 `objects.yaml`도 DB도 보지 않는다.** 이름과 속성(무게·파손위험·
+**`detector:=vlm_sam`은 `objects.yaml`을 보지 않는다.** 이름과 속성(무게·파손위험·
 변형·투명)과 파지 프로파일을 사진을 본 VLM이 함께 답하고 그 값이 그대로 발행된다
 (`attr_source=llm_suggested`). 위 두 문단은 `detector:=yolo`(기본값) 이야기다 —
 `docs/vlm_sam_pipeline.md`의 [클래스 어휘를 주지 않는다] 참조.

@@ -44,7 +44,7 @@ def detection(class_name: str, confidence: float, mask: np.ndarray | None,
 
     `attrs`는 검출기가 **속성까지 알아냈을 때만** 채운다(SAM+VLM 경로 — 사진을 본 모델이
     무게·파손위험·파지 단계를 함께 답한다). None이면 노드가 예전처럼 class_name으로
-    `AttributeSource`(object_attributes → objects.yaml → fallback)를 조회한다. YOLO는 이름만
+    `AttributeSource`(objects.yaml → fallback)를 조회한다. YOLO는 이름만
     알므로 None을 낸다. 키는 `AttributeSource.attributes()`와 같아야 한다.
     """
     return {"class_name": class_name, "confidence": float(confidence), "mask": mask,

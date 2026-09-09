@@ -7,19 +7,17 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { getConfirmations, getRecentTraces, getTrace, getWorldState } from '../api'
+import { getRecentTraces, getTrace, getWorldState } from '../api'
 import ApprovalModal from '../components/ApprovalModal'
 import CameraViews from '../components/CameraViews'
 import CommandInput from '../components/CommandInput'
-import ConfirmModal from '../components/ConfirmModal'
 import ObjectList from '../components/ObjectList'
-import PendingConfirmations from '../components/PendingConfirmations'
 import RobotControls from '../components/RobotControls'
 import SafetyBanner from '../components/SafetyBanner'
 import StatusBar from '../components/StatusBar'
 import TaskProgress from '../components/TaskProgress'
 import { useLive } from '../hooks/useLive'
-import type { ApprovalNeededEvent, DetectedObject, LiveEvent, ObjectConfirmation, RobotState, SafetyEvent, Trace, WorldState } from '../types'
+import type { ApprovalNeededEvent, DetectedObject, LiveEvent, RobotState, SafetyEvent, Trace, WorldState } from '../types'
 
 const INITIAL_ROBOT: RobotState = { mode: 'idle', current_skill: 'none', gripper_width_mm: 0 }
 
@@ -32,8 +30,6 @@ export default function ControlPage() {
   const [trace, setTrace] = useState<Trace | null>(null)
   const [critical, setCritical] = useState<SafetyEvent | null>(null)
   const [warning, setWarning] = useState<SafetyEvent | null>(null)
-  const [pending, setPending] = useState<ObjectConfirmation[]>([])
-  const [modalClass, setModalClass] = useState<string | null>(null)
   const [approval, setApproval] = useState<ApprovalNeededEvent | null>(null)
   // wake_word_detected를 받을 때마다 올린다 — CommandInput이 이 값의 변화를 보고 반응한다
   // (이벤트 자체엔 payload가 없어 카운터로 "새 이벤트가 왔다"만 표현하면 충분하다).
@@ -47,14 +43,6 @@ export default function ControlPage() {
     } catch {
       setWorldStamp(null)
       setObjects([])
-    }
-  }, [])
-
-  const refreshPending = useCallback(async () => {
-    try {
-      setPending((await getConfirmations()).items)
-    } catch {
-      /* 확인 목록은 없어도 화면이 동작해야 한다 */
     }
   }, [])
 
@@ -115,10 +103,6 @@ export default function ControlPage() {
         setApproval(event)
         break
 
-      case 'object_confirmation_needed':
-        void refreshPending()
-        break
-
       case 'world_state':
         // 관측 패널의 "n초 전 관측" 표시는 이 stamp가 갱신돼야 정확하다.
         setWorldStamp(event.stamp)
@@ -138,7 +122,7 @@ export default function ControlPage() {
         setWakeSignal((n) => n + 1)
         break
     }
-  }, [refreshPending, refreshTrace, refreshWorld])
+  }, [refreshTrace, refreshWorld])
 
   const { connected } = useLive(onEvent)
 
@@ -154,9 +138,8 @@ export default function ControlPage() {
 
   useEffect(() => {
     void refreshWorld()
-    void refreshPending()
     void adoptRecentTrace()
-  }, [refreshWorld, refreshPending, adoptRecentTrace])
+  }, [refreshWorld, adoptRecentTrace])
 
   // 재연결 시 놓친 이벤트를 재생하는 대신 현재 상태를 다시 받는다 (4절)
   useEffect(() => {
@@ -175,8 +158,6 @@ export default function ControlPage() {
     // 계획 생성에는 LLM 왕복이 걸린다 — 잠시 뒤 스냅샷을 당겨 스텝을 채운다
     window.setTimeout(() => void refreshTrace(traceId), 1500)
   }
-
-  const modalItem = pending.find((p) => p.class_name === modalClass) ?? null
 
   return (
     <div className="app">
@@ -199,10 +180,7 @@ export default function ControlPage() {
 
         <div className="panel">
           <h2>인식된 물체 ({objects.length})</h2>
-          <ObjectList objects={objects} onConfirmClick={setModalClass} />
-
-          <h2 style={{ marginTop: 16 }}>확인 대기 ({pending.length})</h2>
-          <PendingConfirmations items={pending} onClick={setModalClass} />
+          <ObjectList objects={objects} />
 
           <RobotControls mode={robot.mode} />
         </div>
@@ -216,18 +194,6 @@ export default function ControlPage() {
       <div className="panel" style={{ marginTop: 12 }}>
         <CommandInput mode={robot.mode} onAccepted={onCommandAccepted} wakeSignal={wakeSignal} />
       </div>
-
-      {modalItem && (
-        <ConfirmModal
-          item={modalItem}
-          onClose={() => setModalClass(null)}
-          onConfirmed={() => {
-            setModalClass(null)
-            void refreshPending()
-            void refreshWorld()
-          }}
-        />
-      )}
 
       {approval && (
         <ApprovalModal event={approval} onResolved={() => setApproval(null)} />

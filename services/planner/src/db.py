@@ -1,4 +1,4 @@
-"""PostgreSQL 클라이언트. object_attributes / task_sequences / execution_logs 등 접근 (시스템명세서 2절).
+"""PostgreSQL 클라이언트. task_sequences / execution_logs 등 접근 (시스템명세서 2절).
 
 마이그레이션 적용도 여기서 담당한다 — 별도 마이그레이션 도구를 두기에는
 파일이 적고, planner가 DB를 쓰는 유일한 서비스 중 하나라 기동 시점에 맞추는 편이 단순하다.

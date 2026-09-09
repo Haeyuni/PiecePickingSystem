@@ -1,12 +1,13 @@
 """물체 속성 조회: 모델 라벨 → class_name → 속성 (FR-05, FR-05b).
 
-두 곳에서 값을 찾는다.
+값의 출처는 하나, **`objects.yaml`**뿐이다(초기값이자 유일한 소스, `model_labels`의
+출처이기도 하다). 예전에는 DB `object_attributes` 테이블을 먼저 보고 없으면 yaml로
+내려오는 2단 구조였지만, 그 테이블에 실제로 값을 쓰는 코드가 없었다 — 웹 확인 UI는
+있었어도(`ConfirmModal.tsx`) 그 대상을 채워 넣는 VLM 제안 기록(`vlm_client.py`)이 TODO
+스텁으로 끝까지 구현되지 않아 확인 대기 목록이 항상 비어 있었다 — 그래서 테이블째
+걷어냈다(`database/migrations/006_drop_object_attributes.sql`).
 
-1. **DB `object_attributes`** — 사람이 확인한 값(`user_confirmed`)과 VLM 제안값이 들어 있는
-   런타임 마스터다(시스템명세서 2.2절). 여기 있는 값이 최신이다.
-2. **`objects.yaml`** — 초기값(seed). DB에 닿지 못할 때의 대비책이자 `model_labels`의 출처.
-
-DB에도 yaml에도 없는 클래스는 **신규 클래스**로 보고 `fallback`(grip_level 5=가장 약하게)을
+yaml에 없는 클래스는 **신규 클래스**로 보고 `fallback`(grip_level 5=가장 약하게)을
 붙이고 `needs_confirmation=true`로 표시한다. 사진에서 추정한 값을 그대로 파지력에 반영하지
 않기 위한 것이다(NFR-03a) — 확인 전에는 무조건 조심스럽게 다룬다.
 """
@@ -51,22 +52,15 @@ def objects_yaml_path() -> pathlib.Path:
 
 
 class AttributeSource:
-    """objects.yaml + object_attributes 테이블을 합쳐 속성을 돌려준다.
+    """objects.yaml에서 속성을 돌려준다. 등록 안 된 클래스는 fallback으로 조심스럽게."""
 
-    DB는 **없어도 동작한다**. 카메라와 로봇만 있으면 검출은 되어야 하고, DB 장애로 인식
-    전체가 멈추면 원인을 찾기도 어렵다. DB에 못 닿으면 yaml seed로 답하고 그 사실을 남긴다.
-    """
-
-    def __init__(self, yaml_path: pathlib.Path | None = None, database_url: str | None = None):
+    def __init__(self, yaml_path: pathlib.Path | None = None):
         self._yaml_path = yaml_path or objects_yaml_path()
         with self._yaml_path.open(encoding="utf-8") as f:
             config = yaml.safe_load(f) or {}
         self._objects: dict = config.get("objects") or {}
         self._fallback: dict = {**HARD_FALLBACK, **(config.get("fallback") or {})}
         self._model_labels: dict = config.get("model_labels") or {}
-
-        self._database_url = database_url if database_url is not None else os.environ.get("DATABASE_URL")
-        self._db_warned = False
 
     # --- 모델 라벨 → class_name -------------------------------------------
     def class_name(self, model_label: str) -> str:
@@ -88,10 +82,6 @@ class AttributeSource:
         반환 키: name_ko, mass_g, fragile, deformable, transparent, grip_level,
                 attr_source, needs_confirmation
         """
-        row = self._from_db(class_name)
-        if row is not None:
-            return row
-
         seed = self._objects.get(class_name)
         if seed is not None:
             return {
@@ -116,42 +106,3 @@ class AttributeSource:
             "attr_source": "yaml_seed",
             "needs_confirmation": True,
         }
-
-    def _from_db(self, class_name: str) -> dict | None:
-        if not self._database_url:
-            return None
-        try:
-            import psycopg
-        except ImportError:
-            self._warn_db_once("psycopg가 설치되어 있지 않다")
-            return None
-        try:
-            with psycopg.connect(self._database_url, connect_timeout=3) as conn, conn.cursor() as cur:
-                cur.execute(
-                    "SELECT name_ko, mass_g, fragile, deformable, transparent, grip_level,"
-                    " source, is_confirmed FROM object_attributes WHERE class_name = %s",
-                    (class_name,),
-                )
-                row = cur.fetchone()
-        except Exception as e:
-            self._warn_db_once(str(e))
-            return None
-        if row is None:
-            return None
-        name_ko, mass_g, fragile, deformable, transparent, grip_level, source, is_confirmed = row
-        return {
-            "name_ko": name_ko or "",
-            "mass_g": float(mass_g or 0.0),
-            "fragile": bool(fragile),
-            "deformable": bool(deformable),
-            "transparent": bool(transparent),
-            "grip_level": int(grip_level or 5),
-            "attr_source": source or "yaml_seed",
-            "needs_confirmation": not bool(is_confirmed),
-        }
-
-    def _warn_db_once(self, detail: str) -> None:
-        """DB 장애 경고는 한 번만 낸다 — 프레임마다 찍으면 로그가 그것만 남는다."""
-        if not self._db_warned:
-            logger.warning("object_attributes 조회 실패, objects.yaml seed로 대신한다: %s", detail)
-            self._db_warned = True
