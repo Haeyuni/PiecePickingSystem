@@ -103,6 +103,13 @@ GEOMETRY_OK = "ok"
 GEOMETRY_CLOUD_MISMATCH = "cloud_mismatch"
 # 중심선은 물체 위인데 손가락 창 안에 물릴 재료가 없다(스치듯 지나간다).
 GEOMETRY_NO_MATERIAL = "no_grip_material"
+# 되잡기(_refine_on_cloud)가 실측 클라우드로 다시 잰 개폭이 그리퍼 한계를 벗어난다 —
+# GraspNet raw width는 추론 서버 쪽 min/max_width_m으로 이미 걸러지지만, 되잡기는 그
+# 필터를 거치지 않은 채 실제 물체 폭으로 덮어써서 110mm를 다시 넘을 수 있다
+# (2026-09-09: control/grasp_selection.check_width가 121.2mm짜리를 걸러내는 걸 확인 —
+# raw는 필터를 통과했는데 되잡은 폭이 다시 넘은 경우). control이 어차피 못 쓸 후보를
+# Top-K 자리에 남겨두느니 여기서 걸러 그 자리를 실행 가능한 후보에게 준다.
+GEOMETRY_WIDTH_INVALID = "width_invalid"
 
 # 중심선에서 물체까지 이 이상 떨어지면 손가락이 물체 옆을 지나간다. **임의값이 아니라
 # 손가락 패드 반폭(_PAD_HALF_MM)이다** — 패드보다 멀리 있는 재료는 닫아도 안 닿는다.
@@ -226,7 +233,9 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
                        points_base=None, refine_depth_mm: float = 8.0,
                        top_k: int = 10,
                        lateral_tol_mm: float = _CLOUD_LATERAL_TOL_MM,
-                       min_grip_points: int = _MIN_GRIP_POINTS) -> tuple[list, dict]:
+                       min_grip_points: int = _MIN_GRIP_POINTS,
+                       min_width_mm: float = 5.0,
+                       max_opening_mm: float = 110.0) -> tuple[list, dict]:
     """camera frame GraspNet 후보들을 base로 한 번에 옮기고, **명백히 위험한 접근각만**
     걷어낸 뒤 점수 상위 `top_k`개를 돌려준다. (후보 리스트, 진단정보)를 반환한다.
 
@@ -427,6 +436,12 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
             lateral_shift = round(float(np.linalg.norm(delta - along * approach_axis)), 1)
             T_best = T_best.copy()
             T_best[:3, 3] = position
+        # raw든 되잡은 값이든 최종 개폭이 그리퍼 한계를 벗어나면 버린다 — GEOMETRY_WIDTH_INVALID
+        # 주석 참조. raw만 걸러진 채 되잡기가 다시 넘긴 경우가 실물에서 나왔다.
+        if not (min_width_mm <= chosen_width_mm <= max_opening_mm):
+            geometry_rejects[GEOMETRY_WIDTH_INVALID] = (
+                geometry_rejects.get(GEOMETRY_WIDTH_INVALID, 0) + 1)
+            continue
         qx, qy, qz, qw = _quaternion_from_matrix(T_best[:3, :3])
         entry = {
             "pose": {
@@ -582,7 +597,9 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
         float(params.get("refine_grasp_depth_mm", 8.0)),
         int(params.get("top_k", 10)),
         float(params.get("cloud_lateral_tolerance_mm", _CLOUD_LATERAL_TOL_MM)),
-        int(params.get("min_grip_material_points", _MIN_GRIP_POINTS)))
+        int(params.get("min_grip_material_points", _MIN_GRIP_POINTS)),
+        float(params.get("min_width_mm", 5.0)),
+        float(params.get("max_opening_mm", 110.0)))
     if not candidates:
         # 추론은 됐는데 hard 상한 안에 드는 후보가 없다. 빈 리스트로 돌려주면 node가
         # "후보 없음"으로 발행하고 planner는 파지 불가로 읽는데, **왜** 걸러졌는지가

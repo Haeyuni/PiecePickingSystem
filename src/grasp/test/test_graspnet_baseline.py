@@ -342,6 +342,27 @@ def test_window_is_not_widened_to_the_whole_cloud():
     assert width == 0.0
 
 
+def test_refined_width_over_gripper_limit_is_rejected():
+    """되잡기가 그리퍼 한계를 넘는 개폭으로 다시 재면 그 후보는 버린다.
+
+    raw width(0.04m=40mm)는 추론 서버의 min/max_width_m 필터를 통과하는 값이지만,
+    되잡기가 실측 클라우드(_pack_cloud, 개폭 ~92mm)로 다시 재면 max_opening_mm을
+    넘을 수 있다 — raw만 걸러서는 못 막는 경우다(2026-09-09, 실물에서 121.2mm짜리가
+    raw 필터를 통과한 채 control까지 새 나가 후보 자리만 낭비한 사고 재현).
+    """
+    points = _pack_cloud()
+    T_graspnet_tcp = np.array([[0.0, 0.0, 1.0, 0.0],
+                               [1.0, 0.0, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, 0.0],
+                               [0.0, 0.0, 0.0, 1.0]])
+    rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
+    picked, diagnostics = graspnet_baseline._select_candidates(
+        [_raw(rotation, [0.0, 0.0, 0.040])], np.eye(4), T_graspnet_tcp, 75.0,
+        points_base=points, max_opening_mm=80.0)
+    assert picked == []
+    assert diagnostics['geometry_rejects'].get('width_invalid') == 1
+
+
 def test_rejected_candidates_are_backfilled_from_the_next_ones():
     """기하 검사로 빠진 자리는 뒤 후보로 채운다 — Top-K를 둔 이유가 그것이다."""
     points = _pack_cloud()
