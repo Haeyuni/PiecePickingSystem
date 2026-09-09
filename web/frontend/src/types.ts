@@ -115,19 +115,6 @@ export interface DatasetItem {
   reviewed: boolean
 }
 
-export interface ObjectConfirmation {
-  class_name: string
-  suggested_name_ko: string | null
-  suggested_mass_g: number | null
-  suggested_fragile: boolean | null
-  suggested_deformable: boolean | null
-  suggested_transparent: boolean | null
-  suggested_grip_level: GripLevel | null
-  suggested_by_model: string | null
-  image_ref: string | null
-  created_at: string
-}
-
 /** 실행 전 승인 대기(명령 1건당 1회). 검증을 통과해도 이 이벤트를 받은 뒤에야 로봇이
  * 움직인다 — approve/reject/correct_label 중 하나로 응답해야 한다. */
 export interface ApprovalNeededEvent {
@@ -151,6 +138,5 @@ export type LiveEvent =
   | { type: 'execution_progress'; trace_id: string; request_id: string; skill: string; phase: string }
   | { type: 'execution_result'; trace_id: string; request_id: string; success: boolean; failure_reason: string; validation_reason?: string }
   | ({ type: 'safety_event' } & SafetyEvent)
-  | { type: 'object_confirmation_needed'; class_name: string }
   | ({ type: 'world_state' } & WorldState)
   | ApprovalNeededEvent

@@ -1,5 +1,5 @@
 /** web 백엔드 호출 (웹_인터페이스_정의서.md 2절). */
-import type { ApprovalAction, DatasetItem, Domain, ExecutionLog, ObjectConfirmation, Trace, WorldState } from './types'
+import type { ApprovalAction, DatasetItem, Domain, ExecutionLog, Trace, WorldState } from './types'
 
 export interface ApiError {
   code: string
@@ -50,20 +50,6 @@ export function getTrace(traceId: string) {
 export function getExecutions(params: Record<string, string> = {}) {
   const query = new URLSearchParams(params).toString()
   return request<{ items: ExecutionLog[] }>(`/api/executions${query ? `?${query}` : ''}`)
-}
-
-export function getConfirmations() {
-  return request<{ items: ObjectConfirmation[] }>('/api/object-confirmations')
-}
-
-export function confirmObject(className: string, corrections?: Record<string, unknown>) {
-  return request<{ class_name: string; is_confirmed: boolean }>(
-    `/api/object-confirmations/${className}`,
-    {
-      method: 'POST',
-      body: JSON.stringify({ schema_version: '1.0.0', approved: true, corrections }),
-    },
-  )
 }
 
 export function stopRobot() {

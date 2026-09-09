@@ -13,7 +13,7 @@ docs/on-demand-perception.md(전환 설계, D-1~D-8)
           그래야 발행 stamp가 촬영 시각에서 10초씩 벌어지지 않는다)
         → 마스크 안쪽 median depth로 카메라 좌표 3D → base 좌표 (eye-in-hand 변환)
         → 속성: 검출기가 함께 냈으면 그것(vlm_sam — 사진을 본 VLM이 판단한다),
-          안 냈으면 class_name으로 조회 (object_attributes → objects.yaml → fallback)
+          안 냈으면 class_name으로 조회 (objects.yaml → fallback)
         → object_id 유지 (프레임 간 추적)
         → /perception/world_state_raw + /perception/instance_masks 동시 발행
 
@@ -645,7 +645,7 @@ class PerceptionNode(Node):
 
         for object_id, detection in zip(object_ids, detections):
             # 검출기가 사진을 보고 속성까지 판단했으면(SAM+VLM) 그것이 출처다. 아니면
-            # class_name으로 조회한다(object_attributes → objects.yaml → fallback).
+            # class_name으로 조회한다(objects.yaml → fallback).
             attributes = (detection["attrs"]
                           or self._attributes.attributes(detection["class_name"]))
             graspable = not detection["not_graspable_reason"]

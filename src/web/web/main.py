@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import executor as executor_mod
 from .events import hub
-from .routers import (approvals, camera, commands, confirmations, datasets, executions, live,
+from .routers import (approvals, camera, commands, datasets, executions, live,
                      robot, stt, traces, world)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,7 +49,6 @@ app.include_router(stt.router)
 app.include_router(datasets.router)
 app.include_router(traces.router)
 app.include_router(executions.router)
-app.include_router(confirmations.router)
 app.include_router(robot.router)
 app.include_router(world.router)
 app.include_router(live.router)

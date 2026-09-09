@@ -1,4 +1,4 @@
-"""DB 접근 계층. web은 execution_logs·object_attributes에 직접 접근한다
+"""DB 접근 계층. web은 execution_logs에 직접 접근한다
 (웹_인터페이스_정의서.md 2.5절 — 이력 조회는 planner를 거치지 않는다).
 
 trace 진행 상태는 DB가 아니라 메모리에 둔다. 실행 중 스냅샷은 수명이 짧고 단일 사용자
@@ -101,63 +101,6 @@ def query_executions(trace_id: str | None = None, result: str | None = None,
         row["sequence_id"] = str(row["sequence_id"]) if row["sequence_id"] else None
         row["executed_at"] = row["executed_at"].isoformat()
     return rows
-
-
-# --- 신규 물체 확인 (FR-05b) -------------------------------------------------
-
-def pending_confirmations() -> list[dict]:
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            SELECT class_name, name_ko, mass_g, fragile, deformable, transparent,
-                   grip_level, suggested_by_model, image_ref, created_at
-            FROM object_attributes
-            WHERE is_confirmed = false
-            ORDER BY created_at
-            """
-        )
-        columns = [c.name for c in cur.description]
-        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
-
-    return [
-        {
-            "class_name": r["class_name"],
-            "suggested_name_ko": r["name_ko"],
-            "suggested_mass_g": r["mass_g"],
-            "suggested_fragile": r["fragile"],
-            "suggested_deformable": r["deformable"],
-            "suggested_transparent": r["transparent"],
-            "suggested_grip_level": r["grip_level"],
-            "suggested_by_model": r["suggested_by_model"],
-            "image_ref": r["image_ref"],
-            "created_at": r["created_at"].isoformat(),
-        }
-        for r in rows
-    ]
-
-
-def confirm_object(class_name: str, corrections: dict | None = None) -> bool:
-    """승인(또는 수정 후 승인). 대상이 없거나 이미 확인된 경우 False.
-
-    확인 즉시 source='user_confirmed'로 바뀌며, 이때부터 fallback 강제가 풀린다(3.1a절).
-    """
-    allowed = {"name_ko", "mass_g", "fragile", "deformable", "transparent", "grip_level"}
-    sets, params = [], []
-    for key, value in (corrections or {}).items():
-        if key in allowed:
-            sets.append(f"{key} = %s")
-            params.append(value)
-    sets += ["is_confirmed = true", "source = 'user_confirmed'", "updated_at = now()"]
-
-    with connect() as conn, conn.cursor() as cur:
-        cur.execute(
-            f"UPDATE object_attributes SET {', '.join(sets)} "
-            f"WHERE class_name = %s AND is_confirmed = false",
-            (*params, class_name),
-        )
-        updated = cur.rowcount
-        conn.commit()
-    return updated > 0
 
 
 def object_class_map(world_state: dict | None) -> dict[str, str]:

@@ -5,9 +5,13 @@
  * 보고 싶다"고 다시 요청해 되살렸다. 최신 world_state의 스냅샷일 뿐이라 다음 관측 전까지는
  * 그대로 멈춰 있다(CameraViews의 "n초 전 관측"과 같은 신선도를 공유한다).
  *
- * "확인 필요" 배지는 PendingConfirmations와 같은 모달을 연다 — 물체 하나가 두 목록
- * 모두에 걸릴 수 있어(여기서도, 확인 대기 목록에서도) 어느 쪽을 눌러도 같은 동작이어야
- * 한다.
+ * `needs_confirmation`은 여전히 신규(미등록) 클래스를 표시하지만(fallback 강제,
+ * NFR-03a), 클릭해서 확정하는 절차(FR-05b, `ConfirmModal.tsx`)는 2026-09-09
+ * 제거되었다 — 확인 UI 자체는 있었지만, 그 대상을 채워 넣을 저장소(DB
+ * `object_attributes`)에 값을 쓰는 코드(planner `vlm_client.py`)가 TODO 스텁으로
+ * 끝까지 구현되지 않아 목록이 항상 비어 있었다. 그래서 여기서는 안내용 배지만
+ * 보여주고 클릭 동작은 없다. (실행 승인 모달의 라벨 수정(`correct_label`)은 이것과
+ * 무관한 별개 기능이라 그대로 남아 있다 — `ApprovalModal.tsx`.)
  */
 import type { DetectedObject, GripLevel } from '../types'
 
@@ -15,12 +19,7 @@ const GRIP_LEVEL_LABEL: Record<GripLevel, string> = {
   1: '매우 강하게', 2: '강하게', 3: '보통', 4: '약하게', 5: '매우 약하게',
 }
 
-export default function ObjectList({
-  objects, onConfirmClick,
-}: {
-  objects: DetectedObject[]
-  onConfirmClick: (className: string) => void
-}) {
+export default function ObjectList({ objects }: { objects: DetectedObject[] }) {
   if (objects.length === 0) {
     return <div className="empty">인식된 물체 없음</div>
   }
@@ -34,12 +33,8 @@ export default function ObjectList({
             <span className="badge badge-nograsp" title={o.not_graspable_reason}>파지불가</span>
           )}
           {o.needs_confirmation && (
-            <span
-              className="badge badge-confirm"
-              onClick={() => onConfirmClick(o.class_name)}
-              role="button"
-            >
-              확인 필요
+            <span className="badge badge-confirm" title="미등록 클래스 — fallback으로 조심스럽게 다룸">
+              신규
             </span>
           )}
           <span className={`badge badge-g${o.grip_level}`}>

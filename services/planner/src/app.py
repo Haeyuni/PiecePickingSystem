@@ -21,7 +21,7 @@ import psycopg
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import JSONResponse
 
-from . import db, grounding, llm_client, seed, validator, vlm_detect
+from . import db, grounding, llm_client, validator, vlm_detect
 from .schema import SCHEMA_VERSION, PlanRequest, PlanResponse
 
 # data/datasets/<날짜>/<trace_id>.{png,json} — Roboflow 스타일 수집 화면의 재료
@@ -61,14 +61,13 @@ def _strip_overlay(image_bytes: bytes) -> bytes:
     return jpg.tobytes() if ok else image_bytes
 
 # 기동 시 수행한 작업 요약. /health가 그대로 노출한다.
-_startup: dict = {"migrations": [], "seeded": 0}
+_startup: dict = {"migrations": []}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     with db.connect() as conn:
         _startup["migrations"] = db.apply_migrations(conn)
-        _startup["seeded"] = seed.seed_object_attributes(conn)
     logger.info("planner 기동 완료: %s", _startup)
     yield
 
@@ -81,8 +80,7 @@ def health():
     """DB까지 실제로 왕복해서 확인한다 — 프로세스만 살아있는 상태를 ok로 보고하지 않는다."""
     try:
         with psycopg.connect(db.dsn(), connect_timeout=3) as conn, conn.cursor() as cur:
-            cur.execute("SELECT count(*) FROM object_attributes")
-            object_count = cur.fetchone()[0]
+            cur.execute("SELECT 1")
     except Exception as e:  # DB 장애 시 503 대신 상태를 실어 보낸다 (web이 판단)
         return {"schema_version": SCHEMA_VERSION, "status": "degraded", "db": str(e)}
 
@@ -90,7 +88,6 @@ def health():
         "schema_version": SCHEMA_VERSION,
         "status": "ok",
         "db": "ok",
-        "object_attributes": object_count,
         "llm_model": llm_client.model_name(),
         "prompt_version": llm_client.PROMPT_VERSION,
         "startup": _startup,
