@@ -252,6 +252,11 @@ data/scenes/*
 data/observations/*
 !data/observations/.gitkeep
 
+# VLM 라벨링 결과로 쌓이는 YOLO 학습용 데이터셋(app.py _save_dataset_items) — 실행할 때마다
+# 계속 늘어나고 재현 가능한 산출물이라 git으로 관리하지 않는다.
+data/datasets/*
+!data/datasets/.gitkeep
+
 # SAM 파라미터 튜닝용 정지 이미지/결과 (tools/scripts/vlm_sam_test.py)
 test_image/*
 !test_image/.gitkeep
