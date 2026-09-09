@@ -14,7 +14,7 @@ import os
 import time
 import uuid
 
-from . import planner_client, store
+from . import bins, planner_client, store
 from .events import hub
 from .executor import SkillGoal, is_mock
 
@@ -567,6 +567,8 @@ def _build_steps(steps: list[dict], world_state: dict) -> list[dict]:
             "skill": s["skill"],
             "object_id": s["object_id"],
             "bin_id": s.get("bin_id"),
+            # TaskProgress.tsx가 "right_box" 대신 보여줄 이름 — name_ko와 같은 이유.
+            "bin_name_ko": bins.name_ko(s.get("bin_id")),
             "grip_level": s["grip_level"],
             "grasp_pose": s.get("grasp_pose"),
             "gripper_width_mm": s.get("gripper_width_mm"),
@@ -577,6 +579,9 @@ def _build_steps(steps: list[dict], world_state: dict) -> list[dict]:
             "object_height_mm": s.get("object_height_mm"),
             "depth_valid_ratio": s.get("depth_valid_ratio"),
             "class_name": class_of(world_state, s["object_id"]),
+            # 작업 진행 화면(TaskProgress.tsx)이 object_id 대신 사람이 읽을 이름을
+            # 보여주는 데 쓴다 — class_name과 같은 이유로 world_state에서 가져온다.
+            "name_ko": (_object_of(world_state, s["object_id"]) or {}).get("name_ko"),
             "object_footprint_base_mm": copy.deepcopy(
                 (_object_of(world_state, s["object_id"]) or {}).get("footprint_base_mm") or []),
             "source_observation_id": world_state.get("observation_id", ""),

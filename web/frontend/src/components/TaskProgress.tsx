@@ -59,7 +59,8 @@ export default function TaskProgress({ trace }: { trace: Trace | null }) {
       {trace.steps.map((step) => (
         <div className="progress-step" key={step.request_id}>
           <span className="label">
-            {SKILL_LABEL[step.skill] ?? step.skill} — {step.bin_id ?? step.object_id}
+            {SKILL_LABEL[step.skill] ?? step.skill} —{' '}
+            {step.bin_name_ko ?? step.bin_id ?? step.name_ko ?? step.class_name ?? step.object_id}
           </span>
           <div
             className={`bar${step.status === 'success' ? ' done' : ''}${

@@ -57,7 +57,10 @@ def get_trace(trace_id: str):
                 "request_id": s["request_id"],
                 "skill": s["skill"],
                 "object_id": s["object_id"],
+                "class_name": s.get("class_name"),
+                "name_ko": s.get("name_ko"),
                 "bin_id": s.get("bin_id"),
+                "bin_name_ko": s.get("bin_name_ko"),
                 "status": s["status"],
                 "phase": s["phase"],
             }

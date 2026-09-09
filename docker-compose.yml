@@ -275,6 +275,10 @@ services:
       # 데이터가 흐르지 않는다**. host 네트워크라 lo가 호스트와 같은 것이므로 설정만 맞추면 된다.
       # 이미지에 굽지 않는 이유: 어느 인터페이스를 쓸지는 배포 환경의 정책이지 앱의 성질이 아니다.
       - ${CYCLONEDDS_CONFIG_DIR:-${HOME}/.config/cyclonedds}:/cyclonedds:ro
+      # 작업 진행 화면(TaskProgress.tsx)이 bin_id 대신 보여줄 한국어 이름 조회용
+      # (web/bins.py). control이 쓰는 좌표는 여기서 안 읽는다 — planner와 같은 이유로
+      # 읽기 전용 공유.
+      - ./src/control/config/bins.yaml:/config/bins.yaml:ro
 
 volumes:
   pgdata:

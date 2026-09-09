@@ -59,7 +59,12 @@ export interface TraceStep {
   request_id: string
   skill: 'pick' | 'place_into'
   object_id: string
+  // 작업 진행 화면에 물체 이름으로 보여주기 위한 필드 — 그 스텝의 계획 입력이 된
+  // 관측(world_state)에서 가져온다. 재계획으로 물체가 사라졌으면 null일 수 있다.
+  class_name: string | null
+  name_ko: string | null
   bin_id: string | null
+  bin_name_ko: string | null
   status: 'pending' | 'in_progress' | 'success' | 'failure'
   phase: string | null
 }
