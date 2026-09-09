@@ -279,6 +279,7 @@ async def internal_label_marks(
     mask_polys: str = Form("", description="mark_id → 윤곽선 다각형 좌표 (JSON)"),
     original_image: UploadFile | None = File(
         default=None, description="오버레이가 없는 원본 프레임 (YOLO 학습용 이미지)"),
+    domain: str = Form("general", description="시나리오 컨텍스트 (general/pharmacy/recycle)"),
 ):
     """번호가 그려진 프레임 → 번호별 "무엇인가" 판단 (좌표는 묻지 않는다).
 
@@ -288,6 +289,12 @@ async def internal_label_marks(
 
     original_image는 perception이 함께 보내는 원본 프레임(번호 오버레이 없음)이다 —
     YOLO 학습용 이미지는 오버레이가 없어야 하므로 마스크 이미지보다 이것을 우선 저장한다.
+
+    domain은 sam_vlm.py가 함께 보내는 시나리오 컨텍스트다(가정/약국/재활용) —
+    vlm_detect.label_marks로 그대로 넘겨야 [장면 맥락(도메인)] 프롬프트 분기가 실제로
+    걸린다. 여기서 안 받으면 FastAPI가 조용히 버려서 sam_vlm.py가 보낸 값이 VLM에
+    끝내 닿지 못한다(2026-09-09 발견 — domain 파라미터를 sam_vlm.py/vlm_detect.py에는
+    배선했는데 이 엔드포인트 시그니처에는 추가하지 않아 죽은 배선이었다).
     """
     try:
         ids = [int(v) for v in mark_ids.split(",") if v.strip()]
@@ -318,7 +325,7 @@ async def internal_label_marks(
 
     data_url = vlm_detect.encode_bytes(data, image.content_type or "image/png")
     try:
-        scene = vlm_detect.label_marks(data_url, ids, detail=detail)
+        scene = vlm_detect.label_marks(data_url, ids, detail=detail, domain=domain)
     except Exception as e:
         logger.exception("VLM 라벨링 실패 (trace_id=%s)", trace_id)
         # 하위 서비스(VLM API) 장애는 503 — /internal/plan의 LLM 장애와 같은 판단이다

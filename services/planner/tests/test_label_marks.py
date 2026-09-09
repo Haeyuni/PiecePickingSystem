@@ -187,6 +187,22 @@ class LabelMarksTest(unittest.TestCase):
         self.assertTrue(image.startswith("data:image/png;base64,"))
         self.assertEqual(mark_ids, [1, 2])
 
+    def test_domain_reaches_label_marks(self):
+        """sam_vlm.py가 보내는 domain(가정/약국/재활용)이 vlm_detect.label_marks까지
+        실제로 전달돼야 한다. 2026-09-09에 sam_vlm.py/vlm_detect.py에만 배선하고 이
+        엔드포인트 시그니처에 domain을 안 받아 조용히 버려지던 죽은 배선이었다."""
+        post(trace_id="tr-domain", domain="pharmacy")
+
+        _, _, kwargs = self.calls[0]
+        self.assertEqual(kwargs.get("domain"), "pharmacy")
+
+    def test_domain_defaults_to_general(self):
+        """domain을 안 보내는 기존 호출(수동 테스트 스크립트 등)도 그대로 동작해야 한다."""
+        post()
+
+        _, _, kwargs = self.calls[0]
+        self.assertEqual(kwargs.get("domain"), "general")
+
     def test_command_is_never_forwarded(self):
         """지시를 인지 단계에 넣지 않는다는 결정이 코드로 지켜지는지 (D-1 근거)."""
         post()
