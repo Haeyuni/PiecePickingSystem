@@ -151,3 +151,7 @@ export type LiveEvent =
   | { type: 'object_confirmation_needed'; class_name: string }
   | ({ type: 'world_state' } & WorldState)
   | ApprovalNeededEvent
+  // 로봇 PC 마이크로 "hello rokey"를 듣는 네이티브 프로세스(tools/voice/wakeword_bridge.py)가
+  // 감지 시 web에 알리면 그대로 중계된다 — 브라우저 자체 SpeechRecognition은 쓰지 않는다
+  // (2026-09-09, 신뢰도 문제로 대체).
+  | { type: 'wake_word_detected' }

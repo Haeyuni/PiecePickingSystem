@@ -35,6 +35,9 @@ export default function ControlPage() {
   const [pending, setPending] = useState<ObjectConfirmation[]>([])
   const [modalClass, setModalClass] = useState<string | null>(null)
   const [approval, setApproval] = useState<ApprovalNeededEvent | null>(null)
+  // wake_word_detected를 받을 때마다 올린다 — CommandInput이 이 값의 변화를 보고 반응한다
+  // (이벤트 자체엔 payload가 없어 카운터로 "새 이벤트가 왔다"만 표현하면 충분하다).
+  const [wakeSignal, setWakeSignal] = useState(0)
 
   const refreshWorld = useCallback(async () => {
     try {
@@ -130,6 +133,10 @@ export default function ControlPage() {
             (sum, o) => sum + (o.grasp_candidates?.length ?? 0), 0)}`,
           event.objects.map((o) => `${o.object_id}=${o.grasp_candidates?.length ?? 0}`).join(' '))
         break
+
+      case 'wake_word_detected':
+        setWakeSignal((n) => n + 1)
+        break
     }
   }, [refreshPending, refreshTrace, refreshWorld])
 
@@ -207,7 +214,7 @@ export default function ControlPage() {
       </div>
 
       <div className="panel" style={{ marginTop: 12 }}>
-        <CommandInput mode={robot.mode} onAccepted={onCommandAccepted} />
+        <CommandInput mode={robot.mode} onAccepted={onCommandAccepted} wakeSignal={wakeSignal} />
       </div>
 
       {modalItem && (
