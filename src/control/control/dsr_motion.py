@@ -74,6 +74,9 @@ GET_CURRENT_SOLUTION_SPACE_SERVICE = (
 GET_ROBOT_STATE_SERVICE = "/dsr01/dsr_controller2/system/get_robot_state"
 GET_EXTERNAL_TORQUE_SERVICE = "/dsr01/dsr_controller2/aux_control/get_external_torque"
 GET_TOOL_FORCE_SERVICE = "/dsr01/dsr_controller2/aux_control/get_tool_force"
+# robot_state_publisher.py가 화면의 TCP 설정 상태에 쓴다 — 실물로 확인(2026-09-09):
+# 정상이면 {info: 'GripperDA_v1', success: true}, TCP가 풀리면 info가 비거나 다른 값이 된다.
+GET_CURRENT_TCP_SERVICE = "/dsr01/dsr_controller2/tcp/get_current_tcp"
 
 # M0609 관절 한계(도). dsr_description2/urdf/m0609.urdf의 <limit lower/upper>를 도로 옮긴 값
 # (±6.2832 rad = ±360도, J3만 ±2.618 rad = ±150도). 컨트롤러의 소프트 리밋이 더 좁게

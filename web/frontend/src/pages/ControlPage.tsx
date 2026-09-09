@@ -19,7 +19,10 @@ import TaskProgress from '../components/TaskProgress'
 import { useLive } from '../hooks/useLive'
 import type { ApprovalNeededEvent, DetectedObject, LiveEvent, RobotState, SafetyEvent, Trace, WorldState } from '../types'
 
-const INITIAL_ROBOT: RobotState = { mode: 'idle', current_skill: 'none', gripper_width_mm: 0 }
+const INITIAL_ROBOT: RobotState = {
+  mode: 'idle', current_skill: 'none', gripper_width_mm: 0,
+  tcp_name: '', tcp_configured: false,
+}
 
 export default function ControlPage() {
   const [robot, setRobot] = useState<RobotState>(INITIAL_ROBOT)
@@ -61,6 +64,8 @@ export default function ControlPage() {
           mode: event.mode,
           current_skill: event.current_skill,
           gripper_width_mm: event.gripper_width_mm,
+          tcp_name: event.tcp_name,
+          tcp_configured: event.tcp_configured,
         })
         // 새 mode가 idle이면 해제 조건을 만족한 배너를 내린다 (2.2.3)
         if (event.mode === 'idle') setCritical(null)

@@ -20,6 +20,14 @@ from . import dsr_motion
 SCHEMA_VERSION = "1.0.0"
 PUBLISH_PERIOD_S = 0.2
 
+# get_current_tcp가 돌려줘야 정상인 이름. TCP(GripperDA_v1, 208mm)가 풀리면 이 이름이
+# 비거나 달라진다 — dsr_motion.GET_CURRENT_TCP_SERVICE 주석 참조.
+EXPECTED_TCP_NAME = "GripperDA_v1"
+# TCP 설정은 좌표(get_current_posx)와 달리 로봇이 움직여도 안 바뀐다 — 사람이 티치펜던트로
+# 직접 바꾸는 드문 경우만 감지하면 되므로, posx급 주기(0.5s)로 두드릴 이유가 없다. 느슨하게
+# 둬서 get_current_posx 트래픽(perception/grasp의 RobotPoseClient)과도 안 겹친다.
+TCP_POLL_PERIOD_S = 5.0
+
 
 class RobotStateStore:
     """프로세스 공유 로봇 상태. 액션 서버가 쓰고 발행 노드가 읽는다."""
@@ -96,9 +104,19 @@ class RobotStatePublisherNode(Node):
         # 값이라 store를 거치지 않고 직접 들고 있는다 — RobotStateStore 클래스 docstring 참조,
         # store는 "액션 서버가 쓰고 이 노드가 읽는" 상태만 위한 것이다).
         self._joint_state: JointState | None = None
+        # fake 모드엔 get_current_tcp를 응답할 드라이버가 없다 — client 자체를 안 만든다
+        # (dsr_motion.ARM_JOINT_STATES_TOPIC 구독을 fake에서 건너뛰는 것과 같은 이유).
+        self._tcp_client = None
+        self._tcp_pending = False
+        # None = 아직 한 번도 응답을 못 받음(화면은 이것도 "설정 안 됨"으로 본다).
+        self._tcp_name: str | None = None
         if not is_fake_robot():
+            from dsr_msgs2.srv import GetCurrentTcp
             self.create_subscription(JointState, dsr_motion.ARM_JOINT_STATES_TOPIC,
                                      self._on_joint_state, 5)
+            self._tcp_client = self.create_client(
+                GetCurrentTcp, dsr_motion.GET_CURRENT_TCP_SERVICE)
+            self.create_timer(TCP_POLL_PERIOD_S, self._poll_tcp)
         self.create_timer(PUBLISH_PERIOD_S, self._publish)
         self.get_logger().info(
             f"robot_state 발행 시작 ({'fake' if is_fake_robot() else '실물'} 모드)"
@@ -106,6 +124,26 @@ class RobotStatePublisherNode(Node):
 
     def _on_joint_state(self, msg: JointState) -> None:
         self._joint_state = msg
+
+    def _poll_tcp(self) -> None:
+        if self._tcp_pending or not self._tcp_client.service_is_ready():
+            return
+        from dsr_msgs2.srv import GetCurrentTcp
+        self._tcp_pending = True
+        self._tcp_client.call_async(GetCurrentTcp.Request()).add_done_callback(
+            self._on_tcp_response)
+
+    def _on_tcp_response(self, future) -> None:
+        self._tcp_pending = False
+        try:
+            response = future.result()
+        except Exception as e:
+            self.get_logger().warning(f"get_current_tcp 실패: {e}", throttle_duration_sec=10.0)
+            return
+        # success=false에서도 info를 그대로 쓴다 — 화면은 어차피 EXPECTED_TCP_NAME과
+        # 문자열 비교만 하므로, 실패했는데 우연히 그 이름이 남아 "설정됨"으로 오판될
+        # 일이 없다(success=false면 info가 보통 비어 있다).
+        self._tcp_name = response.info if response.success else ""
 
     def _publish(self) -> None:
         state = store.snapshot()
@@ -118,6 +156,8 @@ class RobotStatePublisherNode(Node):
         msg.gripper_closed = state["gripper_closed"]
         if self._joint_state is not None:
             msg.joint_state = self._joint_state
+        msg.tcp_name = self._tcp_name or ""
+        msg.tcp_configured = self._tcp_name == EXPECTED_TCP_NAME
         self._pub.publish(msg)
 
 

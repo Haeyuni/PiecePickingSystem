@@ -15,6 +15,10 @@ export interface RobotState {
   mode: RobotMode
   current_skill: string
   gripper_width_mm: number
+  /** get_current_tcp가 돌려준 현재 설정된 TCP 이름. 응답이 없었으면 빈 문자열. */
+  tcp_name: string
+  /** tcp_name이 기대값(GripperDA_v1)과 일치하는지 — 화면은 좌표가 아니라 이 값만 본다. */
+  tcp_configured: boolean
 }
 
 /** grasp 노드가 낸 파지 후보 하나 (sort_msgs/GraspCandidate.msg).

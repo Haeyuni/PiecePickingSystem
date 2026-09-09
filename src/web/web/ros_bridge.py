@@ -183,7 +183,8 @@ class _BridgeNode(Node):
         super().__init__("web_ros_bridge")
         self.latest_world_state: dict | None = None
         self.latest_robot_state: dict = {"schema_version": SCHEMA_VERSION, "mode": "idle",
-                                         "current_skill": "none", "gripper_width_mm": 0.0}
+                                         "current_skill": "none", "gripper_width_mm": 0.0,
+                                         "tcp_name": "", "tcp_configured": False}
         # 들어온 원본 메시지만 들고 있다가 **요청이 올 때 JPEG로 만든다**. 예전엔 구독
         # 콜백에서 곧바로 컬러맵 변환 + JPEG 인코딩까지 했는데, 뎁스가 30Hz라 아무도
         # 화면을 안 보고 있어도 초당 30번을 인코딩했다 — 실측으로 web 프로세스가 CPU
@@ -253,6 +254,8 @@ class _BridgeNode(Node):
             "mode": msg.mode,
             "current_skill": msg.current_skill,
             "gripper_width_mm": msg.gripper_width_mm,
+            "tcp_name": msg.tcp_name,
+            "tcp_configured": msg.tcp_configured,
         }
         changed = state != self.latest_robot_state
         self.latest_robot_state = state

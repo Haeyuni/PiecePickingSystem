@@ -81,6 +81,10 @@ class MockExecutor:
             "current_skill": self._current_skill,
             "gripper_width_mm": (self._gripper_width_mm
                                   if self._current_skill == "none" else 42.0),
+            # mock에는 실물 드라이버가 없어 TCP 설정을 확인할 수 없다 — 항상 미확인으로
+            # 낸다(ros_bridge.RosExecutor의 초기값과 같은 모양).
+            "tcp_name": "",
+            "tcp_configured": False,
         }
 
     def subscribe_state(self, on_event: Callable[[dict], Awaitable[None]]) -> None:
