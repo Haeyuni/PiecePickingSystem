@@ -23,5 +23,10 @@ faster-whisper
 # services/planner/requirements.txt가 /internal/label-marks 때문에 같은 줄을 갖고 있다.
 python-multipart
 
+# bins.yaml에서 화면에 보여줄 한국어 이름만 읽는다 (bins.py, TaskProgress.tsx).
+# ros:jazzy 베이스가 이미 PyYAML을 깔고 있어 지금까지는 암묵적으로 있었는데,
+# 여기서 직접 import하므로 명시한다 — 베이스 이미지가 바뀌어도 깨지지 않게.
+PyYAML
+
 # 주의: rclpy는 여기에 없다. ROS2 환경(ros:jazzy 베이스)에서만 제공되며,
 # MOCK_MODE=0일 때 ros_bridge.py에서만 import된다 (web/Dockerfile 참조).
