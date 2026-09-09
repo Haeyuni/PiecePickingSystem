@@ -88,7 +88,6 @@ export default function ApprovalModal({
                     </span>
                   )}
                 </div>
-                {obj?.reasoning && <div className="reasoning muted">{obj.reasoning}</div>}
 
                 {editingId === step.object_id ? (
                   <div className="field">

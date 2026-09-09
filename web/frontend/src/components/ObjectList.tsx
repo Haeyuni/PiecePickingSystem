@@ -29,7 +29,7 @@ export default function ObjectList({
     <div className="objects">
       {objects.map((o) => (
         <div className="object-row" key={o.object_id}>
-          <span className="name" title={o.reasoning || undefined}>{o.name_ko || o.class_name}</span>
+          <span className="name">{o.name_ko || o.class_name}</span>
           {!o.graspable && (
             <span className="badge badge-nograsp" title={o.not_graspable_reason}>파지불가</span>
           )}
@@ -45,7 +45,6 @@ export default function ObjectList({
           <span className={`badge badge-g${o.grip_level}`}>
             {GRIP_LEVEL_LABEL[o.grip_level] ?? `g${o.grip_level}`}
           </span>
-          {o.reasoning && <div className="reasoning muted">{o.reasoning}</div>}
         </div>
       ))}
     </div>

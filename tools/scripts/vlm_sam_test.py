@@ -3,13 +3,12 @@
 
 확인하려는 것은 두 가지다.
 
-  (1) 사진을 API로 보냈을 때 무엇이 있는지 알아보고 바운딩박스 좌표를 주는가
-  (2) 그 좌표를 프롬프트로 SAM이 마스크를 뽑는가
+  (1) SAM이 장면을 조각내는가 (전체 분할)
+  (2) 그 조각마다 VLM이 번호에 이름을 제대로 붙이는가
 
-두 가지 순서로 돌려 볼 수 있다. 기본값 --mode som은 SAM이 먼저 장면을 조각내고 VLM은 번호에
-이름만 붙인다. --mode box는 반대로 VLM에게 박스를 물어 SAM 프롬프트로 쓴다 — 원래 설계이고
-**gpt-4o에서는 som이 비교가 안 되게 정확해서** 기본값을 som으로 둔다
-(이유와 실측은 docs/vlm_sam_pipeline.md 참조).
+VLM에게 바운딩박스를 직접 물어 SAM 프롬프트로 쓰는 반대 방향(--mode box)도 한때 있었지만
+**gpt-4o가 박스 좌표를 못 맞춰서**(docs/vlm_sam_pipeline.md 실측) 2026-09-09에 코드에서
+걷어냈다 — 이 스크립트는 이제 SAM 전체 분할 → VLM 라벨링 경로만 확인한다.
 
   # SAM 마스킹만 볼 때 (openai 불필요, OPENAI_API_KEY 없어도 된다)
   .venv/bin/python tools/scripts/vlm_sam_test.py --no-vlm
@@ -24,10 +23,6 @@
   # SAM 전체 분할(CPU 26초)만 재사용하고 지시만 바꿔 가며
   .venv/bin/python tools/scripts/vlm_sam_test.py test_image/scene1.png \
       --reuse-marks --command "우산 왼쪽으로"
-
-  # 원래 물어본 경로: VLM 박스 → SAM 프롬프트
-  .venv/bin/python tools/scripts/vlm_sam_test.py test_image/scene1.png \
-      --mode box --command "치약 왼쪽으로" --plan
 
 SAM 파라미터(--points-stride/--min-area/--max-area/--max-marks/--sam-model/--device)는
 perception 노드가 쓰는 것과 같은 이름·같은 기본값이다(src/perception/perception/node.py의
@@ -127,28 +122,6 @@ def import_planner_module(name: str):
 
 # --- (1) VLM ------------------------------------------------------------------
 
-def run_vlm(image_path: pathlib.Path, command: str | None, size: tuple[int, int],
-            model: str | None, detail: str) -> tuple[dict, float]:
-    vlm_detect = import_planner_module("vlm_detect")
-    t0 = time.perf_counter()
-    scene = vlm_detect.detect(image_path, command_text=command, image_size=size,
-                              model=model, detail=detail)
-    elapsed = time.perf_counter() - t0
-    return {
-        "mode": "box",
-        "model": model or vlm_detect.model_name(),
-        "prompt_version": vlm_detect.PROMPT_VERSION,
-        "command_text": command,
-        "image": str(image_path),
-        "image_size": {"width": size[0], "height": size[1]},
-        "raw": scene.model_dump(),
-        "objects": vlm_detect.to_pixels(scene, *size),
-        "target_object_ids": scene.target_object_ids,
-        "refusal_reason": scene.refusal_reason,
-        "elapsed_s": round(elapsed, 2),
-    }, elapsed
-
-
 def print_objects(scene: dict) -> None:
     objects = scene["objects"]
     if not objects:
@@ -156,7 +129,6 @@ def print_objects(scene: dict) -> None:
     for o in objects:
         x1, y1, x2, y2 = o["box_xyxy"]
         target = " ←지시대상" if o["object_id"] in scene["target_object_ids"] else ""
-        # detect 경로는 등록 어휘 대비 신규 여부를, som 경로는 VLM이 판단한 속성을 낸다.
         attrs = o.get("attrs")
         if attrs:
             flags = [k for k in ("fragile", "deformable", "transparent") if attrs[k]]
@@ -167,7 +139,7 @@ def print_objects(scene: dict) -> None:
         print(f"  {o['object_id']:<18} {o['class_name']:<14} {o['name_ko']:<8} "
               f"conf={o['confidence']:.2f} box=({x1},{y1})-({x2},{y2}) "
               f"{x2 - x1}x{y2 - y1}px{note}{target}")
-    # som 모드는 이 단계에서 지시를 보지 않으므로 대상/거부가 비어 있다 — 그건 (3)에서 나온다.
+    # 이 단계에서 지시를 보지 않으므로 대상/거부가 비어 있다 — 그건 (3)에서 나온다.
     if scene["refusal_reason"]:
         print(f"  거부: {scene['refusal_reason']}")
     elif scene["target_object_ids"]:
@@ -175,27 +147,6 @@ def print_objects(scene: dict) -> None:
 
 
 # --- (2) SAM ------------------------------------------------------------------
-
-def run_sam(image_bgr, boxes: list[list[int]], weights: str, device: str | None):
-    """박스 프롬프트로 마스크를 뽑는다. 반환은 (H,W) bool 마스크 리스트."""
-    from ultralytics import SAM
-
-    model = SAM(weights)
-    t0 = time.perf_counter()
-    # 박스를 한 번에 넘긴다 — 이미지 임베딩을 한 번만 계산하므로 물체마다 부르는 것보다 빠르다.
-    result = model.predict(image_bgr, bboxes=boxes, device=device, verbose=False)[0]
-    elapsed = time.perf_counter() - t0
-    if result.masks is None:
-        return [], elapsed
-    masks = result.masks.data.cpu().numpy() > 0.5
-    h, w = image_bgr.shape[:2]
-    if masks.shape[1:] != (h, w):        # 추론 해상도로 나오면 원본으로 되돌린다
-        import cv2
-        masks = np.stack([
-            cv2.resize(m.astype(np.uint8), (w, h),
-                       interpolation=cv2.INTER_NEAREST).astype(bool) for m in masks])
-    return list(masks), elapsed
-
 
 def sam_everything(image_bgr, weights: str, device: str | None, points_stride: int,
                    min_area: float, max_area: float, max_marks: int):
@@ -356,13 +307,12 @@ def build_world_state(objects: list[dict]) -> dict:
     만든 world_state로는 통과하지 못한다** — 이 옵션이 확인하는 것은 LLM이 지시를 스킬
     시퀀스로 옮기는 부분까지다.
 
-    속성의 출처는 경로마다 다르다. som 경로(운영 경로)는 VLM이 낸 `attrs`를 그대로 쓰고,
-    박스를 묻는 detect 경로는 예전처럼 objects.yaml에서 class_name으로 찾는다 — 그쪽은
-    아직 등록 어휘를 프롬프트에 넣기 때문이다.
+    속성은 VLM이 낸 `attrs`를 그대로 쓴다(objects.yaml을 거치지 않는다 —
+    planner/src/vlm_detect.py 상단 [속성도 VLM이 판단한다] 참조).
     """
     out = []
     for o in objects:
-        attrs = o.get("attrs") or _yaml_attributes(o["class_name"])
+        attrs = o["attrs"]
         out.append({
             "object_id": o["object_id"],
             "class_name": o["class_name"],
@@ -381,31 +331,6 @@ def build_world_state(objects: list[dict]) -> dict:
         })
     return {"schema_version": "1.0.0", "frame_id": "base", "objects": out,
             "needs_reobserve": []}
-
-
-def _yaml_attributes(class_name: str) -> dict:
-    """objects.yaml에서 속성을 찾는다 (detect 경로 전용 — som 경로는 VLM이 낸 값을 쓴다).
-
-    노드에서 이 일을 하는 것은 `perception.attribute_db.AttributeSource`지만 그쪽은 DB까지
-    보므로, 스크립트에서는 yaml만 읽는다.
-    """
-    import yaml
-
-    config = (yaml.safe_load((REPO / "src" / "perception" / "config" / "objects.yaml")
-                             .read_text(encoding="utf-8")) or {})
-    spec = (config.get("objects") or {}).get(class_name)
-    known = spec is not None
-    spec = spec or (config.get("fallback") or {})
-    return {
-        "name_ko": (spec.get("name_ko") or "") if known else "",
-        "mass_g": spec.get("mass_g"),
-        "fragile": bool(spec.get("fragile")),
-        "deformable": bool(spec.get("deformable")),
-        "transparent": bool(spec.get("transparent")),
-        "grip_level": int(spec.get("grip_level") or 5),
-        "attr_source": "yaml_seed" if known else "vlm_new_class",
-        "needs_confirmation": not known,
-    }
 
 
 def run_plan(command: str, world_state: dict) -> None:
@@ -437,10 +362,6 @@ def main() -> int:
     ap.add_argument("image", nargs="?", default=None,
                     help="테스트할 이미지 파일 또는 디렉터리 (생략하면 test_image/ 전체)")
     ap.add_argument("--command", default=None, help='자연어 지시 (예: "화장품 왼쪽으로")')
-    ap.add_argument("--mode", default="som", choices=["som", "box"],
-                    help="som(기본): SAM 전체 분할 → VLM이 번호에 이름만 붙임 / "
-                         "box: VLM에게 박스를 물어 SAM 프롬프트로 씀. gpt-4o에서는 som이 "
-                         "훨씬 정확해서 기본값이다 (docs/vlm_sam_pipeline.md 실측 결과)")
     ap.add_argument("--out", default=str(DEFAULT_OUT))
     ap.add_argument("--model", default=None, help="VLM 모델 (기본: .env의 VLM_MODEL/OPENAI_MODEL)")
     ap.add_argument("--detail", default="high", choices=["high", "low", "auto"],
@@ -458,18 +379,12 @@ def main() -> int:
     ap.add_argument("--reuse-marks", action="store_true",
                     help="som 모드에서 SAM 전체 분할을 건너뛰고 앞선 실행의 *_marks.npz를 "
                          "그대로 쓴다. VLM 쪽만 바꿔 가며 볼 때 (SAM 전체 분할은 CPU에서 25초)")
-    ap.add_argument("--no-sam", action="store_true", help="(1) VLM 검출까지만 (box 모드 전용)")
     ap.add_argument("--no-vlm", action="store_true",
-                    help="som 모드에서 VLM 라벨링을 건너뛰고 SAM 조각을 그대로 물체로 쓴다 "
-                         "(OPENAI_API_KEY 없이 SAM 마스킹만 볼 때. box 모드는 VLM이 있어야 "
-                         "애초에 박스가 나오므로 지원 안 함)")
+                    help="VLM 라벨링을 건너뛰고 SAM 조각을 그대로 물체로 쓴다 "
+                         "(OPENAI_API_KEY 없어도 된다)")
     ap.add_argument("--plan", action="store_true",
                     help="검출 결과로 planner 스킬 시퀀스까지 생성 (LLM 1회 추가 호출)")
     args = ap.parse_args()
-    if args.no_vlm and args.mode != "som":
-        print("--no-vlm은 --mode som에서만 된다 (box 모드는 VLM 박스로 시작한다)",
-              file=sys.stderr)
-        return 1
 
     import cv2
 
@@ -504,86 +419,67 @@ def process_image(image_path: pathlib.Path, args, out_dir: pathlib.Path) -> int:
                        image_path.with_name(f"{stem}_info.json"))
     depth = np.load(depth_p) if depth_p.exists() else None
     info = json.loads(info_p.read_text()) if info_p.exists() else None
-    mode = args.mode
     masks: list[np.ndarray] = []
 
-    if mode == "som":
-        # --- (1) SAM 전체 분할 → 번호 붙이기 -------------------------------
-        before_npz = out_dir / f"{stem}_before.npz"
-        if args.reuse_marks:
-            store = np.load(before_npz)
-            mark_masks = [store[f"mark_{i}"] for i in range(1, len(store.files) + 1)]
-            sam_elapsed = 0.0
-            print(f"마크 재사용: {before_npz}")
-        else:
-            mark_masks, sam_elapsed = sam_everything(
-                image, args.sam_model, args.device, args.points_stride,
-                args.min_area, args.max_area, args.max_marks)
-            np.savez_compressed(before_npz,
-                                **{f"mark_{i}": m for i, m in enumerate(mark_masks, 1)})
-        print(f"\n[1] SAM 전체 분할 — {args.sam_model} device={args.device or 'auto'} "
-              f"stride={args.points_stride} → 마크 {len(mark_masks)}개 ({sam_elapsed:.1f}s)")
-        if not mark_masks:
-            print("  마크가 하나도 없다 — --min-area/--max-area를 확인한다", file=sys.stderr)
-            return 1
-
-        # --- (2) VLM은 번호에 이름만 붙인다 (--no-vlm이면 건너뛴다) --------
-        if args.no_vlm:
-            objects, masks = [], list(mark_masks)
-            for i, mask in enumerate(mark_masks, 1):
-                ys, xs = np.nonzero(mask)
-                objects.append({
-                    "object_id": f"mark_{i}",
-                    "class_name": "", "name_ko": "", "attrs": None,
-                    "confidence": 0.0,
-                    "box_xyxy": [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
-                })
-            print(f"\n[2] VLM 라벨링 생략(--no-vlm) — SAM 조각 {len(objects)}개를 "
-                  "그대로 물체로 쓴다 (openai 불필요)")
-        else:
-            # 번호 오버레이 — LLM에 실제로 보내는 그림이라 결과 폴더에 남겨서
-            # "보내기 전"(_before)과 "VLM이 걸러낸 후"(_after)를 나란히 비교할 수 있게 한다.
-            before_png = out_dir / f"{stem}_before.png"
-            cv2.imwrite(str(before_png), draw_marks(image, mark_masks))
-            print(f"  -> {before_png}  (LLM에 보내기 전 — SAM 원본 조각)")
-
-            vlm_detect = import_planner_module("vlm_detect")
-            t0 = time.perf_counter()
-            # 지시(args.command)는 일부러 넘기지 않는다 — 인지가 지시에 끌려간다
-            # (vlm_detect.label_marks 주석). 지시는 아래 (3) planner 단계로만 간다.
-            labels = vlm_detect.label_marks(
-                before_png, list(range(1, len(mark_masks) + 1)),
-                image_size=(w, h), model=args.model, detail=args.detail)
-            elapsed = time.perf_counter() - t0
-            objects, masks = marks_to_objects(labels, mark_masks)
-            scene = {
-                "model": args.model or vlm_detect.model_name(),
-                "prompt_version": vlm_detect.MARKS_PROMPT_VERSION,
-                "objects": objects,
-                "target_object_ids": [],
-                "refusal_reason": "",
-                "elapsed_s": round(elapsed, 2),
-            }
-            print(f"\n[2] VLM 라벨링 — model={scene['model']} "
-                  f"prompt={scene['prompt_version']} ({scene['elapsed_s']:.1f}s)")
-            print_objects(scene)
-
+    # --- (1) SAM 전체 분할 → 번호 붙이기 -----------------------------------
+    before_npz = out_dir / f"{stem}_before.npz"
+    if args.reuse_marks:
+        store = np.load(before_npz)
+        mark_masks = [store[f"mark_{i}"] for i in range(1, len(store.files) + 1)]
+        sam_elapsed = 0.0
+        print(f"마크 재사용: {before_npz}")
     else:
-        # --- (1) VLM이 박스를 준다 -----------------------------------------
-        scene, _ = run_vlm(image_path, args.command, (w, h), args.model, args.detail)
-        print(f"\n[1] VLM 검출 — model={scene['model']} "
+        mark_masks, sam_elapsed = sam_everything(
+            image, args.sam_model, args.device, args.points_stride,
+            args.min_area, args.max_area, args.max_marks)
+        np.savez_compressed(before_npz,
+                            **{f"mark_{i}": m for i, m in enumerate(mark_masks, 1)})
+    print(f"\n[1] SAM 전체 분할 — {args.sam_model} device={args.device or 'auto'} "
+          f"stride={args.points_stride} → 마크 {len(mark_masks)}개 ({sam_elapsed:.1f}s)")
+    if not mark_masks:
+        print("  마크가 하나도 없다 — --min-area/--max-area를 확인한다", file=sys.stderr)
+        return 1
+
+    # --- (2) VLM은 번호에 이름만 붙인다 (--no-vlm이면 건너뛴다) ------------
+    if args.no_vlm:
+        objects, masks = [], list(mark_masks)
+        for i, mask in enumerate(mark_masks, 1):
+            ys, xs = np.nonzero(mask)
+            objects.append({
+                "object_id": f"mark_{i}",
+                "class_name": "", "name_ko": "", "attrs": None,
+                "confidence": 0.0,
+                "box_xyxy": [int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())],
+            })
+        print(f"\n[2] VLM 라벨링 생략(--no-vlm) — SAM 조각 {len(objects)}개를 "
+              "그대로 물체로 쓴다 (openai 불필요)")
+    else:
+        # 번호 오버레이 — LLM에 실제로 보내는 그림이라 결과 폴더에 남겨서
+        # "보내기 전"(_before)과 "VLM이 걸러낸 후"(_after)를 나란히 비교할 수 있게 한다.
+        before_png = out_dir / f"{stem}_before.png"
+        cv2.imwrite(str(before_png), draw_marks(image, mark_masks))
+        print(f"  -> {before_png}  (LLM에 보내기 전 — SAM 원본 조각)")
+
+        vlm_detect = import_planner_module("vlm_detect")
+        t0 = time.perf_counter()
+        # 지시(args.command)는 일부러 넘기지 않는다 — 인지가 지시에 끌려간다
+        # (vlm_detect.label_marks 주석). 지시는 아래 (3) planner 단계로만 간다.
+        labels = vlm_detect.label_marks(
+            before_png, list(range(1, len(mark_masks) + 1)),
+            image_size=(w, h), model=args.model, detail=args.detail)
+        elapsed = time.perf_counter() - t0
+        objects, masks = marks_to_objects(labels, mark_masks)
+        scene = {
+            "model": args.model or vlm_detect.model_name(),
+            "prompt_version": vlm_detect.MARKS_PROMPT_VERSION,
+            "objects": objects,
+            "target_object_ids": [],
+            "refusal_reason": "",
+            "elapsed_s": round(elapsed, 2),
+        }
+        print(f"\n[2] VLM 라벨링 — model={scene['model']} "
               f"prompt={scene['prompt_version']} ({scene['elapsed_s']:.1f}s)")
         print_objects(scene)
-        objects = scene["objects"]
-
-        # --- (2) 그 박스를 프롬프트로 SAM ------------------------------------
-        if not args.no_sam and objects:
-            boxes = [o["box_xyxy"] for o in objects]
-            masks, elapsed = run_sam(image, boxes, args.sam_model, args.device)
-            print(f"\n[2] SAM 세그멘테이션 — {args.sam_model} "
-                  f"device={args.device or 'auto'} ({elapsed:.1f}s, 박스 {len(boxes)}개 일괄)")
-            if len(masks) != len(boxes):
-                print(f"  경고: 박스 {len(boxes)}개에 마스크 {len(masks)}개 — 짝이 맞지 않는다")
 
     # --- 마스크 품질 + (있으면) depth 3D (콘솔 확인용, 파일로는 안 남긴다) --
     for o, mask in zip(objects, masks):
@@ -617,14 +513,14 @@ def process_image(image_path: pathlib.Path, args, out_dir: pathlib.Path) -> int:
         print(f"  -> {objects_dir}/ ({len(masks)}개)")
 
     # --- (3) 계획 ------------------------------------------------------------
-    # som 모드에서는 지시 해석이 여기서만 일어난다(VLM 단계는 지시를 안 본다). 그래서
+    # 지시 해석은 여기서만 일어난다(VLM 라벨링 단계는 지시를 안 본다). 그래서
     # --command가 있으면 --plan 없이도 돈다 — 안 그러면 지시가 어디에도 쓰이지 않는다.
     if args.no_vlm:
         if args.plan or args.command:
             print("\n[3] --no-vlm은 물체 이름이 없어 계획을 만들지 않는다", file=sys.stderr)
     elif args.plan and not args.command:
         print("\n[3] --plan에는 --command가 필요하다", file=sys.stderr)
-    elif args.command and (args.plan or mode == "som"):
+    elif args.command:
         run_plan(args.command, build_world_state(objects))
 
     return 0

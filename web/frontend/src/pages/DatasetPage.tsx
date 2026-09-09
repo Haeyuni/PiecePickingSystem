@@ -92,7 +92,6 @@ export default function DatasetPage() {
               <dt>trace_id</dt><dd>{selected.trace_id}</dd>
               <dt>출처</dt><dd>{SOURCE_LABEL[selected.attr_source ?? ''] ?? selected.attr_source ?? '—'}</dd>
               <dt>확신도</dt><dd>{selected.confidence?.toFixed(2) ?? '—'}</dd>
-              <dt>판단 근거</dt><dd>{selected.reasoning || '—'}</dd>
               <dt>수집 시각</dt><dd>{formatTime(selected.captured_at)}</dd>
             </dl>
             <div className="modal-actions">

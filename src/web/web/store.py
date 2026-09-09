@@ -186,7 +186,7 @@ def query_dataset_items(class_name: str | None = None, since: str | None = None,
 
     sql = """
         SELECT item_id, trace_id, captured_at, image_path, label_path,
-               class_name, name_ko, attr_source, confidence, reasoning, reviewed
+               class_name, name_ko, attr_source, confidence, reviewed
         FROM dataset_items
     """
     if where:

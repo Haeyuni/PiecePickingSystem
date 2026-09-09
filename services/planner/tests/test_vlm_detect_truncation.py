@@ -78,6 +78,41 @@ class LabelMarksTruncationTest(unittest.TestCase):
         self.assertNotIn("text_format", captured)
         self.assertIn("format", captured.get("text", {}))
 
+    def test_pharmacy_domain_gets_web_search_with_call_cap(self):
+        """2026-09-09 — pharmacy는 약 이름을 잘못 읽으면 안전 문제라 web_search를 다시
+        켠다(mask_poly를 없애 truncation 원인을 없앴으니 안전). 검색 결과가 여전히
+        출력 토큰을 먹으므로 max_tool_calls로 횟수는 계속 제한한다."""
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                status="completed", incomplete_details=None,
+                output=[_message_output('{"marks": []}')], usage=_usage())
+
+        client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+        with patch.object(vlm_detect, "_client", return_value=client):
+            vlm_detect.label_marks("data:image/png;base64,AA==", [1, 2], domain="pharmacy")
+        self.assertEqual(captured.get("tools"), [{"type": "web_search"}])
+        self.assertEqual(captured.get("max_tool_calls"), vlm_detect.MARKS_MAX_WEB_SEARCHES)
+
+    def test_other_domains_get_no_web_search(self):
+        """general/recycle은 그 정도 정밀도가 필요 없다 — 검색 없이 출력 토큰을 아낀다."""
+        for domain in ("general", "recycle"):
+            captured = {}
+
+            def fake_create(**kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    status="completed", incomplete_details=None,
+                    output=[_message_output('{"marks": []}')], usage=_usage())
+
+            client = SimpleNamespace(responses=SimpleNamespace(create=fake_create))
+            with patch.object(vlm_detect, "_client", return_value=client):
+                vlm_detect.label_marks("data:image/png;base64,AA==", [1, 2], domain=domain)
+            self.assertNotIn("tools", captured, f"domain={domain}")
+            self.assertNotIn("max_tool_calls", captured, f"domain={domain}")
+
     def test_usage_is_logged_so_actual_token_spend_is_visible(self):
         """2026-09-08 사용자 질문 — "토큰이 부족한지, 실제 얼마나 썼는지 어디서 보나."
         추측이 아니라 매 호출마다 실제 usage를 로그로 남긴다."""

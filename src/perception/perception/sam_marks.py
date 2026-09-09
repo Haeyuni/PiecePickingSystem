@@ -194,7 +194,7 @@ def merge_marks(marks: list[dict], mark_masks: list[np.ndarray],
     max_growth배 넘게 키우거나 대표 조각보다 크면, 조각이 아니라 다른 영역으로 보고 버린다.
 
     marks는 `{mark_id, is_object, part_of, class_name, name_ko, mass_g, fragile,
-    deformable, transparent, grip_level, confidence, reasoning}` dict 리스트다
+    deformable, transparent, grip_level, confidence}` dict 리스트다
     (planner /internal/label-marks 응답 그대로). 반환값에는 합쳐진 `mask`와, VLM이 판단한
     속성을 `AttributeSource.attributes()`와 같은 모양으로 묶은 `attrs`가 붙는다 —
     node._publish가 둘을 구분 없이 쓰게 하기 위해서다. **object_id는 붙이지 않는다** —
@@ -263,7 +263,6 @@ def mark_attributes(mark: dict) -> dict:
         "grip_level": grip_level,
         "attr_source": "llm_suggested",
         "needs_confirmation": True,
-        "reasoning": mark.get("reasoning") or "",
     }
 
 

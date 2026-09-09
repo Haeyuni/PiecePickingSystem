@@ -25,8 +25,8 @@ from . import db, grounding, llm_client, seed, validator, vlm_detect
 from .schema import SCHEMA_VERSION, PlanRequest, PlanResponse
 
 # data/datasets/<날짜>/<trace_id>.{png,json} — Roboflow 스타일 수집 화면의 재료
-# (database/migrations/003_dataset_items.sql). vlm_detect.OBJECTS_YAML과 같은 방식으로
-# 저장소 루트를 계산한다 — planner는 perception_common(ROS 패키지)에 의존하지 않는다.
+# (database/migrations/003_dataset_items.sql). __file__ 기준으로 저장소 루트를 계산한다
+# — planner는 perception_common(ROS 패키지)에 의존하지 않는다.
 DATASETS_DIR = pathlib.Path(
     os.environ.get("DATASETS_DIR")
     or pathlib.Path(__file__).resolve().parents[3] / "data" / "datasets"
@@ -257,13 +257,13 @@ def _save_dataset_items(trace_id: str, image_bytes: bytes, marks: list[dict],
                     """
                     INSERT INTO dataset_items (
                         item_id, trace_id, image_path, label_path,
-                        class_name, name_ko, attr_source, confidence, reasoning
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        class_name, name_ko, attr_source, confidence
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(uuid.uuid4()), trace_id, str(image_path), str(label_path),
                         obj.get("class_name"), obj.get("name_ko"), "llm_suggested",
-                        obj.get("confidence"), obj.get("reasoning"),
+                        obj.get("confidence"),
                     ),
                 )
             conn.commit()

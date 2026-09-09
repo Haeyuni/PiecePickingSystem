@@ -50,11 +50,11 @@ class LabelMarksTest(unittest.TestCase):
                                      class_name="toothpaste", name_ko="치약",
                                      mass_g=150.0, fragile=False, deformable=True,
                                      transparent=False, grip_level=4,
-                                     confidence=0.9, reasoning="흔한 치약 튜브 형태"),
+                                     confidence=0.9),
                 vlm_detect.MarkLabel(mark_id=2, is_object=False, part_of=0, class_name="",
                                      name_ko="", mass_g=0.0, fragile=False,
                                      deformable=False, transparent=False,
-                                     grip_level=5, confidence=0.9, reasoning=""),
+                                     grip_level=5, confidence=0.9),
             ])
 
         vlm_detect.label_marks = fake
@@ -81,13 +81,6 @@ class LabelMarksTest(unittest.TestCase):
         self.assertEqual(mark["mass_g"], 150.0)
         self.assertTrue(mark["deformable"])
         self.assertEqual(mark["grip_level"], 4)
-
-    def test_reasoning_reaches_the_response(self):
-        """판단 근거가 화면에 뜨려면 이 응답에 실려 나가야 한다 (물체 판단 근거 표시)."""
-        marks = post().json()["marks"]
-
-        self.assertEqual(marks[0]["reasoning"], "흔한 치약 튜브 형태")
-        self.assertEqual(marks[1]["reasoning"], "")   # is_object=false는 빈 문자열
 
     def test_dataset_item_is_saved_when_trace_id_is_given(self):
         """실제 명령 실행(trace_id 있음)마다 원본 이미지 + YOLO TXT 라벨을 남긴다

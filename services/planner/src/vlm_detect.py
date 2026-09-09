@@ -1,16 +1,15 @@
 """사진 한 장 → VLM에게 "무엇이 있는가"를 묻는다. YOLO 대신 쓰는 인지 경로.
 
-두 가지 방식이 들어 있다. **쓰는 것은 아래쪽 `label_marks`다.**
+`label_marks(image, mark_ids)` — SAM이 먼저 장면을 조각내고 번호를 그려 준 이미지를 받아
+**번호마다 무엇인지와 어떻게 다뤄야 하는지**를 답한다. 좌표는 SAM이, 판단은 VLM이 —
+각자 잘하는 쪽을 맡는다. 3D 좌표와 파지 자세는 만들지 않는다. 마스크와 depth로 코드가
+계산한다(`perception_test_image.py:mask_3d`와 같은 방식).
 
-- `detect(image)` — VLM에게 물체와 **바운딩박스를 함께** 묻는다. 원래 설계이자
-  "사진을 API로 보내면 좌표를 주는가"를 확인하려던 것. gpt-4o에서는 좌표를 못 쓴다
-  (docs/vlm_sam_pipeline.md 실측 결과). 더 나은 모델이 붙었을 때 다시 재 볼 수 있게 남겨 둔다.
-- `label_marks(image, mark_ids)` — SAM이 먼저 장면을 조각내고 번호를 그려 준 이미지를 받아
-  **번호마다 무엇인지와 어떻게 다뤄야 하는지**를 답한다. 좌표는 SAM이, 판단은 VLM이 —
-  각자 잘하는 쪽을 맡는다.
-
-어느 쪽이든 3D 좌표와 파지 자세는 만들지 않는다. 마스크와 depth로 코드가 계산한다
-(`perception_test_image.py:mask_3d`와 같은 방식).
+한때 VLM에게 물체와 **바운딩박스를 함께** 묻는 `detect(image)` 경로도 있었다("사진을
+API로 보내면 좌표를 주는가"를 확인하려던 원래 설계) — gpt-4o에서는 좌표를 못 써서
+(docs/vlm_sam_pipeline.md 실측 결과) 실제로는 안 쓰였고, 2026-09-09에 코드 전체(SYSTEM_
+PROMPT/VlmObject/VlmScene/detect/_normalize/_pixel_box/to_pixels/known_classes/
+build_user_prompt)를 지웠다. 되돌리려면 git 이력에서 이 커밋 이전 버전을 보면 된다.
 
 [속성도 VLM이 판단한다] `label_marks`는 원래 objects.yaml의 등록 클래스 어휘를 프롬프트에
 넣고 이름만 받아 왔고, 무게·파손위험·파지 단계는 그 이름으로 objects.yaml에서 조회했다. 지금은
@@ -20,16 +19,18 @@
 조심스러운 쪽을 고르라고 프롬프트에 박고, `_normalize_marks`가 fragile 조합을 한 번 더
 강제한다). 되돌리려면 detector=yolo가 그대로 남아 있다.
 
-[확신이 없으면 web_search로 확인한다] 등록 어휘가 없어졌으니 겉모습만으로 오분류하는 경우가
-생긴다(2026-09-08 실측: 빨간 치약 튜브를 "chocolate_bar"로 답했다 — 색과 형태만으로 짐작하고
-포장에 적힌 글자는 읽지 않았다). `label_marks`는 `web_search` 도구를 켜 두고, 프롬프트가
-겉면 문구를 단서로 실제 검색을 시켜 이름을 확인하게 한다(`SYSTEM_PROMPT_MARKS`의 [확신이
-없으면 검색으로 확인한다]). 이미지를 검색하는 것이 아니라 **모델이 사진에서 읽은 글자로
-검색어를 만들어** 텍스트 검색을 돌리는 것이다 — OpenAI 웹 검색 도구는 이미지 자체를
-질의로 받지 않는다. 물체마다 매번 검색하는 것은 아니다: 모델이 확신이 있으면(정상적인
-치약·물티슈처럼 흔한 물건) 검색 없이 바로 답하고, 포장에 글자가 있는데 정확한 제품명을
-모를 때만 검색을 쓴다 — 그래서 왕복 시간이 물체 수만큼 늘지는 않는다(검색은 도구 호출이 필요할
-때만 같은 요청 안에서 일어난다).
+[web_search는 pharmacy 도메인에서만 켠다] 한때 확신이 없으면 아무 도메인에서나
+`web_search`로 포장 글자를 검색해 확인하게 했다(빨간 치약 튜브를 "chocolate_bar"로
+오판한 사례 대응). 그러다 2026-09-09 실물에서 응답이 반복해서 `max_output_tokens`(gpt-4o
+Responses 상한 16384)를 다 채우고 잘리는 사고가 나서 검색을 아예 껐는데, **그 뒤에도
+web_search 없이 똑같이 잘렸다** — 진짜 범인은 검색이 아니라 스키마의 `mask_poly` 필드였다
+(MarkLabel 참조, VLM이 안 쓰이는 그 필드에 좌표를 채우려다 토큰을 다 썼다). 그 필드를
+없앤 뒤로는 검색을 다시 켜도 안전하다고 보고, **pharmacy 도메인에만** 다시 켠다 — 약
+이름을 잘못 읽으면 안전과 직결되므로(엉뚱한 약을 집어 준다) 정확성이 비용보다 중요하고,
+general/recycle은 그 정도 정밀도가 필요 없다(DOMAIN_CONTEXT_MARKS 참조). 검색 횟수는
+`MARKS_MAX_WEB_SEARCHES`로 여전히 제한한다 — mask_poly를 없앴어도 검색 결과 자체가
+출력 토큰을 먹는 것은 그대로이기 때문이다. 검색이 없는 도메인에서 확신이 없으면
+`[하지 않는 것]`대로 범주까지만 답하고 confidence를 낮춘다.
 
 [구조화 출력] `llm_client`와 같은 원칙 — 자유 텍스트를 파싱하지 않고 JSON Schema로만 받는다
 (NFR-03).
@@ -42,32 +43,32 @@ import logging
 import mimetypes
 import os
 import pathlib
-from functools import lru_cache
 from typing import Literal
 
-import yaml
 from openai import OpenAI
 from openai.lib._parsing._responses import parse_text, type_to_text_format_param
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-# 프롬프트를 고칠 때마다 올린다 (llm_client.PROMPT_VERSION과 같은 이유). 두 경로는 프롬프트가
-# 다르므로 버전도 따로 센다.
-PROMPT_VERSION = "vlm-detect-v1"        # detect(): VLM에게 박스를 묻는다
-MARKS_PROMPT_VERSION = "vlm-marks-v5"   # label_marks(): 도메인(가정/약국/재활용)별 이름 규칙 + 스스로 판단 + 확신 없으면 web_search로 확인 + reasoning
+# 프롬프트를 고칠 때마다 올린다 (llm_client.PROMPT_VERSION과 같은 이유).
+MARKS_PROMPT_VERSION = "vlm-marks-v7"   # label_marks(): 도메인별 이름 규칙 + pharmacy만 web_search + reasoning 없음
 
 # 미설정 시 OPENAI_MODEL을 따라가고, 그것도 없으면 이 값. 이미지 입력이 되는 모델이어야 한다.
 DEFAULT_MODEL = "gpt-4o"
 
-# label_marks()에만 준다 — web_search 도구가 붙는 유일한 호출이라서다. 검색 호출/결과가
-# 그 자체로 출력 토큰을 꽤 먹는데(질의문·응답 요약이 output 항목에 그대로 실린다),
-# max_output_tokens을 안 주면 서버 기본값에 맡기게 되어 검색이 여러 번 걸리면(마크가
-# 많거나 브랜드 확인이 여러 건) 마지막 구조화 JSON을 낼 자리가 남지 않아 **생성 도중에
-# 잘린다** — 2026-09-08 실물에서 4마크짜리 요청이 4번 이렇게 잘려 매번 VLM_UNAVAILABLE
-# 503으로 끝났고, perception의 observe가 그 뒤로 막혀 world_state가 계속 낡은 채로
-# 남았다(트레이스 tr-e43294e59d56 등). gpt-4o Responses의 최대 출력 한도로 올려 여유를 준다.
+# label_marks()가 최대로 받을 출력 토큰. gpt-4o Responses API 자체의 상한이 16384라 이
+# 이상은 못 올린다. 2026-09-09 실물: 응답이 반복해서 이 상한을 다 채우고 잘렸는데
+# (트레이스 tr-e43294e59d56·tr-979c8be0e88b·tr-eda307cfa42b — perception의 observe가
+# 그 뒤로 막혀 world_state가 계속 낡은 채로 남았다), 원인은 web_search가 아니라
+# MarkLabel의 mask_poly 필드였다(그 필드 참조). 그 필드를 없앤 뒤로는 이 상한에 닿을
+# 일이 거의 없지만, 안전판으로 그대로 둔다.
 MARKS_MAX_OUTPUT_TOKENS = 16384
+
+# pharmacy 도메인에서 web_search를 허용하는 요청 하나(마크 전부 합쳐)당 총 호출 횟수
+# 상한. mask_poly를 없애 토큰 예산에 여유가 생겼어도, 검색 결과(질의문 + 요약)가
+# 출력에 그대로 실리는 것은 그대로라 무제한 허용하면 다시 상한을 다 채울 수 있다.
+MARKS_MAX_WEB_SEARCHES = 2
 
 # 시나리오 도메인의 한국어 표기. 프롬프트의 [장면 맥락]에 넣어 VLM이 도메인에 맞게 답하게 한다.
 # 도메인별 **이름 규칙** — build_marks_prompt가 [장면 맥락]으로 넣는다 (vlm-detect, label_marks).
@@ -78,139 +79,28 @@ MARKS_MAX_OUTPUT_TOKENS = 16384
 # - 재활용: 어느 재질로 분리할지가 중요하므로 **재질이 이름에 드러나야** 한다.
 # 지시(command_text)는 여기 오지 않는다 — 도메인은 시나리오 컨텍스트일 뿐이다(D-1).
 DOMAIN_CONTEXT_MARKS = {
-    "pharmacy": """\
+    "pharmacy": f"""\
 이 사진은 **약국** 시나리오다.
 - 이름은 **정확한 약품명**이어야 한다. 포장·포일·설명서·병 라벨에 적힌 성분명/제품명을 \
 읽어 class_name과 name_ko에 그대로 쓴다 (예: ibuprofen / '이부프로펜정', tylenol / \
 '타이레놀정').
 - '약', '알약', 'painkiller'처럼 **종류로 얼버무리지 않는다** — 어느 약인지가 분류의 대상이다.
-- 포장 글자가 흐려 못 읽으면 `web_search`로 확인한 뒤 확정한다. 그래도 특정할 수 없으면 \
-'unknown_medicine'처럼 보수적인 이름 + 낮은 confidence로 답한다.
+- **이 도메인에서는 `web_search`가 주어진다** (최대 {MARKS_MAX_WEB_SEARCHES}회, 요청 전체
+합산). 포장 글자가 흐려 정확한 약품명을 못 읽으면, 읽히는 부분(성분명 일부·모양·색)을
+검색어로 실제로 호출해 확인한 뒤에 답한다 — 약은 잘못 집으면 안전 문제로 이어지므로
+짐작으로 채우지 않는다. 그래도 특정할 수 없으면 'unknown_medicine'처럼 보수적인 이름 +
+낮은 confidence로 답한다. 여러 개가 애매하면 가장 확신이 없는 것부터 검색한다.
 - 포장 형태(블리스터·병·봉투)나 재질은 이름 대신 속성으로 답한다.""",
     "recycle": """\
 이 사진은 **재활용(분리수거)** 시나리오다.
 - 이름에 **재질이 반드시 드러나야** 한다. 재질 + 형태 조합으로 지는다 \
 (예: pet_plastic_bottle, aluminum_can, glass_bottle, paper_box, hdpe_container, can).
 - name_ko도 재질을 담는다 (예: 'PET 페트병', '알루미늄 캔', '유리병', '종이 상자').
-- 재질 표시(플라스틱 재질 번호, 캔·병 각인)를 읽고 판단한다. 모르면 `web_search`로 확인한다.
+- 재질 표시(플라스틱 재질 번호, 캔·병 각인)를 읽고 판단한다. 검색하지 말고(web_search 없음) \
+보이는 표시만으로 판단한다.
 - 재질을 특정할 수 없으면 unknown_material 같은 보수적인 이름 + 낮은 confidence로 답한다 — \
 지어내지 않는다.""",
 }
-
-OBJECTS_YAML = pathlib.Path(
-    os.environ.get("OBJECTS_YAML")
-    or pathlib.Path(__file__).resolve().parents[3] / "src" / "perception" / "config" / "objects.yaml"
-)
-
-
-# --- VLM 출력 (구조화 출력 스키마) -------------------------------------------
-
-class VlmObject(BaseModel):
-    """검출된 물체 하나. 3D·파지 정보는 없다 — 그건 depth와 grasp의 몫이다."""
-
-    object_id: str = Field(
-        description="이 장면 안에서 고유한 식별자. 소문자 슬러그 + 일련번호 (예: toothpaste_1)",
-    )
-    class_name: str = Field(
-        description="아래 [등록된 클래스] 목록에 있으면 그 이름을 그대로. 없으면 새로 지은 "
-                    "영문 소문자 스네이크케이스 이름",
-    )
-    name_ko: str = Field(description="작업자에게 보여줄 한국어 이름")
-    is_new_class: bool = Field(description="[등록된 클래스] 목록에 없는 물체면 true")
-    box_norm: list[int] = Field(
-        description="바운딩박스 [x1, y1, x2, y2]. 이미지 왼쪽 위가 (0,0), 오른쪽 아래가 "
-                    "(1000,1000)인 정규화 좌표. x1<x2, y1<y2",
-    )
-    confidence: float = Field(description="이 판단의 확신도 0.0~1.0")
-
-
-class VlmScene(BaseModel):
-    """한 프레임에 대한 VLM 응답 전체."""
-
-    objects: list[VlmObject] = Field(description="장면에서 집을 수 있는 물체 전부")
-    target_object_ids: list[str] = Field(
-        description="지시가 가리키는 물체의 object_id. 지시가 없거나 대상이 없으면 빈 배열",
-    )
-    refusal_reason: str = Field(
-        default="",
-        description="지시 대상을 장면에서 찾을 수 없거나 지시가 모호할 때 그 이유(한국어). "
-                    "대상을 찾았으면 빈 문자열",
-    )
-
-
-# --- 프롬프트 ----------------------------------------------------------------
-
-SYSTEM_PROMPT = """\
-당신은 협동로봇 분류 시스템의 시각 인지 모듈이다. 작업대를 위에서 내려다본 사진 한 장을 \
-보고, 로봇이 집을 수 있는 물체가 무엇이고 어디에 있는지 답한다.
-
-[해야 할 일]
-1. 사진에 있는 **집을 수 있는 물체**를 빠짐없이 찾는다.
-2. 각 물체의 바운딩박스를 0~1000 정규화 좌표 [x1, y1, x2, y2]로 준다. 왼쪽 위가 (0,0), \
-오른쪽 아래가 (1000,1000)이다. 박스는 물체를 꽉 감싸되 물체 전체를 포함해야 한다 — \
-잘리면 뒤 단계(세그멘테이션)에서 물체 일부가 사라진다.
-3. 지시문이 함께 오면, 그 지시가 가리키는 물체의 object_id를 target_object_ids에 담는다.
-
-[물체가 아닌 것 — 넣지 않는다]
-- 작업대·배경·바구니·상자 자체
-- 케이블, 전선, 테이프로 고정된 배선
-- 사진에 이미 그려져 있는 검출 결과 오버레이(사각형 테두리, 라벨 글자, 신뢰도 숫자). \
-그것은 다른 모델의 출력이지 물체가 아니다. **그 박스를 그대로 베끼지 말고 사진에 실제로 \
-찍힌 물체를 직접 보고 판단한다.**
-
-[클래스 이름]
-- 아래 [등록된 클래스]에 해당하는 물체면 그 class_name을 **철자 그대로** 쓰고 \
-is_new_class=false로 둔다.
-- 목록에 없는 물체는 새 이름을 지어 주고(영문 소문자 스네이크케이스) is_new_class=true로 \
-둔다. 목록에 없다고 빼지 않는다 — 시스템이 신규품목으로 등록해 보수적으로 다룬다.
-
-[지시 해석 — target_object_ids]
-1. 지시는 클래스 이름이 아니라 범주나 생김새로 올 수 있다("화장품", "파란 통", "제일 큰 것"). \
-사진과 물체 목록을 근거로 어느 것을 말하는지 고른다.
-2. **지시가 가리키는 물체가 사진에 없으면 target_object_ids를 비우고 refusal_reason에 \
-무엇이 없는지 적는다.** 비슷한 다른 물체로 바꿔 고르지 않는다 — 사용자가 지시하지 않은 \
-물체를 옮기는 것이 못 옮기는 것보다 나쁘다.
-3. 지시가 모호해서 어느 물체인지 특정할 수 없으면("그거", "저거") 역시 비우고 이유를 적는다. \
-집을 수 있는 물체가 하나뿐이라 가리킬 대상이 그것밖에 없을 때만 예외다.
-4. "전부", "모두", "다"라고 하면 조건에 맞는 물체를 하나도 빠뜨리지 않는다.
-5. refusal_reason은 작업자가 무엇을 고쳐 말해야 할지 알 수 있게 한국어로 쓴다.
-
-[하지 않는 것]
-- 3D 좌표·거리·무게·파지 자세는 절대 만들어내지 않는다. 그것은 depth 센서와 시스템이 정한다.
-- 사진에서 안 보이는 물체를 추측해서 넣지 않는다.
-"""
-
-
-@lru_cache(maxsize=1)
-def known_classes(path: str | None = None) -> list[tuple[str, str]]:
-    """objects.yaml에 등록된 (class_name, name_ko) 목록.
-
-    **쓰는 곳은 `detect()`뿐이다.** 운영 경로인 `label_marks()`는 어휘를 주지 않고 모델이
-    직접 이름을 짓는다(모듈 상단 [속성도 VLM이 판단한다]). 어휘를 주면 같은 물체를 매번
-    같은 이름으로 부르게 되는 이점이 있어, 좌표까지 묻는 `detect()`에는 남겨 둔다.
-    """
-    p = pathlib.Path(path) if path else OBJECTS_YAML
-    try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-    except OSError:
-        logger.warning("objects.yaml을 못 읽었다 (%s) — 등록 클래스 없이 진행한다", p)
-        return []
-    return [
-        (name, (spec or {}).get("name_ko") or name)
-        for name, spec in (data.get("objects") or {}).items()
-    ]
-
-
-def build_user_prompt(command_text: str | None, image_size: tuple[int, int] | None = None) -> str:
-    lines = ["[등록된 클래스]"]
-    classes = known_classes()
-    lines += [f"- {name}: {ko}" for name, ko in classes] or ["(없음)"]
-    if image_size:
-        lines += ["", f"[사진 크기] {image_size[0]}x{image_size[1]} px "
-                      f"(답은 이 크기와 무관한 0~1000 정규화 좌표로 준다)"]
-    lines += ["", "[지시]", command_text or "(지시 없음 — 물체 검출만 하고 "
-                                            "target_object_ids는 비워 둔다)"]
-    return "\n".join(lines)
 
 
 # --- 호출 --------------------------------------------------------------------
@@ -238,117 +128,14 @@ def encode_image(path: pathlib.Path | str) -> str:
     return encode_bytes(path.read_bytes(), mime)
 
 
-def detect(image: pathlib.Path | str | bytes, command_text: str | None = None,
-           image_size: tuple[int, int] | None = None, model: str | None = None,
-           detail: str = "high") -> VlmScene:
-    """사진(+선택적 지시) → 검출된 물체와 바운딩박스.
-
-    image는 파일 경로 또는 이미 만들어 둔 data URL 문자열/바이트가 아니라 **경로**를 기대한다.
-    카메라 프레임을 바로 보내려면 `encode_image` 대신 png로 인코딩해 넘긴다.
-
-    detail="high"는 작은 물체 때문이다 — "low"는 512px 축소본만 보므로 튜브·젤네일처럼
-    작은 물체의 박스가 뭉개진다.
-    """
-    data_url = image if isinstance(image, str) and image.startswith("data:") else encode_image(image)
-    client = _client()
-    model = model or model_name()
-    request = dict(
-        model=model,
-        instructions=SYSTEM_PROMPT,          # 고정 프리픽스 (프리픽스 캐싱)
-        input=[{
-            "role": "user",
-            "content": [
-                {"type": "input_text", "text": build_user_prompt(command_text, image_size)},
-                {"type": "input_image", "image_url": data_url, "detail": detail},
-            ],
-        }],
-        text_format=VlmScene,
-    )
-    try:
-        response = client.responses.parse(**request, temperature=0)   # 같은 사진에 같은 답
-    except Exception as e:
-        # gpt-5 계열처럼 temperature를 받지 않는 모델이 있다. 재현성은 포기하고 진행한다.
-        if "temperature" not in str(e):
-            raise
-        logger.warning("%s 모델이 temperature를 거부해 기본값으로 재시도한다", model)
-        response = client.responses.parse(**request)
-
-    scene = response.output_parsed
-    scene = _normalize(scene)
-    logger.info(
-        "VLM 검출: model=%s objects=%d targets=%s refusal=%r",
-        model, len(scene.objects), scene.target_object_ids, scene.refusal_reason,
-    )
-    return scene
-
-
-def _normalize(scene: VlmScene) -> VlmScene:
-    """모델 출력의 흔한 흠집을 코드에서 정리한다. 스키마가 못 잡는 것들이다.
-
-    - object_id 중복 (같은 이름을 두 번 붙이는 경우)
-    - 박스 좌표 뒤바뀜/범위 초과
-    - 존재하지 않는 object_id를 target으로 지목 (그라운딩 위반 — grounding.py와 같은 성격)
-    """
-    seen: set[str] = set()
-    for i, o in enumerate(scene.objects):
-        oid = o.object_id or f"{o.class_name or 'object'}_{i + 1}"
-        while oid in seen:
-            oid = f"{oid}_{i + 1}"
-        o.object_id = oid
-        seen.add(oid)
-
-        box = list(o.box_norm) + [0] * (4 - len(o.box_norm))
-        x1, y1, x2, y2 = (max(0, min(1000, int(v))) for v in box[:4])
-        o.box_norm = [min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2)]
-
-    unknown = [t for t in scene.target_object_ids if t not in seen]
-    if unknown:
-        logger.warning("VLM이 존재하지 않는 object_id를 지목했다: %s — 버린다", unknown)
-        scene.target_object_ids = [t for t in scene.target_object_ids if t in seen]
-        if not scene.target_object_ids and not scene.refusal_reason:
-            scene.refusal_reason = "지시 대상을 사진에서 찾지 못했습니다"
-    return scene
-
-
-# --- 후처리 ------------------------------------------------------------------
-
-def _pixel_box(box_norm: list[int], width: int, height: int) -> list[int]:
-    x1, y1, x2, y2 = box_norm
-    px = [round(x1 * width / 1000), round(y1 * height / 1000),
-          round(x2 * width / 1000), round(y2 * height / 1000)]
-    px[2] = max(px[2], px[0] + 1)      # 폭·높이 0인 박스는 SAM 프롬프트로 쓸 수 없다
-    px[3] = max(px[3], px[1] + 1)
-    return px
-
-
-def to_pixels(scene: VlmScene, width: int, height: int) -> list[dict]:
-    """정규화 박스를 픽셀 박스로. SAM에 넘길 형태([x1,y1,x2,y2] 픽셀)를 함께 담는다.
-
-    폭·높이가 0인 박스는 SAM 프롬프트로 쓸 수 없으므로 최소 1px을 보장한다.
-    """
-    out = []
-    for o in scene.objects:
-        px = _pixel_box(o.box_norm, width, height)
-        out.append({
-            "object_id": o.object_id,
-            "class_name": o.class_name,
-            "name_ko": o.name_ko,
-            "is_new_class": o.is_new_class,
-            "confidence": round(float(o.confidence), 3),
-            "box_norm": o.box_norm,
-            "box_xyxy": px,
-        })
-    return out
-
-
 # =============================================================================
 # 마크 라벨링 (Set-of-Mark) — SAM이 먼저, VLM이 나중
 # =============================================================================
 #
-# 위의 detect()는 VLM에게 좌표를 물어본다. **gpt-4o는 그 좌표를 못 맞춘다** —
-# 2026-09-07 실측에서 박스가 100px 단위로 뭉개지고 다른 물체 위에 얹혔다
-# (docs/vlm_sam_pipeline.md 실측 결과). 좌표를 못 맞추는 모델에게 좌표를 묻는 대신,
-# 순서를 뒤집는다:
+# VLM에게 좌표를 직접 물어보는 방식은 쓰지 않는다 — **gpt-4o는 그 좌표를 못 맞춘다**
+# (2026-09-07 실측: 박스가 100px 단위로 뭉개지고 다른 물체 위에 얹혔다. 이 방식은
+# 2026-09-09에 코드에서 걷어냈다 — docs/vlm_sam_pipeline.md 참조). 좌표를 못 맞추는
+# 모델에게 좌표를 묻는 대신, 순서를 뒤집는다:
 #
 #   SAM everything 모드로 마스크 후보를 전부 뽑는다  ← 좌표는 SAM이 만든다 (정확)
 #   → 마스크마다 번호를 그려 넣은 이미지를 VLM에 보낸다
@@ -390,16 +177,22 @@ class MarkLabel(BaseModel):
                     "이 값이 실제 파지력·접근속도가 된다",
     )
     confidence: float = Field(description="이 판단의 확신도 0.0~1.0")
-    reasoning: str = Field(
-        description="이름·속성·grip_level 판단의 근거를 한 문장으로. 예: '포장 글자로 확인함' "
-                    "/ '흔한 물티슈 포장 형태'. is_object=false면 빈 문자열",
-    )
-    mask_poly: list[list[list[float]]] = Field(
-        default_factory=list,
-        description="YOLO 학습용 마스크 윤곽선 좌표. 각 요소는 하나의 다각형(polygon), "
-                    "다각형은 [[x1,y1],[x2,y2],...] 형태의 정규화 좌표(0~1). "
-                    "SAM에서 추출 — 응답에만 사용, VLM 판단과 무관",
-    )
+    # **여기 reasoning(판단 근거 한 줄) 필드를 넣지 않는다.** 2026-09-09까지는 있었고
+    # 화면(ApprovalModal/ObjectList/DatasetPage)에 실제로 표시됐지만, 사용자 요청으로
+    # 이 기능 자체를 없앴다 — DetectedObject.msg/dataset_items.reasoning/프론트 표시까지
+    # 전부 함께 뗐다(006_drop_reasoning.sql 참조). 다시 붙이려면 이 필드부터 되돌리고
+    # 그 하위 배선을 전부 되짚어야 한다.
+    # **여기 mask_poly 필드를 넣지 않는다.** 한때 "YOLO 학습용 마스크 윤곽선"이라는 설명으로
+    # 있었는데, 이게 이 스키마(text_format=VlmMarkScene)로 구조화 출력을 걸면 **VLM이 그
+    # 필드도 직접 채워야 하는 값**이 된다 — 실제 윤곽선은 SAM이 계산해 별도 필드
+    # (mask_polys, sam_vlm.py→app.py._marks_to_yolo)로 채워지고 이 필드는 어디서도 읽지
+    # 않는데도(2026-09-09 확인: 코드 전체에 mark.mask_poly를 읽는 곳이 없다), 마크마다
+    # 자릿수 많은 좌표 배열을 "그럴듯하게" 만들어내려 하면서 output_tokens을 순식간에
+    # 다 써버려 응답이 잘렸다(status=incomplete, output_tokens=16384/16384, 2026-09-09
+    # 실물 — 4마크 요청에서 재현, web_search를 꺼도 그대로 재현돼 원인이 검색이 아니라
+    # 이 필드였음을 확인했다). 정말 필요없는 필드를 스키마에 넣으면 안 쓰는 데이터 때문에
+    # 모델이 큰 값을 지어내다 정작 필요한 필드(class_name 등)를 낼 자리가 없어질 수 있다는
+    # 교훈 — 서버가 이미 아는 값은 스키마에 넣지 않는다.
 
 
 def mask_to_polygons(mask: "np.ndarray") -> list[list[list[float]]]:
@@ -461,9 +254,6 @@ is_object=true로 두고, 나머지 조각은 is_object=false + part_of=대표�
 5. is_object=true인 번호마다 이름(class_name, name_ko)과 물리 속성(mass_g, fragile, \
 deformable, transparent), 그리고 파지력 단계(grip_level)를 사진을 보고 직접 판단한다. \
 is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, grip_level은 5로 둔다.
-6. is_object=true인 번호마다 reasoning에 판단 근거를 한 문장 적는다(예: "포장에 적힌 \
-글자로 확인함", "흔한 물티슈 포장 형태와 크기로 판단"). 작업자가 화면에서 왜 이렇게 \
-판단했는지 바로 알 수 있어야 한다 — "물체로 보임" 같은 동어반복은 쓰지 않는다.
 
 [이름 — 미리 주어지는 목록은 없다]
 당신에게 등록된 클래스 목록을 주지 않는다. 사진에 실제로 보이는 것을 보고 직접 이름을 짓는다.
@@ -496,22 +286,23 @@ is_object=false면 이름은 빈 문자열, 속성은 전부 false/0, grip_level
 **확신이 없으면 한 단계 조심스러운 쪽(숫자를 더 크게)으로 내린다** — 약하게 쥐면 놓치고 \
 다시 잡으면 되지만, 세게 쥐면 물체가 부서지고 되돌릴 수 없다.
 
-[확신이 없으면 검색으로 확인한다]
-겉모습만으로 종류를 짐작하면 비슷하게 생긴 다른 물건과 혼동한다(예: 치약 튜브를 초콜릿 바로
-착각). 그래서:
-1. 포장·라벨에 브랜드명, 제품명, 문구가 **읽힌다면** 먼저 그것을 읽는다.
-2. 그 글자만으로 정확한 제품(또는 최소한 제품 종류)을 확신할 수 없으면, 읽은 글자를 검색어로
-   `web_search` 도구를 **실제로 호출**해 무엇인지 확인한 뒤에 답한다. 짐작으로 채우지 않는다.
-3. 글자가 안 보이거나(라벨이 안 보이는 각도, 흐릿함) 흔한 생김새로 충분히 확신되면
-   (물티슈 팩, 우산, 봉제 인형처럼) 검색 없이 바로 답한다 — 매번 검색하지 않는다.
-4. 검색해도 특정할 수 없으면, 알아낸 범주까지만 이름에 담고(예: 정확한 브랜드 대신
-   toothpaste) confidence를 낮춘다. 지어내지 않는다.
-**이 확인은 class_name/name_ko뿐 아니라 mass_g·fragile·deformable·transparent·grip_level에도
-그대로 적용된다** — 무엇인지 잘못 알면 속성도 따라서 잘못된다.
+[검색 없이 사진만으로 판단한다]
+겉모습만으로 종류를 짐작하면 비슷하게 생긴 다른 물건과 혼동할 수 있다(예: 치약 튜브를
+초콜릿 바로 착각). 그렇더라도 **검색 도구는 쓸 수 없다** — 이 판단은 오직 사진에 보이는
+것만으로 한다:
+1. 포장·라벨에 브랜드명, 제품명, 문구가 **읽힌다면** 그것을 이름에 반영한다.
+2. 읽은 글자나 생김새만으로 정확한 제품을 확신할 수 없으면, 알아낸 범주까지만 이름에 담고
+   (예: 정확한 브랜드 대신 toothpaste) confidence를 낮춘다. **짐작을 확신처럼 답하지
+   않는다** — 모르면 모른다고 낮은 confidence로 드러내는 편이 틀린 이름을 단정하는 것보다
+   낫다.
+**이 판단은 class_name/name_ko뿐 아니라 mass_g·fragile·deformable·transparent·grip_level에도
+그대로 적용된다** — 무엇인지 잘못 알면 속성도 따라서 잘못된다. 확신이 없는 속성은 항상
+조심스러운 쪽(fragile 쪽, grip_level을 크게)으로 둔다.
 
 [하지 않는 것]
 - 3D 좌표·거리·파지 자세는 만들어내지 않는다. 그것은 depth 센서와 시스템이 정한다.
 - 사진에 보이지 않는 것(내용물, 유통기한, 재질 표기)을 지어내 속성 판단의 근거로 삼지 않는다.
+- 검색하지 않는다. 이 판단은 사진에 보이는 것만으로 낸다(위 [검색 없이 사진만으로 판단한다]).
 
 [지시는 오지 않는다]
 사용자가 무엇을 옮기라고 했는지는 이 단계에 주어지지 않는다. 그것을 알면 인지가 지시에
@@ -572,13 +363,16 @@ def label_marks(image: pathlib.Path | str, mark_ids: list[int],
                 {"type": "input_image", "image_url": data_url, "detail": detail},
             ],
         }],
-        # 겉모습만으로 확신할 수 없는 물체는 포장 글자를 검색어로 실제 검색을 시킨다
-        # (SYSTEM_PROMPT_MARKS의 [확신이 없으면 검색으로 확인한다]). 이미지 자체를
-        # 검색하지는 못한다 — 모델이 사진에서 읽은 텍스트로 질의를 만든다.
-        tools=[{"type": "web_search"}],
         text_format=VlmMarkScene,
         max_output_tokens=MARKS_MAX_OUTPUT_TOKENS,
     )
+    # web_search는 pharmacy에만 준다 — SYSTEM_PROMPT_MARKS [web_search는 pharmacy
+    # 도메인에서만 켠다] 참조. 다른 도메인은 검색 없이도 충분하고, 검색 결과가 출력
+    # 토큰을 먹으므로 꼭 필요한 곳에만 쓴다. max_tool_calls로 이 요청 전체의 호출
+    # 총횟수를 잘라 예산을 한 번 더 지킨다(openai 3.8.0 ResponseCreateParams.max_tool_calls).
+    if domain == "pharmacy":
+        request["tools"] = [{"type": "web_search"}]
+        request["max_tool_calls"] = MARKS_MAX_WEB_SEARCHES
     # **`.responses.parse()`가 아니라 `.responses.create()`(원본)를 쓴다.** `.parse()`는
     # 응답을 받자마자 **그 안에서** text_format으로 JSON 파싱까지 해 버린다(openai
     # SDK 3.8.0, lib/_parsing/_responses.py의 parse_response). 그래서 응답이 잘려 JSON이
@@ -616,19 +410,18 @@ def label_marks(image: pathlib.Path | str, mark_ids: list[int],
         raise RuntimeError(
             f"VLM 응답이 중간에 잘렸다 (status=incomplete, reason={reason}, "
             f"output_tokens={usage.output_tokens}/{MARKS_MAX_OUTPUT_TOKENS}) — "
-            f"마크 {len(mark_ids)}개, web_search 결과가 출력 토큰을 많이 써서 그럴 수 있다")
+            f"마크 {len(mark_ids)}개")
 
     output_text = "".join(
         item.text for out in response.output if out.type == "message"
         for item in out.content if item.type == "output_text")
     scene = parse_text(output_text, text_format=VlmMarkScene)
-    searched = sum(1 for item in response.output if item.type == "web_search_call")
 
     scene = _normalize_marks(scene, mark_ids)
     objects = [m for m in scene.marks if m.is_object]
     logger.info(
-        "VLM 마크 라벨링: model=%s marks=%d objects=%d 검색=%d회 (%s)",
-        model, len(scene.marks), len(objects), searched,
+        "VLM 마크 라벨링: model=%s marks=%d objects=%d (%s)",
+        model, len(scene.marks), len(objects),
         ", ".join(f"{m.mark_id}:{m.class_name}/g{m.grip_level}" for m in objects) or "없음",
     )
     return scene
@@ -662,7 +455,7 @@ def _normalize_marks(scene: VlmMarkScene, mark_ids: list[int]) -> VlmMarkScene:
             elif m.deformable and grip < 4:
                 m.grip_level = 4             # 눌리는 물체는 약하게
         else:
-            m.class_name, m.name_ko, m.reasoning = "", "", ""
+            m.class_name, m.name_ko = "", ""
             m.mass_g = 0.0
             m.fragile = m.deformable = m.transparent = False
             m.grip_level = 5                 # 물체가 아니므로 쓰이지 않지만 값은 보수적으로
