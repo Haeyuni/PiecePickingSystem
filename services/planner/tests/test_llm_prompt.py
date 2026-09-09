@@ -23,6 +23,15 @@ class LlmPromptTest(unittest.TestCase):
         self.assertIn("약 이름", prompt)
         self.assertIn("효능", prompt)
 
+    def test_pharmacy_excludes_non_oral_products(self):
+        """2026-09-09 실물: '머리가 아플 때 먹는 약'에 밴드(medica_band)를 잘못 승인한
+        사고 대응 — 먹는 약이 아닌 외용/처치용품(밴드·연고·안약)을 먼저 거르는 규칙."""
+        prompt = llm_client.build_user_prompt("머리가 아플 때 먹는 약 줘", WORLD,
+                                              domain="pharmacy")
+        self.assertIn("먹는 약", prompt)
+        self.assertIn("medica_band", prompt)
+        self.assertIn("검산", prompt)
+
     def test_recycle_classifies_by_material(self):
         """재활용: 재질별 분리를 목적으로 한다는 규칙이 들어간다."""
         prompt = llm_client.build_user_prompt("플라스틱 왼쪽, 캔 오른쪽", WORLD,
