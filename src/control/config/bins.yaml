@@ -32,7 +32,12 @@ bins:
       rear_left:   [391.268, -569.062, 131.276]
     # X/Y는 진단 기록이고 production geometry는 이 점의 Z만 floor_z로 사용한다.
     floor_point_base_mm: [321.596, -472.100, -5.512]
-    wall_margin_mm: 10.0
+    # 2026-09-09 (사용자 요청) 10.0 → 5.0 → 0.0: obj_028이 어떤 각도로도 0.7mm 초과해
+    # place가 거부됐다(box_geometry의 "object footprint does not fit inside measured
+    # box boundary"). "일단" 0으로 낮춰 거부를 완전히 없앤 것 — 물체 윤곽과 벽 사이
+    # 여유가 전혀 없다는 뜻이라 벽에 스치는 사고가 나면 이 값부터 다시 올릴 것
+    # (2026-09-06 이전에 그 사고로 여유를 올렸던 전례가 있다).
+    wall_margin_mm: 0.0
   right_box:
     # 2026-09-05 재실측: get_current_posx()로 읽은 로봇의 실제 TCP 자세(base 좌표계).
     # ZYZ 오일러(rx=26.6632, ry=-179.7805, rz=27.2262 deg) → 쿼터니언은
@@ -50,7 +55,10 @@ bins:
       rear_left:   [61.445, -574.749, 138.852]
     # X/Y는 진단 기록이고 production geometry는 이 점의 Z만 floor_z로 사용한다.
     floor_point_base_mm: [-0.451, -451.048, -7.903]
-    wall_margin_mm: 10.0
+    # 2026-09-09 (사용자 요청) 10.0 → 5.0 → 0.0: left_box와 같은 이유(box_geometry
+    # footprint 거부 완화, "일단" 0으로) — 두 바구니가 지금까지 같은 값을 써 왔으니
+    # 함께 낮춘다.
+    wall_margin_mm: 0.0
     # 2026-09-06 요청: 이 목적지만 안전 여유를 10mm 올린다(공용 30.0 → 40.0).
     # 물체 높이 보정이 들어온 뒤에도 유지한다 — 이 바구니가 왼쪽보다 10mm 낮게 실측돼
     # 있어서(pose.z 173.4 vs 183.8) 같은 여유를 줘도 실제 여유는 더 적기 때문이다.
