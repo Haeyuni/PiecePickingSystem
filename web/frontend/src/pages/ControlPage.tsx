@@ -5,7 +5,7 @@
  * WebSocket에는 재전송 큐가 없으므로(웹_인터페이스_정의서 4절), 이벤트로 부분 갱신하되
  * 재연결·최초 진입 시에는 스냅샷 API(`/api/traces/{id}`, `/api/world-state`)로 다시 받는다.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { getRecentTraces, getTrace, getWorldState } from '../api'
 import ApprovalModal from '../components/ApprovalModal'
@@ -15,6 +15,7 @@ import ObjectList from '../components/ObjectList'
 import RobotControls from '../components/RobotControls'
 import SafetyBanner from '../components/SafetyBanner'
 import StatusBar from '../components/StatusBar'
+import TaskCompleteModal from '../components/TaskCompleteModal'
 import TaskProgress from '../components/TaskProgress'
 import { useLive } from '../hooks/useLive'
 import type { ApprovalNeededEvent, DetectedObject, LiveEvent, RobotState, SafetyEvent, Trace, WorldState } from '../types'
@@ -37,6 +38,12 @@ export default function ControlPage() {
   // wake_word_detected를 받을 때마다 올린다 — CommandInput이 이 값의 변화를 보고 반응한다
   // (이벤트 자체엔 payload가 없어 카운터로 "새 이벤트가 왔다"만 표현하면 충분하다).
   const [wakeSignal, setWakeSignal] = useState(0)
+  // 계획이 전부 끝났을 때 띄우는 완료 팝업 — 닫을 때까지 그 시점의 trace를 붙들고 있는다
+  // (다음 명령이 들어와 trace가 바뀌어도 방금 끝난 작업의 결과를 보여줘야 한다).
+  const [completed, setCompleted] = useState<Trace | null>(null)
+  // 아직 진행 중인 것을 본 trace_id. 새로고침으로 이미 끝난 작업을 주워왔을 때
+  // (adoptRecentTrace) 팝업이 뜨지 않게 하고, 같은 작업에 두 번 뜨지도 않게 한다.
+  const runningTraceId = useRef<string | null>(null)
 
   const refreshWorld = useCallback(async () => {
     try {
@@ -146,6 +153,26 @@ export default function ControlPage() {
     void adoptRecentTrace()
   }, [refreshWorld, adoptRecentTrace])
 
+  // 계획이 끝나면 완료 팝업을 한 번 띄운다. execution_result마다 스냅샷을 다시 받으므로
+  // 그 결과인 trace만 보면 된다.
+  //
+  // "끝났다"는 전부 성공한 경우만이 아니다 — 스텝 하나가 실패하면 orchestrator가 시퀀스를
+  // 거기서 중단하고(_run_step의 조기 return) 뒤 스텝은 pending으로 남는다. 그래서
+  // 진행 중인 스텝이 없고, 전부 끝났거나 실패가 하나라도 있으면 끝난 것으로 본다.
+  useEffect(() => {
+    if (!trace || trace.steps.length === 0) return
+    const running = trace.steps.some((s) => s.status === 'in_progress')
+    const allDone = trace.steps.every((s) => s.status === 'success' || s.status === 'failure')
+    const aborted = trace.steps.some((s) => s.status === 'failure')
+    if (running || !(allDone || aborted)) {
+      runningTraceId.current = trace.trace_id
+      return
+    }
+    if (runningTraceId.current !== trace.trace_id) return
+    runningTraceId.current = null
+    setCompleted(trace)
+  }, [trace])
+
   // 재연결 시 놓친 이벤트를 재생하는 대신 현재 상태를 다시 받는다 (4절)
   useEffect(() => {
     if (!connected) return
@@ -202,6 +229,10 @@ export default function ControlPage() {
 
       {approval && (
         <ApprovalModal event={approval} onResolved={() => setApproval(null)} />
+      )}
+
+      {completed && !approval && (
+        <TaskCompleteModal trace={completed} onClose={() => setCompleted(null)} />
       )}
     </div>
   )
