@@ -5,8 +5,8 @@
 - **목표**: 품목이 바뀔 때마다 재티칭·재프로그래밍하는 비용을 없애는 것.  
 사람이 말이나 글로 내린 지시를 로봇이 그대로 해석해 물체를 골라 집고 지정한 곳에 놓는다.
 - **주요 기능**: 도메인(가정·약국·재활용)을 고른 뒤 명령을 넣으면 관측 → LLM 계획 →
-  검증 → 사용자 승인 → `pick` → `place_into`가 이어진다.  
-  등록 어휘가 없는 물체도 SAM+VLM 경로로 인지하고 실행 결과와 라벨은 데이터셋·실행 로그로 쌓인다
+  검증 → 사용자 승인 → `pick` → `place_into` 실행.
+  등록 어휘가 없는 물체도 SAM+VLM 경로로 인지하고 실행 결과와 라벨은 데이터셋·실행 로그로 쌓인다.
 - **사용 장비**: Doosan M0609 (6축 협동로봇), OnRobot RG2 그리퍼, RealSense RGB-D (eye-in-hand)
 - **개발 환경**: Ubuntu 24.04 LTS, ROS 2 Jazzy, Docker Compose
 - **주요 기술 스택**: ROS 2, FastAPI + rclpy 브리지, React (Vite/TypeScript), PostgreSQL 16, OpenAI API (LLM/VLM), YOLO11-seg · SAM2, GraspNet-baseline
