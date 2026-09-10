@@ -153,7 +153,7 @@ def test_busy_inference_does_not_become_empty_candidates():
         graspnet_baseline._INFERENCE_LOCK.release()
 
 
-def test_top_k_candidates_are_kept_in_score_order():
+def test_refined_pool_is_kept_in_score_order():
     """**Top-K가 유지돼야 한다.** 예전에는 최고점 하나만 돌려줘서 웹 시각화와 이후의
     최종 선택 알고리즘이 쓸 후보가 남지 않았다(2026-09-07).
     """
@@ -161,9 +161,9 @@ def test_top_k_candidates_are_kept_in_score_order():
     raws = [_raw(rotation, [0.01 * i, 0.0, 0.5], score=0.1 * i) for i in range(1, 8)]
 
     picked, diagnostics = graspnet_baseline._select_candidates(
-        raws, np.eye(4), np.eye(4), 75.0, points_base=None, top_k=5)
+        raws, np.eye(4), np.eye(4), 75.0, points_base=None, refine_pool_size=5)
 
-    assert len(picked) == 5, "top_k 만큼 유지돼야 한다"
+    assert len(picked) == 5, "refine_pool_size 만큼 유지돼야 한다"
     assert diagnostics['raw_count'] == 7
     scores = [c['score'] for c in picked]
     assert scores == sorted(scores, reverse=True), "점수 내림차순이어야 한다"
@@ -175,12 +175,12 @@ def test_top_k_candidates_are_kept_in_score_order():
         assert set(c) >= {'pose', 'width_mm', 'score', 'grasp_depth_mm', 'strategy'}
 
 
-def test_top_k_is_capped_by_available_candidates():
-    """후보가 top_k보다 적으면 있는 만큼만 — 빈 자리를 만들지 않는다."""
+def test_refined_pool_is_capped_by_available_candidates():
+    """후보가 refine_pool_size보다 적으면 있는 만큼만 — 빈 자리를 만들지 않는다."""
     rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
     picked, _ = graspnet_baseline._select_candidates(
         [_raw(rotation, [0.0, 0.0, 0.5])], np.eye(4), np.eye(4), 75.0,
-        points_base=None, top_k=10)
+        points_base=None, refine_pool_size=10)
     assert len(picked) == 1
 
 
@@ -245,20 +245,22 @@ def test_legacy_pass_count_is_reported_for_comparison():
     assert diagnostics['hard_max_deg'] == 75.0
 
 
-def test_top_k_still_caps_the_widened_policy():
-    """Case 5 — 각도를 풀어 후보가 늘어도 world_state로 나가는 수는 top_k로 묶인다."""
+def test_refine_pool_still_caps_the_widened_policy():
+    """Case 5 — 각도를 풀어 후보가 늘어도 되잡기 pool은 refine_pool_size로 묶인다.
+
+    world_state로 나가는 수는 그 뒤 execution_pool_size(다양성 선택)가 다시 묶는다."""
     raws = [_tilted(5.0 + i * 4.0, score=0.9 - i * 0.01) for i in range(15)]
     picked, diagnostics = graspnet_baseline._select_candidates(
-        raws, np.eye(4), np.eye(4), 75.0, points_base=None, top_k=10)
+        raws, np.eye(4), np.eye(4), 75.0, points_base=None, refine_pool_size=10)
     assert diagnostics['passed_count'] == 15
-    assert len(picked) == 10, "top_k가 상한 역할을 그대로 해야 한다"
+    assert len(picked) == 10, "refine_pool_size가 상한 역할을 그대로 해야 한다"
     scores = [c['score'] for c in picked]
     assert scores == sorted(scores, reverse=True)
 
 
 def test_hard_max_default_ignores_the_old_key():
     """예전 키가 남아 있는 설정 파일에서 30도가 그대로 상한이 되면 2.5차가 무효가 된다."""
-    assert graspnet_baseline._hard_max_deg({'approach_angle_max_deg': 30.0}) == pytest.approx(75.0)
+    assert graspnet_baseline._hard_max_deg({'approach_angle_max_deg': 30.0}) == pytest.approx(45.0)
     assert graspnet_baseline._hard_max_deg({'approach_angle_hard_max_deg': 60.0}) == pytest.approx(60.0)
 
 
@@ -375,7 +377,7 @@ def test_rejected_candidates_are_backfilled_from_the_next_ones():
     rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
     raws = [_raw(rotation, [0.0, 0.0, 0.040], score=0.9 - i * 0.01) for i in range(8)]
     picked, diagnostics = graspnet_baseline._select_candidates(
-        raws, T_base_camera, T_graspnet_tcp, 75.0, points_base=points, top_k=5)
+        raws, T_base_camera, T_graspnet_tcp, 75.0, points_base=points, refine_pool_size=5)
     assert len(picked) == 5
-    assert diagnostics['topk_count'] == 5
+    assert diagnostics['refine_valid'] == 5
     assert diagnostics['examined_count'] >= 5

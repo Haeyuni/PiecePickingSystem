@@ -126,36 +126,42 @@ class MotionErrorMonitorTest(unittest.TestCase):
         self.assertIsNone(monitor.since(time.monotonic()))
 
 
-class RetryLowerTest(unittest.TestCase):
-    """place_server._retry_lower — 안전고도를 낮춰 다시 해 볼지 판단."""
+class SafeTransitHeightTest(unittest.TestCase):
+    """**안전 이송고도는 IK 때문에 낮추지 않는다** (STEP 2, 2026-09-10).
 
-    def setUp(self):
-        self.logs = []
-        self.retry_lower = _method(CONTROL / "place_server.py", "PlaceServer",
-                                   "_retry_lower", {})
+    예전에는 `_retry_lower`가 컨트롤러 알람을 보고 20mm씩 낮춰 다시 시도했다. 그 높이는
+    물체를 **든 채** 작업대·바구니 테두리를 넘어가라고 둔 값이라, IK 사정으로 깎으면 그
+    높이를 둔 이유 자체가 사라진다. 이제는 높이를 고정하고 solution space·경로를 바꿔
+    찾고, 그래도 없으면 SAFE_TRANSIT_UNREACHABLE로 실패한다.
+    """
 
-    def _server(self, reason):
-        return NS(_motion_errors=NS(since=lambda _t: reason),
-                  get_logger=lambda: NS(info=self.logs.append,
-                                        warning=self.logs.append,
-                                        error=self.logs.append))
+    def test_lowering_helpers_are_gone_from_production(self):
+        source = (CONTROL / "place_server.py").read_text(encoding="utf-8")
+        self.assertNotIn("_retry_lower", source)
+        self.assertNotIn("_reachable_z(", source)
+        self.assertNotIn("transit_z - 20", source)
 
-    def test_lowers_on_not_reachable_alarm(self):
-        ok = self.retry_lower(self._server("컨트롤러 알람 code=1206 NOT REACHABLE"),
-                              321.6, 263.8, time.monotonic(), "수평 이동")
-        self.assertTrue(ok)
+    def test_failure_reason_exists_in_the_action(self):
+        source = CONTROL.parents[1] / "sort_msgs" / "action" / "PlaceInto.action"
+        installed = pathlib.Path(
+            "/ros2_ws/install/sort_msgs/share/sort_msgs/action/PlaceInto.action")
+        action = (source if source.is_file() else installed).read_text(encoding="utf-8")
+        self.assertIn("REASON_SAFE_TRANSIT_UNREACHABLE=safe_transit_unreachable", action)
 
-    def test_does_not_lower_without_alarm(self):
-        """알람이 없으면 다른 원인이다 — 높이를 깎아 원인을 가리면 안 된다."""
-        ok = self.retry_lower(self._server(None), 321.6, 263.8, time.monotonic(), "수평 이동")
-        self.assertFalse(ok)
+    def test_transit_failure_maps_to_safe_transit_unreachable(self):
+        """이송 불가는 place_failed가 아니라 전용 사유로 보고돼야 한다 — 원인이 다르다."""
+        source = (CONTROL / "place_server.py").read_text(encoding="utf-8")
+        self.assertIn("except _SafeTransitUnreachable", source)
+        self.assertIn("REASON_SAFE_TRANSIT_UNREACHABLE", source)
 
-    def test_stops_at_floor(self):
-        """접근 높이 아래로는 못 내려간다 — 그 밑은 바구니 테두리다."""
-        ok = self.retry_lower(self._server("컨트롤러 알람 code=1206 NOT REACHABLE"),
-                              263.8, 263.8, time.monotonic(), "수평 이동")
-        self.assertFalse(ok)
-        self.assertTrue(any("더 낮출 수 없다" in line for line in self.logs))
+    def test_post_release_rise_may_still_lower(self):
+        """물체를 **놓은 뒤**의 복귀 상승은 낮춰도 된다 — 걸릴 물체가 없다.
+
+        이 구분이 사라지면 "안전고도를 낮추지 않는다"가 무의미해지므로 함께 고정한다.
+        """
+        source = (CONTROL / "place_server.py").read_text(encoding="utf-8")
+        self.assertIn("_reachable_rise_z", source)
+        self.assertIn("이미 물체를 놓은 뒤라", source)
 
 
 if __name__ == "__main__":

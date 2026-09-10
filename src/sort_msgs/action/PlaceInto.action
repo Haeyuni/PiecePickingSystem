@@ -32,6 +32,14 @@ string REASON_NO_CONTACT=no_contact
 string REASON_PLACE_FAILED=place_failed
 string REASON_UNREACHABLE=unreachable
 string REASON_COLLISION_EXPECTED=collision_expected
+# 안전 이송 높이(safe_z)에서 바구니 상공까지 갈 방법을 못 찾았다 — 어떤 solution space,
+# 어떤 경로로도 안 된다는 뜻이다(2026-09-10, STEP 2).
+#
+# **이 경우 높이를 낮춰 억지로 성공시키지 않는다.** 예전에는 IK가 안 풀리면 안전고도를
+# 20mm씩 낮춰 재시도했는데, 그 높이는 이동 중 물체가 작업대·바구니 테두리를 넘어가라고
+# 둔 값이라 IK 사정으로 깎으면 그 높이를 둔 이유 자체가 사라진다. 도달 못 하면 그대로
+# 실패로 보고하고, 사람이 배치를 바꾸거나 목적지를 조정하게 한다.
+string REASON_SAFE_TRANSIT_UNREACHABLE=safe_transit_unreachable
 string failure_reason
 
 int32 retries_used

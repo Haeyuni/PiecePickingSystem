@@ -65,6 +65,26 @@ def test_keeps_pick_orientation_when_it_already_fits():
     assert plan.target_tcp_posx[3:] == pytest.approx((12, 178, -5))
 
 
+def test_skip_yaws_moves_on_to_the_next_fitting_angle():
+    """place_server가 한 자세로는 안전 이송이 안 된다고 확인하면 그 각을 건너뛰고
+    다음으로 잘 맞는 각을 받아야 한다(STEP 3, 2026-09-10) — 바구니엔 들어가지만
+    갈 수 없는 자세에 계속 머물면 안 된다."""
+    kwargs = dict(
+        box=measured_box(), wall_margin_mm=5, release_clearance_mm=10,
+        pickup_tcp_posx=[30, 20, 100, 12, 178, -5],
+        footprint_xy=[(20, 10), (40, 10), (40, 30), (20, 30)],
+        tcp_to_object_bottom_mm=35,
+    )
+    baseline = plan_box_place(**kwargs)
+    assert baseline.yaw_deg == 0
+
+    skipped = plan_box_place(**kwargs, skip_yaws={0.0})
+    assert skipped.yaw_deg != 0
+    # 작은 정사각형 발자국이라 다음 후보(±1도)에서도 바로 들어간다 — _yaw_candidates의
+    # 탐색 순서(0, +1, -1, +2, -2, ...)를 그대로 지킨다.
+    assert skipped.yaw_deg == 1.0
+
+
 def test_rotates_object_that_only_fits_across_the_other_axis():
     """긴 물체가 바구니 짧은 축과 나란하면 예전엔 거절됐다 — 이제 돌려서 넣는다.
 

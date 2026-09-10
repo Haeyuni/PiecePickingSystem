@@ -59,7 +59,7 @@ from perception_common.image_utils import image_to_numpy
 from perception_common.paths import find_repo_path
 from perception_common.robot_pose import RobotPoseClient
 
-from . import pointcloud_utils, strategies
+from . import diverse_pool, pointcloud_utils, strategies
 from .config_utils import asset_path
 from .strategies.exceptions import InferenceBusy
 from .strategies.graspnet_baseline import _NoUprightCandidate
@@ -152,6 +152,14 @@ class GraspNode(Node):
             **(config.get(self._strategy_name) or {}),
         }
         self._pointcloud_params = config.get("pointcloud") or {}
+        # 실행 후보 수 = 최종 pose 다양성 선택(diverse_pool) 이후 world_state에 실리는 수.
+        # 되잡기 목표치(refine_pool_size, 전략이 읽는다)와 **다른 값**이다 — STEP 1에서
+        # 둘의 의미를 분리했다(grasp_params.yaml 주석 참조).
+        self._execution_pool_size = int(self._strategy_params.get("execution_pool_size", 10))
+        self._diversity_position_scale_mm = float(self._strategy_params.get(
+            "diversity_position_scale_mm", diverse_pool.DEFAULT_POSITION_SCALE_MM))
+        self._diversity_orientation_scale_deg = float(self._strategy_params.get(
+            "diversity_orientation_scale_deg", diverse_pool.DEFAULT_ORIENTATION_SCALE_DEG))
         # graspnet_baseline이 실제로 추론에 넣은 물체 단일 포인트클라우드를 남기는 곳.
         # fine-tuning에는 grasp_pose+성공/실패만으로 부족하고 그 판정의 근거인 입력 자체가
         # 필요하다 — perception._observations_dir(D-6)와 같은 원칙.
@@ -381,6 +389,9 @@ class GraspNode(Node):
                if c.get('hard_deg') is not None else f"filtered={c['passed']} ")
             + (f"검사={c['examined']} " if c.get('examined') is not None else "")
             + (f"geom탈락={dict(c['geom_rejects'])} " if c.get('geom_rejects') else "")
+            + (f"refine시도={c['refine_attempted']} refine유효={c['refine_valid']} "
+               if c.get('refine_valid') is not None else "")
+            + (f"diverse={c['diverse']} " if c.get('diverse') is not None else "")
             + f"published={c['published']}"
             + (f" angles={c['angles']}" if c.get('angles') else "")
             for oid, c in self._candidate_counts.items())
@@ -513,7 +524,7 @@ class GraspNode(Node):
         #   valid      회전행렬·수치가 정상인 것
         #   legacy     **예전 30도 정책이었으면** 통과했을 수 (2.5차 비교용)
         #   passed     새 정책(접근각 hard 상한)을 통과한 것
-        #   published  world_state에 실린 것 (= min(passed, top_k))
+        #   published  world_state에 실린 것 (= 다양성 선택 후 execution_pool_size 이하)
         # graspnet_baseline만 진단을 실어 보내므로, 없으면(PCA) 전략 반환 수로 채운다.
         stage = {
             "raw": (debug or {}).get("raw_count", len(candidates)),
@@ -524,6 +535,10 @@ class GraspNode(Node):
             # 물체 중심으로 끌어오는 대신 버리므로, 몇 개가 왜 빠졌는지가 보여야 한다.
             "geom_rejects": (debug or {}).get("geometry_rejects") or {},
             "examined": (debug or {}).get("examined_count"),
+            # STEP 1: 되잡기를 몇 개 시도해서 몇 개가 유효했나(= refined valid pool).
+            # 실행 후보 수(diverse)는 그 pool에서 다양성으로 고른 뒤에 채워진다.
+            "refine_attempted": (debug or {}).get("refine_attempted"),
+            "refine_valid": (debug or {}).get("refine_valid"),
             "legacy_deg": (debug or {}).get("legacy_max_deg"),
             "hard_deg": (debug or {}).get("hard_max_deg"),
             # 후보별 접근각(도). 각도 정책을 튜닝하려면 "몇 개가 걸렸나"만으로는 부족하고
@@ -537,7 +552,12 @@ class GraspNode(Node):
             if isinstance(c, dict) else None
             for c in candidates]
         candidates = [self._fit_grasp_depth(c, obj) for c in candidates]
+        stage["depth_fitted"] = len(candidates)
         self._log_candidate_geometry(object_id, obj, candidates, before_depth_fit)
+        # **최종 pose 기준 Diverse-TopK** (STEP 1, 2026-09-10). 반드시 _fit_grasp_depth
+        # 뒤다 — 깊이 맞춤은 접근축을 따라 움직이므로 기울어진 파지에서는 XY도 같이
+        # 바뀐다. 그 전에 다양성을 재면 실제 실행될 자세가 아닌 좌표로 고르게 된다.
+        candidates = self._diverse_pool(object_id, candidates, stage)
         # candidate_id는 "<object_id>#<순위>"다. 순위 0이 1순위(점수 최고)지만, **실행할
         # 후보는 control이 고른다**(control/grasp_selection.py — 개폭·IK·관절·최소안전을
         # 보고 랭킹). 로그·웹·planner·control이 같은 후보를 가리킬 수 있어야 Top-K를
@@ -547,6 +567,37 @@ class GraspNode(Node):
         stage["published"] = len(messages)
         self._candidate_counts[object_id] = stage
         return messages
+
+    def _diverse_pool(self, object_id: str, candidates: list, stage: dict) -> list:
+        """refined valid pool(최대 refine_pool_size) → 실행 후보(execution_pool_size).
+
+        고르는 기준은 위치·접근축·닫힘축 세 가지뿐이다(diverse_pool.distance_matrix).
+        GraspNet score 최고 후보는 seed로 **보존**되지만, 그것이 실행 강제는 아니다 —
+        최종 선택은 control이 IK·개폭·랭킹으로 한다.
+
+        같은 pool을 score-only Top-K로 잘랐을 때와 비교해 [POOL_COMPARE]로 남긴다.
+        **추론·되잡기를 다시 돌리지 않는다** — 이미 계산된 pool 하나를 두 가지로 읽을 뿐이다.
+        """
+        if len(candidates) <= 1:
+            stage["diverse"] = len(candidates)
+            return candidates
+        chosen, diagnostics = diverse_pool.pool_from_candidates(
+            candidates, self._execution_pool_size,
+            self._diversity_position_scale_mm, self._diversity_orientation_scale_deg)
+        stage["diverse"] = len(chosen)
+        before, after = diagnostics["spread_before"], diagnostics["spread_after"]
+        self.get_logger().info(
+            f"[POOL_COMPARE] {object_id} refined_valid={len(candidates)} "
+            f"서로다른자세={diagnostics['distinct_poses']} "
+            f"pool={self._execution_pool_size}→{len(chosen)} "
+            f"score_top_source_ranks={diagnostics['score_top_ranks']} "
+            f"diverse_source_ranks={diagnostics['diverse_ranks']} "
+            f"common={diagnostics['common']} replaced={diagnostics['replaced']} | "
+            f"position_spread {before['position_mm']}→{after['position_mm']}mm "
+            f"approach_spread {before['approach_deg']}→{after['approach_deg']}deg "
+            f"closing_spread {before['closing_deg']}→{after['closing_deg']}deg",
+            throttle_duration_sec=2.0)
+        return [candidates[i] for i in chosen]
 
     def _log_candidate_geometry(self, object_id, obj, candidates, before_depth_fit) -> None:
         """후보가 **실제로 그 물체에 걸쳐 있는지**를 단계별로 한 줄씩 남긴다 (2026-09-08).
@@ -856,6 +907,9 @@ class GraspNode(Node):
         msg.grasp_depth_mm = float(candidate.get("grasp_depth_mm", 0.0) or 0.0)
         msg.gripper_width_mm = float(candidate.get("width_mm") or 0.0)
         msg.point_cloud_path = str(candidate.get("point_cloud_path") or "")
+        # -1(미상)과 0.0(지지 없음)은 뜻이 다르다 — `or`로 쓰면 0.0이 -1로 뒤집힌다.
+        contact = candidate.get("contact_support_score")
+        msg.contact_support_score = float(contact) if contact is not None else -1.0
         return msg
 
 

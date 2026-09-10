@@ -399,6 +399,24 @@ def _rotation_from_pose(pose):
 _FLIP_ABOUT_APPROACH = ((-1.0, 0.0, 0.0), (0.0, -1.0, 0.0), (0.0, 0.0, 1.0))
 
 
+def flipped_wrist_posx(posx):
+    """같은 물리적 파지를 나타내는 **뒤집힌 손목 표현**의 posx (접근축 둘레 180도).
+
+    평행 그리퍼는 닫힘축 부호가 반대여도 같은 파지다(nearest_equivalent_grasp_rotation
+    주석 참조) — 위치는 그대로 두고 회전만 뒤집는다. 원래 표현으로 IK가 안 풀릴 때
+    다른 관절 자세로 같은 파지를 시도하기 위한 것이다(STEP 2 multi-IK).
+
+    **place에는 쓰면 안 된다.** 물체를 들고 있을 때 손목을 뒤집으면 물체의 방향이 함께
+    바뀌므로 "같은 작업"이 아니다.
+    """
+    import numpy as np
+
+    rotation = posx_to_matrix([0.0, 0.0, 0.0, *list(posx)[3:6]])[:3, :3]
+    rx, ry, rz = matrix_to_zyz_deg(
+        np.asarray(rotation) @ np.asarray(_FLIP_ABOUT_APPROACH))
+    return [float(posx[0]), float(posx[1]), float(posx[2]), rx, ry, rz]
+
+
 def nearest_equivalent_grasp_rotation(rotation, current_zyz_deg):
     """같은 파지를 나타내는 두 자세(R, R·Rz180) 중 **현재 손목 자세에 가까운 쪽**을 고른다.
 

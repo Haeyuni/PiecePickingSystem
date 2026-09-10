@@ -81,12 +81,15 @@ def geometry_of(candidate_pose):
                            pad_reference_mm=[float(p.x), float(p.y), float(p.z)])
 
 
-def run(candidates, context=None, params=None, ik=None):
+def run(candidates, context=None, params=None, ik=None, mode="legacy"):
     params = params or gs.SelectionParams()
     ik = ik or FakeIk()
     evaluations = gs.evaluate_candidates(candidates, context or obj(), params,
                                          geometry_of, ik)
-    return evaluations, gs.select(evaluations)
+    # select()는 (실제 선택, legacy_best, enhanced_best) 3-튜플이다(STEP 1). mode를
+    # 주지 않으면 legacy — 이 파일의 기존 테스트는 전부 기존 release 랭킹을 검증한다.
+    selected, _legacy_best, _enhanced_best = gs.select(evaluations, mode=mode)
+    return evaluations, selected
 
 
 class TestStatusContract(unittest.TestCase):
@@ -479,7 +482,7 @@ class GeometryInvalidInPipelineTest(unittest.TestCase):
         self.assertEqual(evaluations[0].status, gs.STATUS_GEOMETRY_INVALID)
         self.assertIsNone(evaluations[0].total_score)
         # 다음 후보는 정상적으로 선택될 수 있어야 한다 (motion 전에 넘어간다)
-        self.assertEqual(gs.select(evaluations).candidate.rank, 1)
+        self.assertEqual(gs.select(evaluations)[0].candidate.rank, 1)
 
     def test_ik_is_not_queried_for_geometry_invalid(self):
         """ikin 왕복은 후보당 약 66ms — 못 쓸 후보에 쓰지 않는다."""

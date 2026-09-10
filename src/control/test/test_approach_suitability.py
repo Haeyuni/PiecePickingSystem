@@ -133,12 +133,14 @@ class CandidateSurvivalTest(unittest.TestCase):
         for evaluation in evaluations:
             self.assertEqual(evaluation.status, gs.STATUS_VALID, evaluation.rejection_reason)
             self.assertIsNotNone(evaluation.total_score)
-            self.assertIsNotNone(evaluation.terms["approach_angle"])
+            self.assertIsNotNone(evaluation.legacy_terms["approach_angle"])
 
     def test_case2_but_they_rank_below_upright_ones(self):
         """살아남되 **우대받지는 않는다** — 수직에 가까운 후보가 위에 있어야 한다."""
         evaluations = evaluate([10.0, 55.0])
-        self.assertGreater(evaluations[0].total_score, evaluations[1].total_score)
+        # 접근각은 legacy 랭킹의 항이다(STEP 1에서 enhanced에는 중복해서 넣지 않았다) —
+        # 실제 실행이 쓰는 점수가 legacy이므로 여기서도 그 점수로 순위를 본다.
+        self.assertGreater(evaluations[0].legacy_score, evaluations[1].legacy_score)
 
     def test_angle_recorded_even_when_rejected(self):
         """Case 4 근거 — IK로 떨어진 후보의 각도도 남아야 hard 상한을 조정할 수 있다."""
@@ -166,7 +168,7 @@ class ApproachTravelTest(unittest.TestCase):
         """현재 자세를 못 읽어도(aux_control 무응답) 나머지 판정은 그대로 돌아야 한다."""
         evaluations = evaluate([10.0])
         self.assertIsNone(evaluations[0].approach_travel_mm)
-        self.assertIsNone(evaluations[0].terms["approach_travel"])
+        self.assertIsNone(evaluations[0].legacy_terms["approach_travel"])
         self.assertIsNotNone(evaluations[0].total_score)
 
     def test_shorter_travel_scores_higher(self):
@@ -185,14 +187,14 @@ class RankingReversalTest(unittest.TestCase):
     def test_better_approach_can_beat_higher_graspnet_score(self):
         # 0번: score 높지만 거의 옆에서 찌른다 / 1번: score 낮지만 수직에 가깝다
         evaluations = evaluate([65.0, 8.0], scores=[0.90, 0.62])
-        selected = gs.select(evaluations)
+        selected = gs.select(evaluations)[0]
         self.assertEqual(selected.candidate.rank, 1,
                          "접근이 자연스러운 후보가 선택될 수 있어야 한다")
 
     def test_graspnet_score_still_wins_when_approach_is_comparable(self):
         """각도가 비슷하면 GraspNet 품질이 그대로 순위를 정해야 한다 — 뒤집기만 하면 안 된다."""
         evaluations = evaluate([12.0, 14.0], scores=[0.90, 0.40])
-        selected = gs.select(evaluations)
+        selected = gs.select(evaluations)[0]
         self.assertEqual(selected.candidate.rank, 0)
 
     def test_angle_decides_within_the_real_graspnet_score_spread(self):
@@ -202,7 +204,7 @@ class RankingReversalTest(unittest.TestCase):
         이 구간에서는 각도가 순위를 정해야 한다 — 그러라고 넣은 항이다.
         """
         evaluations = evaluate([58.0, 11.0], scores=[0.372, 0.346])
-        self.assertEqual(gs.select(evaluations).candidate.rank, 1)
+        self.assertEqual(gs.select(evaluations)[0].candidate.rank, 1)
 
     def test_large_score_gap_still_wins(self):
         """교차점을 못박아 둔다: 각도 만점 차이(0.10) = grasp_score 0.333 차이(0.30 x 0.333).
@@ -213,7 +215,7 @@ class RankingReversalTest(unittest.TestCase):
         올린다(그 값이 이 교차점을 직접 옮긴다).
         """
         evaluations = evaluate([74.0, 5.0], scores=[1.0, 0.55])   # 차이 0.45 > 0.333
-        self.assertEqual(gs.select(evaluations).candidate.rank, 0)
+        self.assertEqual(gs.select(evaluations)[0].candidate.rank, 0)
 
 
 class LogLineTest(unittest.TestCase):

@@ -123,11 +123,18 @@ def _footprint_overflow_mm(points, polygon, margin_mm: float) -> float:
 
 def plan_box_place(*, box: BoxGeometry, wall_margin_mm: float,
                    release_clearance_mm: float, pickup_tcp_posx,
-                   footprint_xy, tcp_to_object_bottom_mm: float) -> PlacePlan:
+                   footprint_xy, tcp_to_object_bottom_mm: float,
+                   skip_yaws: set | None = None) -> PlacePlan:
     """Center the observed footprint and require its whole boundary inside the box.
 
     파지 자세 그대로 들어가면 그대로 놓고, 안 들어가면 수직축으로 돌려서 들어가는 각을
     찾는다(`_fit_yaw`). 어떤 각으로도 안 들어가면 **얼마나 모자랐는지를 붙여** 거절한다.
+
+    `skip_yaws`는 이미 시도해서 안전 이송 불가로 확인된 각들이다(STEP 3, 2026-09-10).
+    호출부(place_server._execute_geometry_place)가 한 각으로 이송 자체가 불가능하면
+    (바구니에는 들어가지만 그 자세로 갈 방법이 없으면) 그 각을 여기 넣고 다시 불러
+    **다음으로 잘 맞는 각**을 받는다 — 바구니에 들어가는지만 보고 끝내지 않고, 갈 수
+    있는 자세 중에서 고르게 된다.
     """
     footprint = tuple((float(x), float(y)) for x, y in footprint_xy)
     tcp = tuple(float(v) for v in pickup_tcp_posx)
@@ -145,7 +152,8 @@ def plan_box_place(*, box: BoxGeometry, wall_margin_mm: float,
     footprint_center = _centroid(footprint)
 
     yaw_deg, translated, overflow_mm = _fit_yaw(
-        footprint, footprint_center, bin_center, box.corners_xy, float(wall_margin_mm))
+        footprint, footprint_center, bin_center, box.corners_xy, float(wall_margin_mm),
+        skip=skip_yaws)
     if yaw_deg is None:
         raise ValueError(
             "object footprint does not fit inside measured box boundary "
@@ -176,7 +184,8 @@ def _rotate_about(point, pivot, yaw_deg: float, new_pivot):
             new_pivot[1] + dx * sin_a + dy * cos_a)
 
 
-def _fit_yaw(footprint, footprint_center, bin_center, corners_xy, wall_margin_mm):
+def _fit_yaw(footprint, footprint_center, bin_center, corners_xy, wall_margin_mm,
+            skip=None):
     """바구니에 들어가는 수직축 회전각을 찾는다. 반환: (각도 또는 None, 옮긴 footprint, 초과 mm).
 
     **0도(=파지 자세 그대로)를 가장 먼저, 그다음 작은 각도부터 본다.** 손목을 덜 돌릴수록
@@ -189,9 +198,14 @@ def _fit_yaw(footprint, footprint_center, bin_center, corners_xy, wall_margin_mm
     0으로 줄여도 안 되는(3.9mm 모자란) 경우라 회전 말고는 방법이 없었다.
 
     회전은 손목만 돌리고 파지 자체는 그대로다(물체는 그리퍼에 잡힌 채 같이 돈다).
+
+    `skip`에 있는 각은 건너뛴다 — 바구니에는 들어가지만 이송 자체가 불가능하다고 이미
+    확인된 각들이다(`plan_box_place`의 `skip_yaws` 참조).
     """
     best_overflow = math.inf
     for yaw_deg in _yaw_candidates():
+        if skip and yaw_deg in skip:
+            continue
         moved = tuple(_rotate_about(point, footprint_center, yaw_deg, bin_center)
                       for point in footprint)
         overflow = _footprint_overflow_mm(moved, corners_xy, wall_margin_mm)

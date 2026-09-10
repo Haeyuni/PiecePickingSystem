@@ -105,6 +105,13 @@ def _candidate_to_msg(candidate: dict) -> GraspCandidate:
     msg.candidate_id = str(candidate.get("candidate_id") or "")
     msg.grasp_depth_mm = float(candidate.get("grasp_depth_mm") or 0.0)
     msg.strategy = str(candidate.get("strategy") or "")
+    # **왕복에서 빠뜨리면 조용히 기본값이 된다.** point_cloud_path는 여기서 누락돼 있어
+    # web→control 방향에서 사라지고 있었다(2026-09-10, STEP 1에서 발견).
+    msg.point_cloud_path = str(candidate.get("point_cloud_path") or "")
+    # contact_support_score는 -1(미상)과 0.0(지지 없음)의 뜻이 달라 `or`를 쓰면 안 된다 —
+    # 0.0이 falsy라 미상으로 뒤집힌다. 값이 아예 없을 때만 -1로 채운다.
+    contact = candidate.get("contact_support_score")
+    msg.contact_support_score = float(contact) if contact is not None else -1.0
     return msg
 
 
@@ -169,6 +176,10 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                         # fine-tuning용 원본 클라우드 경로(graspnet_baseline만 채움).
                         # 빈 문자열이면 미상 — GraspCandidate.msg 주석 참조.
                         "point_cloud_path": c.point_cloud_path,
+                        # 0~1, -1이면 미상(GraspCandidate.msg 주석 참조). control이
+                        # soft ranking 항으로 쓴다 — 여기서 빠지면 planner 왕복에서
+                        # 사라져 control이 늘 "미상"으로 읽는다.
+                        "contact_support_score": c.contact_support_score,
                     }
                     for c in o.grasp_candidates
                 ],
@@ -333,6 +344,9 @@ class RosExecutor:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._active_goal_handle = None
         self._active_request_id: str | None = None
+        # send_goal_async 이후 goal handle을 받기 전에도 Stop이 올 수 있다. 이 future를
+        # 추적하지 않으면 orchestration task만 취소되고 뒤늦게 승인된 ROS goal은 고아가 된다.
+        self._pending_send_future = None
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
@@ -430,13 +444,20 @@ class RosExecutor:
             asyncio.run_coroutine_threadsafe(on_feedback(request_id, phase), loop)
 
         send_future = client.send_goal_async(goal_msg, feedback_callback=feedback_cb)
-        goal_handle = await _await_ros_future(send_future)
+        self._pending_send_future = send_future
+        self._active_request_id = request_id
+        try:
+            goal_handle = await _await_ros_future(send_future)
+        except asyncio.CancelledError:
+            # stop()이 pending future에서 handle을 회수해 취소해야 하므로 여기서 지우지 않는다.
+            raise
+        self._pending_send_future = None
 
         if not goal_handle.accepted:
+            self._active_request_id = None
             return None
 
         self._active_goal_handle = goal_handle
-        self._active_request_id = request_id
         try:
             response = await _await_ros_future(goal_handle.get_result_async())
         finally:
@@ -521,10 +542,20 @@ class RosExecutor:
     async def stop(self) -> str | None:
         """진행 중인 goal을 취소한다. busy일 때 가장 필요한 동작이라 상태를 보지 않는다."""
         handle, request_id = self._active_goal_handle, self._active_request_id
+        if handle is None and self._pending_send_future is not None:
+            # goal 전송과 승인 사이의 race. 승인이 끝나는 즉시 handle을 받아 취소한다.
+            handle = await _await_ros_future(self._pending_send_future)
+            self._pending_send_future = None
         if handle is None:
             return None
-        await _await_ros_future(handle.cancel_goal_async())
-        return request_id
+        try:
+            if handle.accepted:
+                await _await_ros_future(handle.cancel_goal_async())
+                return request_id
+            return None
+        finally:
+            self._active_goal_handle = None
+            self._active_request_id = None
 
     async def home(self, open_gripper: bool = False) -> None:
         """홈 자세 복귀 (인터페이스_정의서 4.3절 Home.action).
