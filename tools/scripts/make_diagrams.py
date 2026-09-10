@@ -325,7 +325,7 @@ def diagram_network() -> Svg:
 # --- 3. 명령 처리 시퀀스 ------------------------------------------------------
 
 def diagram_command_flow() -> Svg:
-    s = Svg(1280, 760)
+    s = Svg(1280, 620)
     title(s, "명령 처리 시퀀스")
 
     y1, y2, h, w = 130, 330, 84, 196
@@ -377,12 +377,6 @@ def diagram_command_flow() -> Svg:
           title_size=12.5)
     s.arrow([(138, y2 + h), (138, 470)], dash="6 4", stroke=DANGER[0])
 
-    s.rect(40, 616, 1200, 118, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4)
-    s.text(64, 652, "승인이 필요한 이유", size=17, fill=INK, weight=700)
-    s.text(64, 684, "SAM+VLM 경로는 등록 어휘 없이 물체 이름과 속성을 스스로 판단한다 — 파지력에 직결되는 grip_level까지.",
-           size=15, fill=MUTED)
-    s.text(64, 712, "그래서 검증기를 지났다는 것만으로 실행하지 않고, 명령 1건당 한 번은 사람이 본다.",
-           size=15, fill=MUTED)
     return s
 
 
@@ -502,6 +496,109 @@ OBJECTS = [
     ("섬유탈취제", "fabric_spray", 3), ("젤네일", "gel_nail", 3),
 ]
 
+# 작업물 일러스트. 이름만 적힌 빈 상자는 "작업대에 무엇이 놓여 있는가"를 그림으로
+# 답하지 못해서, 물체마다 알아볼 수 있을 만큼만 그린다. 좌표는 전부 썸네일 중심
+# (cx, cy) 기준 상대값이고 세로로 ±34 안에 들어온다 — 카드의 썸네일 칸 높이가 68이다.
+
+ART = "#39404d"          # 일러스트 외곽선
+
+
+def _art(s, x, y, w, h, *, fill, r=3, sw=1.6, stroke=ART):
+    s.rect(x, y, w, h, stroke=stroke, fill=fill, r=r, sw=sw)
+
+
+def art_toothpaste(s, cx, cy):
+    _art(s, cx - 8, cy - 31, 16, 14, fill="#3aa08f")
+    _art(s, cx - 16, cy - 17, 32, 36, fill="#ffffff", r=7)
+    s.rect(cx - 16, cy - 1, 32, 9, stroke="none", fill="#7fd0c2", r=0, sw=0)
+    _art(s, cx - 17, cy + 17, 34, 9, fill="#e6eaef")
+
+
+def art_wet_wipes(s, cx, cy):
+    _art(s, cx - 27, cy - 16, 54, 38, fill="#dcecfa", r=10)
+    _art(s, cx - 7, cy - 33, 14, 14, fill="#ffffff")
+    _art(s, cx - 13, cy - 23, 26, 11, fill="#8fbfe0", r=4)
+    s.line(cx - 18, cy + 9, cx + 18, cy + 9, stroke="#8fbfe0", sw=1.6)
+
+
+def art_sunscreen(s, cx, cy):
+    _art(s, cx - 7, cy - 32, 14, 12, fill="#e8934a")
+    _art(s, cx - 17, cy - 21, 34, 45, fill="#fdf1de", r=9)
+    s.add(f'<circle cx="{cx}" cy="{cy + 3}" r="8.5" fill="#f6c35c" stroke="{ART}" '
+          f'stroke-width="1.6"/>')
+    for x1, y1, x2, y2 in ((0, -13, 0, -16.5), (0, 13, 0, 16.5),
+                           (-13, 0, -16.5, 0), (13, 0, 16.5, 0)):
+        s.line(cx + x1, cy + 3 + y1, cx + x2, cy + 3 + y2, stroke="#e0a23c", sw=1.8)
+
+
+def art_rabbit(s, cx, cy):
+    s.add(f'<ellipse cx="{cx}" cy="{cy + 18}" rx="16" ry="12.5" fill="#fdeff3" '
+          f'stroke="{ART}" stroke-width="1.6"/>')
+    for side in (-1, 1):
+        ex = cx + 9 * side
+        s.add(f'<ellipse cx="{ex}" cy="{cy - 21}" rx="5.5" ry="13" fill="#fbe3ea" '
+              f'stroke="{ART}" stroke-width="1.6" '
+              f'transform="rotate({13 * side} {ex} {cy - 21})"/>')
+    s.add(f'<circle cx="{cx}" cy="{cy - 3}" r="14" fill="#fdeff3" stroke="{ART}" '
+          f'stroke-width="1.6"/>')
+    for side in (-1, 1):
+        s.add(f'<circle cx="{cx + 5 * side}" cy="{cy - 5}" r="1.9" fill="{ART}"/>')
+
+
+def art_umbrella(s, cx, cy):
+    s.rect(cx - 2, cy - 34, 4, 8, stroke="none", fill=ART, r=1, sw=0)
+    _art(s, cx - 10, cy - 28, 20, 42, fill="#ccd6f6", r=10)
+    s.rect(cx - 10, cy - 11, 20, 8, stroke="none", fill="#8fa2e2", r=0, sw=0)
+    s.add(f'<path d="M {cx} {cy + 14} L {cx} {cy + 22} Q {cx} {cy + 31} {cx - 9} '
+          f'{cy + 31} Q {cx - 16} {cy + 31} {cx - 16} {cy + 24}" fill="none" '
+          f'stroke="{ART}" stroke-width="3" stroke-linecap="round"/>')
+
+
+def art_fabric_spray(s, cx, cy):
+    for dx, dy, r in ((-23, -25, 1.9), (-28, -30, 1.5), (-21, -32, 1.4)):
+        s.add(f'<circle cx="{cx + dx}" cy="{cy + dy}" r="{r}" fill="#63b894"/>')
+    s.rect(cx - 18, cy - 26, 9, 5, stroke="none", fill=ART, r=1, sw=0)
+    _art(s, cx - 10, cy - 28, 21, 12, fill="#a5ddc3")
+    _art(s, cx - 7, cy - 17, 14, 9, fill="#dff2e9", r=2)
+    _art(s, cx - 15, cy - 9, 30, 34, fill="#dff2e9", r=6)
+    s.line(cx - 15, cy + 6, cx + 15, cy + 6, stroke="#63b894", sw=1.6)
+
+
+def art_gel_nail(s, cx, cy):
+    _art(s, cx - 8, cy - 34, 16, 15, fill="#f6f7fa")
+    _art(s, cx - 5, cy - 20, 10, 7, fill="#f6f7fa", r=1)
+    _art(s, cx - 16, cy - 14, 32, 36, fill="#ffffff", r=7)
+    s.add(f'<path d="M {cx - 16} {cy} L {cx + 16} {cy} L {cx + 16} {cy + 15} '
+          f'Q {cx + 16} {cy + 22} {cx + 9} {cy + 22} L {cx - 9} {cy + 22} '
+          f'Q {cx - 16} {cy + 22} {cx - 16} {cy + 15} Z" fill="#f19ec4"/>')
+    sx, sy = cx + 23, cy - 13
+    s.add(f'<path d="M {sx} {sy - 8} Q {sx + 1.6} {sy - 1.6} {sx + 8} {sy} '
+          f'Q {sx + 1.6} {sy + 1.6} {sx} {sy + 8} Q {sx - 1.6} {sy + 1.6} '
+          f'{sx - 8} {sy} Q {sx - 1.6} {sy - 1.6} {sx} {sy - 8} Z" fill="#f2a8cd"/>')
+
+
+OBJECT_ART = {
+    "toothpaste": art_toothpaste,
+    "wet_wipes": art_wet_wipes,
+    "sunscreen": art_sunscreen,
+    "rabbit_doll": art_rabbit,
+    "umbrella": art_umbrella,
+    "fabric_spray": art_fabric_spray,
+    "gel_nail": art_gel_nail,
+}
+
+CARD_W, CARD_H = 148, 120
+
+
+def object_card(s, x, y, ko, en) -> None:
+    """작업대 위의 물체 한 개 — 썸네일 + 이름."""
+    s.rect(x, y, CARD_W, CARD_H, stroke=NEUTRAL[0], fill="#ffffff", r=10, sw=1.4)
+    s.rect(x + 8, y + 8, CARD_W - 16, 68, stroke="none", fill="#f3f4f7", r=8, sw=0)
+    OBJECT_ART[en](s, x + CARD_W / 2, y + 42)
+    s.text(x + 12, y + 96, ko, size=14, fill=INK, weight=600)
+    s.text(x + 12, y + 112, en, size=11, fill=MUTED, family=MONO)
+
+
 # 파지력 5단계. 단계 정의(단조 감소)는 objects.yaml이 소유한다 — 실제로 control이
 # 거는 힘(skill_params.yaml)은 g4만 25N이 아니라 10N이지만, 그 예외는 그림에 적지 않는다.
 GRIP_LEVELS = [
@@ -546,41 +643,39 @@ def diagram_cell_layout() -> Svg:
     s.text(220, 576, "left_box", size=14, fill=GRASP[0], anchor="middle", family=MONO)
 
     # 작업대 — 오른쪽 열 전체, 위에 물체 여러 개
-    s.rect(400, 150, 330, 610, stroke=HW[0], fill="#f4f2ee", r=12, sw=2)
-    s.text(420, 182, "작업대", size=18, fill=HW[0], weight=700)
-    cols, cw, ch = 2, 150, 64
+    s.rect(395, 150, 340, 590, stroke=HW[0], fill="#f4f2ee", r=12, sw=2)
+    s.text(415, 182, "작업대", size=18, fill=HW[0], weight=700)
     for i, (ko, en, _lvl) in enumerate(OBJECTS):
-        ox = 420 + (i % cols) * (cw + 16)
-        oy = 214 + (i // cols) * (ch + 16)
-        s.rect(ox, oy, cw, ch, stroke=NEUTRAL[0], fill="#ffffff", r=9, sw=1.4)
-        s.text(ox + cw / 2, oy + 27, ko, size=15, fill=INK, anchor="middle")
-        s.text(ox + cw / 2, oy + 47, en, size=11.5, fill=MUTED, anchor="middle",
-               family=MONO)
+        ox = 410 + (i % 2) * (CARD_W + 14)
+        oy = 200 + (i // 2) * (CARD_H + 12)
+        object_card(s, ox, oy, ko, en)
 
     # 집어서 분류한다 — 두 박스가 나란한 열이라 직선 화살표로 충분하다.
-    s.arrow([(400, 370), (350, 370)], sw=1.8, label="분류")
-    s.arrow([(400, 560), (350, 560)], sw=1.8, label="분류")
+    s.arrow([(395, 370), (350, 370)], sw=1.8, label="분류")
+    s.arrow([(395, 560), (350, 560)], sw=1.8, label="분류")
 
-    # 오른쪽 — 작업물과 파지력
-    s.panel(790, 104, 450, 266, "작업물 — YOLO11-seg 7클래스(등록 어휘)")
-    yy = 160
+    # 오른쪽 — 작업물(인지 경로 두 갈래)과 파지력
+    s.panel(790, 104, 450, 385, "작업물")
+    s.text(816, 158, "YOLO11-seg 방식 — 등록 어휘 7클래스", size=13.5,
+           fill=PERCEPTION[0], weight=700)
+    yy = 190
     for ko, en, level in OBJECTS:
-        s.text(816, yy, ko, size=15, fill=INK)
-        s.text(940, yy, en, size=13, fill=MUTED, family=MONO)
-        s.rect(1168, yy - 15, 40, 22, stroke=CONTROL[0], fill=CONTROL[1], r=11, sw=1.3)
-        s.text(1188, yy + 1, f"g{level}", size=13, fill=CONTROL[0], anchor="middle",
+        s.text(820, yy, ko, size=14, fill=INK)
+        s.text(944, yy, en, size=12.5, fill=MUTED, family=MONO)
+        s.rect(1168, yy - 14, 38, 21, stroke=CONTROL[0], fill=CONTROL[1], r=10, sw=1.3)
+        s.text(1187, yy + 1, f"g{level}", size=12.5, fill=CONTROL[0], anchor="middle",
                weight=600, family=MONO)
-        yy += 30
+        yy += 28
+    s.line(816, 380, 1214, 380, stroke=FAINT, sw=1.4)
+    s.text(816, 410, "SAM+VLM 방식 — 등록 어휘 없음", size=13.5, fill=GRASP[0],
+           weight=700)
+    s.text(820, 440, "클래스 목록을 주지 않는다. 사진을 본 VLM이 이름·재질·파지",
+           size=13, fill=MUTED)
+    s.text(820, 462, "단계까지 그 자리에서 판단해, 처음 보는 물체도 대상이 된다.",
+           size=13, fill=MUTED)
 
-    s.panel(790, 384, 450, 140, "SAM+VLM — 미등록 물체도 전부 인지")
-    s.text(816, 444, "등록 어휘·클래스와 무관하게, 사진을 본 VLM이 이름·재질·",
-           size=13.5, fill=MUTED)
-    s.text(816, 464, "파지 단계를 그 자리에서 판단한다 — 처음 보는 물체도 예외",
-           size=13.5, fill=MUTED)
-    s.text(816, 484, "없이 대상이 된다.", size=13.5, fill=MUTED)
-
-    s.panel(790, 544, 450, 260, "파지력 — 5단계 grip_level")
-    yy = 598
+    s.panel(790, 509, 450, 295, "파지력 — 5단계 grip_level")
+    yy = 570
     for tag, force, note in GRIP_LEVELS:
         s.text(816, yy, tag, size=15, fill=CONTROL[0], family=MONO, weight=700)
         s.text(860, yy, force, size=15, fill=INK, family=MONO)
