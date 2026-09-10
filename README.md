@@ -32,8 +32,7 @@ HTTP      web      :8000  /api/* · /ws/live
           graspnet :8200  /health · 추론 엔드포인트
 ```
 
-- 외부 의존 토픽: `realsense2_camera`의 `/camera/color/image_raw`,
-  `/camera/aligned_depth_to_color/image_raw`, `/camera/color/camera_info`
+- 외부 의존 토픽: `realsense2_camera`의 `/camera/color/image_raw`, `/camera/aligned_depth_to_color/image_raw`, `/camera/color/camera_info`
 
 ### 1.2 네트워크 구성
 

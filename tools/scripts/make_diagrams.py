@@ -36,16 +36,22 @@ LINE = "#b9c1cc"
 FAINT = "#dde2e9"
 
 # (테두리, 채우기) — 계층별 색은 6장 전부에서 같은 뜻으로 쓴다.
-PERCEPTION = ("#2f6fd0", "#eaf1fc")
-GRASP = ("#1f8a63", "#e7f5ef")
-PLANNER = ("#b8791a", "#fdf3e1")
-CONTROL = ("#7a5bc4", "#f0ebfb")
-WEB = ("#37475c", "#ebeef2")
-DB = ("#68727f", "#eef0f3")
-HW = ("#3f4753", "#f1f3f6")
-EXT = ("#8a919b", "#f6f7f9")
-DANGER = ("#bf3b2c", "#fdecea")
+#
+# 색상환을 한 바퀴 나눠 쓴다: 계층이 7종이라 회색 계열을 여럿 두면(예전에 web·db·
+# 하드웨어·외부가 전부 회색이었다) 옆에 붙었을 때 구분이 안 된다. 회색은 하드웨어
+# 하나만 쓰고, 저장소 밖 요소(EXT)는 색 대신 흰 바탕 + 점선 테두리로 구분한다.
+PERCEPTION = ("#2563c9", "#e7f0fd")   # 파랑 218°
+DB = ("#0a7d91", "#e0f4f7")           # 청록 190°
+GRASP = ("#16855a", "#e3f5ec")        # 초록 155°
+PLANNER = ("#b06f12", "#fdf1dd")      # 주황 38°
+DANGER = ("#bf3b2c", "#fdeae7")       # 빨강 8°
+WEB = ("#c02f7e", "#fce9f2")          # 자홍 330°
+CONTROL = ("#6d4bd0", "#eee8fc")      # 보라 262°
+HW = ("#4a5563", "#edeff2")           # 회색 — 유일한 무채색
+EXT = ("#8a919b", "#ffffff")          # 외부 — 점선 테두리로 쓴다(EXT_DASH)
 NEUTRAL = ("#9aa2ad", "#fbfcfd")
+
+EXT_DASH = "5 4"
 
 
 # --- SVG 조립 ---------------------------------------------------------------
@@ -165,10 +171,8 @@ class Svg:
                 f'{body}</svg>')
 
 
-def title(svg: Svg, main: str, sub: str = "") -> None:
+def title(svg: Svg, main: str) -> None:
     svg.text(40, 46, main, size=22, fill=INK, weight=700)
-    if sub:
-        svg.text(40, 70, sub, size=13, fill=MUTED)
 
 
 def legend(svg: Svg, x, y, items) -> None:
@@ -176,7 +180,8 @@ def legend(svg: Svg, x, y, items) -> None:
     cx = x
     for color, text in items:
         stroke, fill = color
-        svg.rect(cx, y - 9, 12, 12, stroke=stroke, fill=fill, r=3, sw=1.3)
+        svg.rect(cx, y - 9, 12, 12, stroke=stroke, fill=fill, r=3, sw=1.3,
+                 dash=EXT_DASH if color is EXT else None)
         svg.text(cx + 18, y + 1, text, size=11.5, fill=MUTED)
         cx += 18 + text_w(text, 11.5) + 22
 
@@ -185,12 +190,12 @@ def legend(svg: Svg, x, y, items) -> None:
 
 def diagram_architecture() -> Svg:
     s = Svg(1280, 860)
-    title(s, "시스템 아키텍처",
-          "명령은 web → planner로, 로봇은 web → control로. 관측은 perception이 내고 grasp가 완성해 되돌린다.")
+    title(s, "시스템 아키텍처")
 
     s.box(648, 100, 300, 48, "브라우저 — 제어 · 이력 · 학습 데이터", color=EXT,
-          align="center", title_size=14)
-    s.box(990, 100, 245, 48, "OpenAI API", color=EXT, align="center", title_size=14)
+          align="center", title_size=14, dash=EXT_DASH)
+    s.box(990, 100, 245, 48, "OpenAI API", color=EXT, align="center", title_size=14,
+          dash=EXT_DASH)
 
     # 패널 테두리를 라벨 흰판이 갉아먹지 않도록, 경계에 닿는 라벨을 두지 않는다.
     s.rect(40, 186, 1200, 420, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4, dash="6 5")
@@ -248,7 +253,8 @@ def diagram_architecture() -> Svg:
     s.label(202, 646, "color · depth", size=12, anchor="start")
 
     legend(s, 40, 820, [(PERCEPTION, "인지"), (GRASP, "파지"), (PLANNER, "계획"),
-                        (WEB, "웹"), (CONTROL, "제어"), (DB, "저장"), (HW, "하드웨어")])
+                        (WEB, "웹"), (CONTROL, "제어"), (DB, "저장"), (HW, "하드웨어"),
+                        (EXT, "외부")])
     return s
 
 
@@ -261,10 +267,10 @@ def diagram_network() -> Svg:
     정본이므로 여기서는 경계와 그 이유만 남긴다.
     """
     s = Svg(1280, 660)
-    title(s, "네트워크 구성",
-          "DDS를 봐야 하는 것만 host에 둔다. host에는 서비스 이름 DNS가 없어 나머지를 게시된 포트로 부른다.")
+    title(s, "네트워크 구성")
 
-    s.box(60, 104, 220, 50, "브라우저", color=EXT, align="center", title_size=15)
+    s.box(60, 104, 220, 50, "브라우저", color=EXT, align="center", title_size=15,
+          dash=EXT_DASH)
     s.arrow([(170, 154), (170, 212)], head="none", dash="5 4")
     s.label(182, 190, ":8000", size=12.5, anchor="start")
 
@@ -312,8 +318,7 @@ def diagram_network() -> Svg:
 
 def diagram_command_flow() -> Svg:
     s = Svg(1280, 760)
-    title(s, "명령 처리 시퀀스",
-          "관측 → 계획 → 검증 → 사람 승인 → 실행. 검증을 통과해도 승인 없이는 로봇이 움직이지 않는다.")
+    title(s, "명령 처리 시퀀스")
 
     y1, y2, h, w = 130, 330, 84, 196
     xs = [40, 286, 532, 778, 1024]
@@ -329,7 +334,8 @@ def diagram_command_flow() -> Svg:
     s.box(xs[4], 246, w, 56, "거부 — 종료", color=DANGER, align="center", title_size=14)
 
     s.box(xs[0], y2, w, h, "실행 승인",
-          ["계획된 스텝 표시", "approve / reject / 라벨 수정"], color=EXT)
+          ["계획된 스텝 표시", "approve / reject / 라벨 수정"], color=EXT,
+          dash=EXT_DASH)
     s.box(xs[1], y2, w, h, "pick", ["후보 최종 선택", "Grip detected로 판정"],
           color=CONTROL)
     s.box(xs[2], y2, w, h, "place_into", ["바구니 경계 검사", "순응 하강 후 놓기"],
@@ -376,8 +382,7 @@ def diagram_command_flow() -> Svg:
 
 def diagram_operation_flow() -> Svg:
     s = Svg(1280, 760)
-    title(s, "동작 순서도",
-          "액션 4종이 내보내는 phase. 화면의 진행바는 이 값을 그대로 받아 그린다.")
+    title(s, "동작 순서도")
 
     tracks = [
         ("observe", "perception", PERCEPTION,
@@ -431,8 +436,7 @@ def diagram_hardware() -> Svg:
     안에 적었다 — 상자를 늘리면 "무엇이 무엇에 붙어 있는가"가 오히려 안 보인다.
     """
     s = Svg(1280, 780)
-    title(s, "장비 구성",
-          "팔은 제어박스를 거치고, 그리퍼는 Modbus로 직접 간다. 카메라는 손목에 붙어 USB로 들어온다.")
+    title(s, "장비 구성")
 
     s.box(420, 118, 440, 134, "로봇 PC (노트북)",
           ["Ubuntu 24.04 · ROS 2 Jazzy · Python 3.12",
@@ -508,8 +512,7 @@ def diagram_cell_layout() -> Svg:
     이 그림이 답해야 하는 것은 "무엇이 어디 있고 무엇을 어디로 옮기는가"다.
     """
     s = Svg(1280, 780)
-    title(s, "작업 셀 배치 · 작업물",
-          "작업대의 물체를 집어 두 박스로 분류한다. 목적지 좌표의 정본은 bins.yaml이다.")
+    title(s, "작업 셀 배치 · 작업물")
 
     s.panel(60, 104, 700, 640)
 
