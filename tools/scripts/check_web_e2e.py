@@ -94,8 +94,7 @@ async def main() -> int:
     print(f"GET /api/executions → {len(hist.get('items', []))}건 기록")
     for item in hist.get("items", []):
         print(f"  {item['skill_name']:11s} {item['object_id']} "
-              f"grip_level={item['grip_level_used']} result={item['result']} "
-              f"visual={item['visual_verification_passed']}")
+              f"grip_level={item['grip_level_used']} result={item['result']}")
     if len(hist.get("items", [])) != len(snap.get("steps", [])):
         failures.append("execution_logs 건수가 시퀀스 스텝 수와 다르다")
 

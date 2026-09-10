@@ -43,8 +43,6 @@ class _Result:
         self.retries_used = 0
         self.cycle_time_ms = 0.0
         self.torque_trace_summary = []
-        self.visual_verification_passed = False
-        self.visual_verification_note = ""
 
 
 PICK = NS(
@@ -112,13 +110,12 @@ class Harness:
     def _selected_id(self, selected):
         return selected.candidate.candidate_id if selected is not None else ""
 
-    def _result(self, success, reason, started, visual_passed=False, torque=None,
+    def _result(self, success, reason, started, torque=None,
                 candidate_id="", source_observation_id="", executed_tcp=None):
         result = _Result()
         result.success = success
         result.failure_reason = reason
         result.selected_candidate_id = candidate_id
-        result.visual_verification_passed = visual_passed
         result.torque_trace_summary = torque or []
         result.source_observation_id = source_observation_id
         result.has_executed_tcp_posx = executed_tcp is not None

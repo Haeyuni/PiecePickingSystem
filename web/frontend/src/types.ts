@@ -99,7 +99,6 @@ export interface ExecutionLog {
   grip_level_used: GripLevel | null
   bin_id: string | null
   grasp_strategy: string | null
-  visual_verification_passed: boolean | null
   result: 'success' | 'failure'
   failure_reason: string
   retry_count: number
@@ -143,7 +142,6 @@ export interface GraspAttempt {
     position: { x: number; y: number; z: number }
     orientation: { x: number; y: number; z: number; w: number }
   } | null
-  visual_verification_passed: boolean | null
   result: 'success' | 'failure'
   failure_reason: string
   executed_at: string

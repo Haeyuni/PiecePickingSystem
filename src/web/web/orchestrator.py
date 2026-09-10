@@ -882,7 +882,6 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             bin_id=step.get("bin_id"),
             grasp_pose=step.get("grasp_pose"),
             torque_trace=result.torque_trace,
-            visual_verification_passed=result.visual_verification_passed,
             result="success" if result.success else "failure",
             failure_reason=result.failure_reason,
             retry_count=result.retries_used,

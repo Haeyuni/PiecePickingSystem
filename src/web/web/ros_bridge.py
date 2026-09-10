@@ -460,7 +460,6 @@ class RosExecutor:
             failure_reason=result.failure_reason,
             retries_used=getattr(result, "retries_used", 0),
             cycle_time_ms=result.cycle_time_ms or elapsed_ms,
-            visual_verification_passed=getattr(result, "visual_verification_passed", None),
             torque_trace=list(getattr(result, "torque_trace_summary", []) or []),
             # pick만 채운다 — Home/PlaceInto.Result에는 없는 필드다.
             selected_candidate_id=getattr(result, "selected_candidate_id", "") or "",

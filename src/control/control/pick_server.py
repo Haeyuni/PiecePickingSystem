@@ -1,7 +1,5 @@
-"""pick 액션 서버. compliance(토크 판정) AND visual_verification 통과 시에만 success=true
-— 가 인터페이스 문서의 목표고, **지금 실물 성공 판정은 RG2 'Grip detected' 비트로 한다**
-(아래 _pick_real 주석 참조). compliance.py는 진단용 torque_trace_summary만 채우고
-visual_verification.py는 아직 스텁이다.
+"""pick 액션 서버. 실물 성공 판정은 RG2 'Grip detected' 비트로 한다(아래 _pick_real 주석
+참조). compliance.py는 진단용 torque_trace_summary만 채운다 — 판정에는 안 쓴다.
 
 참조: 인터페이스_정의서.md 4.1절 (Pick.action)
 
@@ -123,8 +121,8 @@ class PickServer(Node):
         # TCP to modeled pad/reference (tool mm), not measured physical finger geometry.
         self._grasp_center_offset_mm = dsr_motion.grasp_center_offset_mm(params)
         gripper = params.get("gripper") or {}
-        # 이 미만이면 "닫혔지만 아무것도 안 물렸다"로 본다. compliance/visual_verification이
-        # 아직 없어, /onrobot/status의 Grip detected가 없을 때는 이게 유일한 파지 확인 수단이다.
+        # 이 미만이면 "닫혔지만 아무것도 안 물렸다"로 본다. /onrobot/status의 Grip
+        # detected가 없을 때는 이게 유일한 파지 확인 수단이다.
         self._min_grip_width_mm = float(gripper.get("min_grip_width_mm", 5.0))
         # GraspCandidate.gripper_width_mm(전략이 예측한 필요 개폭)에 더하는 여유 — 이만큼만
         # 더 열면 접근 중 손가락이 물체를 스치지 않으면서도 다 열 때보다 빨리 닫히고,
@@ -372,7 +370,7 @@ class PickServer(Node):
                         return self._result(False, Pick.Result.REASON_NO_CONTACT, started)
                     self._publish_phase(goal_handle, phase)
                     time.sleep(FAKE_PHASE_DURATION_S)
-                width_mm, visual_passed, torque = 42.0, True, [0.4, 1.9, 2.6, 2.4]
+                width_mm, torque = 42.0, [0.4, 1.9, 2.6, 2.4]
                 executed_tcp = list(selected.geometry.target_posx)
             else:
                 pick_result = self._pick_real(goal_handle, goal, selected, wrist_pose)
@@ -421,9 +419,8 @@ class PickServer(Node):
                     self._cache.put(goal.request_id, result)
                     goal_handle.succeed()
                     return result
-                # torque는 compliance.py가 모은 진단값(판정에는 안 쓴다) — visual_verification은
-                # 아직 스텁이라 visual_passed는 항상 False다.
-                visual_passed, torque = False, evidence.get("torque_trace_summary", [])
+                # torque는 compliance.py가 모은 진단값이다 — 판정에는 안 쓴다.
+                torque = evidence.get("torque_trace_summary", [])
 
             if self._injected_failure(goal.object_id):
                 self.get_logger().warning(
@@ -436,7 +433,7 @@ class PickServer(Node):
 
             store.set_gripper(width_mm=width_mm, closed=True)
             result = self._result(True, Pick.Result.REASON_NONE, started,
-                                   visual_passed=visual_passed, torque=torque,
+                                   torque=torque,
                                    candidate_id=selected.candidate.candidate_id,
                                    source_observation_id=goal.source_observation_id,
                                    executed_tcp=executed_tcp)
@@ -682,10 +679,9 @@ class PickServer(Node):
         self._selected_pub.publish(msg)
 
     def _pick_real(self, goal_handle, goal, selected, wrist_pose) -> tuple[float, float] | None:
-        """위치제어만으로 실물 pick을 수행한다 (1단계 — visual_verification.py가 아직 빈
-        스텁이라 grasp_pose를 그대로 믿고 움직인다. compliance.py는 외부토크를 진단용으로만
-        기록한다 — 접근을 멈추거나 파지를 판정하지 않는다, 판정은 RG2 'Grip detected'
-        비트가 한다).
+        """위치제어만으로 실물 pick을 수행한다 (grasp_pose를 그대로 믿고 움직인다.
+        compliance.py는 외부토크를 진단용으로만 기록한다 — 접근을 멈추거나 파지를 판정하지
+        않는다, 판정은 RG2 'Grip detected' 비트가 한다).
 
         grasp_pose 바로 위(approach_height_mm)에서 한 번 멈췄다 내려가 그리퍼를 닫고
         다시 들어올린다. 힘(N)은 grip_level별 max_grip_force_n으로 정확히 넣지 못한다 —
@@ -1012,9 +1008,6 @@ class PickServer(Node):
             self.get_logger().info(
                 f"[COMPLIANCE] request_id={goal.request_id} 외부토크(Nm) {torque_trace.log_line()} "
                 "— 진단용, 파지 판정에는 안 씀(Grip detected 비트가 판정한다)")
-        self.get_logger().warning(
-            "위치제어만으로 pick 완료 — visual_verification 미구현이라 손목 카메라로는 "
-            "확인되지 않았다(파지 판정 자체는 Grip detected 비트로 한다)")
         # **반드시 2-튜플로 돌려준다.** execute_callback이
         # `width_mm, close_target_mm = pick_result`로 푼다 — close_target_mm은 파지 판정에
         # 필요하다('c'로 완전히 닫은 경우 Grip detected 비트를 믿으면 안 되는데, 그 구분이
@@ -1034,7 +1027,7 @@ class PickServer(Node):
     def _injected_failure(object_id: str) -> bool:
         return bool(is_fake_robot() and os.environ.get("FAKE_FAIL_OBJECT") == object_id)
 
-    def _result(self, success, reason, started, visual_passed=False, torque=None,
+    def _result(self, success, reason, started, torque=None,
                  candidate_id: str = "", source_observation_id: str = "",
                  executed_tcp=None):
         result = Pick.Result()
@@ -1049,8 +1042,6 @@ class PickServer(Node):
         result.retries_used = 0
         result.cycle_time_ms = (time.monotonic() - started) * 1000
         result.torque_trace_summary = torque or []
-        result.visual_verification_passed = visual_passed
-        result.visual_verification_note = "" if visual_passed else "미검증"
         return result
 
 

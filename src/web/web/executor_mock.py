@@ -143,14 +143,12 @@ class MockExecutor:
             fail_target = os.environ.get("MOCK_FAIL_OBJECT")
             if skill == "pick" and fail_target and goal.object_id == fail_target:
                 return SkillResult(success=False, failure_reason="grasp_failed",
-                                   visual_verification_passed=False,
                                    cycle_time_ms=(time.monotonic() - started) * 1000)
 
             pose = goal.grasp_pose or {}
             position = pose.get("position") or {}
             return SkillResult(
                 success=True,
-                visual_verification_passed=True if skill == "pick" else None,
                 cycle_time_ms=(time.monotonic() - started) * 1000,
                 torque_trace=[0.4, 1.9, 2.6, 2.4] if skill == "pick" else [],
                 selected_candidate_id=(goal.grasp_candidates[0].get("candidate_id", "")

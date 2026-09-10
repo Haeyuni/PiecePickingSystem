@@ -96,7 +96,6 @@ export default function HistoryPage() {
             <th>스킬 / 대상</th>
             <th style={{ width: 80 }}>결과</th>
             <th style={{ width: 130 }}>파지 전략</th>
-            <th style={{ width: 90 }}>시각검증</th>
           </tr>
         </thead>
         <tbody>
@@ -115,15 +114,10 @@ export default function HistoryPage() {
                   {item.result === 'success' ? '성공' : '실패'}
                 </td>
                 <td className="muted">{item.grasp_strategy ?? '—'}</td>
-                <td className="muted">
-                  {item.visual_verification_passed === null
-                    ? '—'
-                    : item.visual_verification_passed ? '통과' : '실패'}
-                </td>
               </tr>
               {expanded === item.log_id && (
                 <tr className="detail">
-                  <td colSpan={5}>
+                  <td colSpan={4}>
                     <dl>
                       <dt>trace_id</dt><dd>{item.trace_id ?? '—'}</dd>
                       <dt>request_id</dt><dd>{item.request_id ?? '—'}</dd>

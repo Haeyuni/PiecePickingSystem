@@ -53,7 +53,6 @@ class SkillResult:
     failure_reason: str = "none"
     retries_used: int = 0
     cycle_time_ms: float = 0.0
-    visual_verification_passed: bool | None = None
     torque_trace: list = field(default_factory=list)
     # 실제로 실행한 파지 후보의 candidate_id (pick만). control이 고른 것 —
     # 후보를 하나도 통과시키지 못했거나 grasp_pose 하나만 보낸 경우는 빈 문자열이다.

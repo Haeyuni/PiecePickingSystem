@@ -37,9 +37,9 @@ def insert_execution_log(**kw) -> None:
                 INSERT INTO execution_logs (
                     log_id, sequence_id, trace_id, request_id, object_id, class_name,
                     skill_name, grip_level_used, bin_id, grasp_pose, torque_trace,
-                    visual_verification_passed, result, failure_reason,
+                    result, failure_reason,
                     retry_count, cycle_time_ms
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -48,7 +48,6 @@ def insert_execution_log(**kw) -> None:
                     kw["skill_name"], kw.get("grip_level_used"), kw.get("bin_id"),
                     json.dumps(kw["grasp_pose"]) if kw.get("grasp_pose") else None,
                     json.dumps(kw["torque_trace"]) if kw.get("torque_trace") else None,
-                    kw.get("visual_verification_passed"),
                     kw["result"], kw.get("failure_reason", "none"),
                     kw.get("retry_count", 0), kw.get("cycle_time_ms"),
                 ),
@@ -83,7 +82,7 @@ def query_executions(trace_id: str | None = None, result: str | None = None,
     sql = """
         SELECT log_id, trace_id, sequence_id, request_id, object_id, class_name,
                skill_name, grip_level_used, bin_id, grasp_strategy,
-               visual_verification_passed, result, failure_reason, retry_count,
+               result, failure_reason, retry_count,
                cycle_time_ms, executed_at
         FROM execution_logs
     """
@@ -137,7 +136,7 @@ def query_grasp_attempts(result: str | None = None, class_name: str | None = Non
 
     sql = (
         "SELECT log_id, trace_id, object_id, class_name, grip_level_used, "
-        "grasp_strategy, grasp_pose, visual_verification_passed, result, "
+        "grasp_strategy, grasp_pose, result, "
         "failure_reason, executed_at "
         "FROM execution_logs WHERE " + " AND ".join(where) +
         " ORDER BY executed_at DESC LIMIT %s"
