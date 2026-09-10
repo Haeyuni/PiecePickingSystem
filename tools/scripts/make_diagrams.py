@@ -130,12 +130,13 @@ class Svg:
                       anchor="middle", weight=600, family=MONO)
 
     def label(self, x, y, s, *, size=11.5, fill=MUTED, pad=5, anchor="middle",
-              weight=500):
-        """선 위에 얹는 라벨. 선을 가리도록 흰 판을 먼저 깐다."""
-        eff = size * FONT_SCALE
-        w = text_w(s, eff) + pad * 2
-        left = {"middle": x - w / 2, "start": x - pad, "end": x - w + pad}[anchor]
-        self.rect(left, y - eff, w, eff + 8, stroke="none", fill=BG, r=4, sw=0)
+              weight=500, plate=True):
+        """선 위에 얹는 라벨. 선을 가리도록 흰 판을 먼저 깐다(plate=False면 생략)."""
+        if plate:
+            eff = size * FONT_SCALE
+            w = text_w(s, eff) + pad * 2
+            left = {"middle": x - w / 2, "start": x - pad, "end": x - w + pad}[anchor]
+            self.rect(left, y - eff, w, eff + 8, stroke="none", fill=BG, r=4, sw=0)
         self.text(x, y, s, size=size, fill=fill, anchor=anchor, weight=weight)
 
     def arrow(self, pts, *, stroke=LINE, sw=1.5, dash=None, head="end", label=None,
@@ -205,7 +206,8 @@ def diagram_architecture() -> Svg:
     s.box(990, 100, 245, 48, "OpenAI API", color=EXT, align="center", title_size=14,
           dash=EXT_DASH)
 
-    # 패널 테두리를 라벨 흰판이 갉아먹지 않도록, 경계에 닿는 라벨을 두지 않는다.
+    # 이 그림의 라벨은 전부 plate=False다 — 패널 바탕(#fafbfd) 위에서 흰 판이 따로 뜬
+    # 상자처럼 보인다. 대신 라벨을 선과 겹치지 않는 자리에 둔다.
     s.rect(40, 186, 1200, 420, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4, dash="6 5")
     s.text(58, 212, "로봇 PC — Ubuntu 24.04 · ROS 2 Jazzy · RTX 4060 8GB", size=13.5,
            fill=MUTED, weight=600)
@@ -227,29 +229,29 @@ def diagram_architecture() -> Svg:
           title_size=16)
 
     ay = row_y + bh / 2
-    # 라벨은 외부 상자(아래끝 148)와 패널 윗변(186) 사이에 둔다 — 흰 판이 점선을 끊지 않게.
+    # 라벨은 외부 상자(아래끝 148)와 패널 윗변(186) 사이에 둔다.
     s.arrow([(798, 148), (798, row_y)])
-    s.label(810, 172, "HTTP :8000 · /ws/live", size=12, anchor="start")
+    s.label(810, 172, "HTTP :8000 · /ws/live", size=12, anchor="start", plate=False)
     s.arrow([(1112, 148), (1112, row_y)])
-    s.label(1124, 172, "LLM · VLM", size=12, anchor="start")
+    s.label(1124, 172, "LLM · VLM", size=12, anchor="start", plate=False)
 
     s.arrow([(265, ay), (385, ay)])
-    s.label(325, 332, "world_state_raw", size=11)
-    s.label(325, 348, "instance_masks", size=11)
+    s.label(325, 332, "world_state_raw", size=11, plate=False)
+    s.label(325, 348, "instance_masks", size=11, plate=False)
     s.arrow([(580, ay), (700, ay)])
-    s.label(640, 332, "/world_state", size=11)
+    s.label(640, 332, "/world_state", size=11, plate=False)
     s.arrow([(895, ay), (1015, ay)], head="both")
-    s.label(955, 332, "/internal/plan", size=11)
+    s.label(955, 332, "/internal/plan", size=11, plate=False)
 
     s.arrow([(482, 350), (482, 396)], head="both")
     s.arrow([(1112, 350), (1112, 396)], head="both")
     s.arrow([(798, 350), (798, 496)])
-    # 화살표 왼쪽에 둔다 — 오른쪽은 db 상자(x=1015)와 같은 줄이라, 라벨 흰 판이
-    # db 옆에 붙은 또 하나의 상자처럼 읽힌다. 왼쪽 graspnet(오른끝 580)까지는 비어 있다.
-    s.label(786, 424, "pick · place_into", size=12, anchor="end")
-    s.label(786, 444, "home 액션", size=12, anchor="end")
+    # 화살표 왼쪽에 둔다 — 오른쪽은 db 상자(x=1015)와 같은 줄이라 붙어 보인다.
+    # 왼쪽 graspnet(오른끝 580)까지는 비어 있다.
+    s.label(786, 424, "pick · place_into", size=12, anchor="end", plate=False)
+    s.label(786, 444, "home 액션", size=12, anchor="end", plate=False)
     s.arrow([(760, row_y), (760, 244), (180, 244), (180, row_y)])
-    s.label(470, 232, "observe 액션 (온디맨드 관측)", size=12)
+    s.label(470, 232, "observe 액션 (온디맨드 관측)", size=12, plate=False)
 
     # 하드웨어 — 패널 아래로 충분히 띄워 경계와 라벨이 겹치지 않게 한다.
     hw_y = 692
@@ -258,12 +260,12 @@ def diagram_architecture() -> Svg:
     s.box(700, hw_y, 195, 66, "로봇 제어박스", color=HW, align="center", title_size=15)
 
     s.arrow([(798, 578), (798, hw_y)])
-    s.label(810, 646, "이더넷 · dsr 액션", size=12, anchor="start")
+    s.label(810, 646, "이더넷 · dsr 액션", size=12, anchor="start", plate=False)
     s.arrow([(700, hw_y + 33), (625, hw_y + 33)], head="both")
     s.arrow([(385, hw_y + 33), (310, hw_y + 33)], head="none")
-    s.label(347, hw_y + 16, "장착", size=11)
+    s.label(347, hw_y + 16, "장착", size=11, plate=False)
     s.arrow([(190, hw_y), (190, 350)])
-    s.label(202, 646, "color · depth", size=12, anchor="start")
+    s.label(202, 646, "color · depth", size=12, anchor="start", plate=False)
 
     legend(s, 40, 820, [(PERCEPTION, "인지"), (GRASP, "파지"), (PLANNER, "계획"),
                         (WEB, "웹"), (CONTROL, "제어"), (DB, "저장"), (HW, "하드웨어"),

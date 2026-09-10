@@ -14,7 +14,7 @@
 
 ## 1. 시스템 설계
 
-![시스템 아키텍처](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/system_architecture.png?v=4)
+![시스템 아키텍처](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/system_architecture.png?v=5)
 
 ### 1.1 통신 인터페이스
 
