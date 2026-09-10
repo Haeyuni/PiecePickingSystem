@@ -244,9 +244,10 @@ def diagram_architecture() -> Svg:
     s.arrow([(482, 350), (482, 396)], head="both")
     s.arrow([(1112, 350), (1112, 396)], head="both")
     s.arrow([(798, 350), (798, 496)])
-    # 한 줄로 두면 오른쪽 db 상자(x=1015)에 닿는다.
-    s.label(810, 424, "pick · place_into", size=12, anchor="start")
-    s.label(810, 444, "home 액션", size=12, anchor="start")
+    # 화살표 왼쪽에 둔다 — 오른쪽은 db 상자(x=1015)와 같은 줄이라, 라벨 흰 판이
+    # db 옆에 붙은 또 하나의 상자처럼 읽힌다. 왼쪽 graspnet(오른끝 580)까지는 비어 있다.
+    s.label(786, 424, "pick · place_into", size=12, anchor="end")
+    s.label(786, 444, "home 액션", size=12, anchor="end")
     s.arrow([(760, row_y), (760, 244), (180, 244), (180, row_y)])
     s.label(470, 232, "observe 액션 (온디맨드 관측)", size=12)
 
