@@ -57,11 +57,11 @@ launch가 `.venv/bin/python`을 prefix로 붙인다 — `ros2 run`이 만드는 
 
 **`detector:=vlm_sam`은 `objects.yaml`을 보지 않는다.** 이름과 속성(무게·파손위험·
 변형·투명)과 파지 프로파일을 사진을 본 VLM이 함께 답하고 그 값이 그대로 발행된다
-(`attr_source=llm_suggested`). 위 두 문단은 `detector:=yolo`(기본값) 이야기다 —
+(`attr_source=llm_suggested`). 위 두 문단은 `detector:=yolo`(선택 경로) 이야기다 —
 `docs/vlm_sam_pipeline.md`의 [클래스 어휘를 주지 않는다] 참조.
 
 주요 파라미터: `conf`(0.25), `min_depth_valid_ratio`(0.35), `pose_max_age_s`(1.0),
-`require_robot_pose`(true), `detector`(`yolo`/`vlm_sam`).
+`require_robot_pose`(true), `detector`(`vlm_sam` 기본 / `yolo`).
 
 **주기 발행은 없다.** `observe` 액션 goal을 받았을 때만 한 번 검출한다(온디맨드 전환,
 `docs/on-demand-perception.md`) — `ros2 topic echo /world_state`가 조용한 것은 정상이고,

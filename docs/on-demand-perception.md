@@ -189,8 +189,9 @@ world_state를 갈아끼우면 오히려 정보를 잃는다. 그래서 스텝 �
   관측이 여러 스킬 실행(pick+place)에 걸쳐 재사용되는 경우가 있어 "어느 로그 행에
   어느 사진을 붙일지"를 먼저 정해야 한다.
 - `perception_launch.py`/`docker-compose.yml`에 `detector`/`SAM_MODEL`/`PLANNER_URL`
-  파라미터를 연결(완료)했지만, 기본값은 `yolo`로 남겨 뒀다 — `vlm_sam`은 하드웨어
-  검증 전까지 켜지 않는다(`PERCEPTION_DETECTOR` 환경변수로 전환).
+  파라미터를 연결했다(완료). 처음에는 기본값을 `yolo`로 남겨 뒀지만, 2026-09-10에
+  실제 운영에 맞춰 **기본값을 `vlm_sam`으로 바꿨다** — `yolo`는 `PERCEPTION_DETECTOR=yolo`로
+  고르는 선택 경로다.
 
 ## 5. 같이 고쳐야 할 문서
 

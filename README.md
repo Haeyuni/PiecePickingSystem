@@ -14,7 +14,7 @@
 
 ## 1. 시스템 설계
 
-![시스템 아키텍처](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/system_architecture.png?v=3)
+![시스템 아키텍처](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/system_architecture.png?v=4)
 
 ### 1.1 통신 인터페이스
 
@@ -35,19 +35,59 @@ HTTP      web      :8000  /api/* · /ws/live
 
 ### 1.2 네트워크 구성
 
-![네트워크 구성](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/network.png?v=3)
+![네트워크 구성](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/network.png?v=4)
 
 웹·planner·ROS 노드·DB가 **로봇 PC 한 대**에서 전부 돈다.
+
+### 1.3 물체 인지 방식
+
+| 방식 | 어떻게 물체를 찾는가 | 한계 |
+|---|---|---|
+| `vlm_sam` | **기본값.** **SAM2**가 장면 전체를 조각내 번호를 붙이고, 그 프레임을 **VLM**(planner 경유)에 보내 번호마다 이름과 속성(무게·파손위험·변형·투명·파지 단계)을 받는다. 등록 어휘를 주지 않아 **처음 보는 물체도 인지**한다. 재관측(관측 B)은 VLM 없이 직전 위치를 박스 프롬프트로 SAM만 다시 돌린다 | 관측 한 번에 10초 안팎 걸리고 OpenAI API가 필요하다. 파지력을 정하는 속성이 모델 출력이라 실행 전 사용자 승인을 거친다 |
+| `yolo` | **선택.** 학습한 **YOLO11-seg**(`models/best.pt`, 7클래스)가 컬러 프레임에서 인스턴스 마스크와 클래스를 낸다. 무게·파손위험·파지 단계는 클래스 이름으로 `objects.yaml`/DB에서 조회한다. 학습은 `tools/training/detector/train_yolo11n_seg.ipynb` | 학습한 7클래스 밖의 물체는 못 찾는다. 등록되지 않은 클래스는 가장 약한 파지(grip_level 5)로 강제된다 |
+
+**파라미터 설정으로 인지 방식 변경 가능(default: `vlm_sam`)**
+
+```bash
+# 1) launch 인자
+ros2 launch perception perception_launch.py detector:=yolo
+
+# 2) 환경변수 (compose) — .env에 PERCEPTION_DETECTOR=yolo 로 둬도 된다
+PERCEPTION_DETECTOR=yolo docker compose up -d perception
+```
+
+### 1.4 파지점 계산 전략
+
+| 전략 | 어떻게 파지점을 찾는가 | 한계 |
+|---|---|---|
+| `graspnet_baseline` | **기본 전략.** 세그된 **물체 포인트클라우드**(마스크 영역만)를 상주 GPU 추론 서버(`graspnet` 서비스)에 HTTP로 보내 **파지 자세(접근·닫힘축)** 를 받는다. **위치와 개폭은 같은 클라우드로 실측해 다시 잡는다**. 자세는 `T_base_camera → T_camera_graspnet → T_graspnet_tcp`를 거쳐 base-mm TCP Pose로 한 번에 변환한다 | 장면 전체를 넘기면 GPU 사용량이 커져서 물체만 잘라 넣는다. 그래서 위치·폭 예측은 믿지 않고 자세만 쓰며 후보가 1~2곳으로 뭉친다. GPU와 checkpoint가 필요하다 |
+| `heuristic_pca` | 기하 베이스라인. 물체의 **윗면 점들을 XY로 투영해 PCA**를 돌리고 **짧은 축 방향으로 손가락을 닫는다.** 긴 축을 가로질러 잡으면 개폭을 넘기거나 접촉면이 얕아 미끄러진다. 접근은 위에서 수직(base −Z) | 윗면이 수평이라고 가정하고 접근 방향을 −Z로 고정한다. 기울어진 물체와 클러터를 못 다룬다. |
+
+**파라미터 설정으로 파지점 전략 변경 가능(default: `graspnet_baseline`)**
+
+```bash
+# 1) launch 인자
+ros2 launch grasp grasp_launch.py strategy:=heuristic_pca
+
+# 2) 환경변수 (compose)
+GRASP_STRATEGY=heuristic_pca docker compose up -d grasp
+```
+
+```yaml
+# 3) src/grasp/config/grasp_params.yaml — 기본값
+strategy:
+  name: graspnet_baseline     # heuristic_pca | graspnet_baseline
+```
 
 ## 2. 플로우 차트
 
 ### 2.1 명령 처리 시퀀스
 
-![명령 처리 시퀀스](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/command_flow.png?v=3)
+![명령 처리 시퀀스](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/command_flow.png?v=4)
 
 ### 2.2 동작 순서도
 
-![동작 순서도](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/operation_flow.png?v=3)
+![동작 순서도](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/operation_flow.png?v=4)
 
 실패했을 때의 갈래는 두 가지이며 서로 다르게 처리한다.
 
@@ -95,8 +135,15 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 ├── web/frontend/            # Vite + React UI
 ├── database/migrations/     # PostgreSQL 스키마
 ├── data/                    # 캘리브레이션 결과·mock 픽스처·관측/데이터셋 산출물
-├── models/                  # 로컬 모델 가중치 (git 밖)
-├── tools/                   # calibration · training · scripts · voice
+├── models/                  # 로컬 모델 가중치 (git 밖) — sam2_b.pt · best.pt
+├── tools/
+│   ├── calibration/         # 핸드아이·TCP·박스 좌표 실측
+│   ├── training/
+│   │   ├── detector/        # YOLO11-seg 학습 — train_yolo11n_seg.ipynb (Colab, T4)
+│   │   ├── auto_labeling/   # SAM 보조 라벨링·라벨 검증
+│   │   └── grasp/           # GraspNet fine-tuning (예정)
+│   ├── scripts/             # 점검·다이어그램 생성 스크립트
+│   └── voice/               # 웨이크워드 브리지
 └── docs/
 ```
 
@@ -106,7 +153,7 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 
 ### 4.1 로봇 · 제어
 
-![장비 구성](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/hardware_stack.png?v=3)
+![장비 구성](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/hardware_stack.png?v=4)
 
 | 장비 | 모델 | 비고 |
 |---|---|---|
@@ -121,7 +168,7 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 
 ### 4.2 작업대 · 작업물
 
-![작업 셀 배치](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/cell_layout.png?v=3)
+![작업 셀 배치](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/cell_layout.png?v=4)
 
 ## 5. 의존성
 
@@ -192,8 +239,19 @@ cp .env.example .env
 | `POSTGRES_PASSWORD` | 로컬 생성: `openssl rand -base64 24` |
 | `MOCK_MODE` | `1`이면 web이 ROS2 대신 `data/mock` 픽스처로 돈다 |
 | `ROS_DOMAIN_ID` | 호스트 셸의 `echo $ROS_DOMAIN_ID`와 같아야 서로 보인다 |
-| `PERCEPTION_DETECTOR` | `yolo`(기본) 또는 `vlm_sam` |
+| `PERCEPTION_DETECTOR` | `vlm_sam`(기본) 또는 `yolo` |
 | `DOOSAN_WS_DIR` · `CYCLONEDDS_CONFIG_DIR` | 기본값이 아니면 **절대경로로** 지정 |
+
+모델 가중치는 git에 없으므로 직접 넣어 둔다.
+
+| 파일 | 쓰는 곳 |
+|---|---|
+| `models/sam2_b.pt` | `perception` — `vlm_sam`(기본). planner와 `OPENAI_API_KEY`도 함께 필요하다 |
+| `models/best.pt` | `perception` — `yolo`를 고를 때만 |
+| `${PIECE_PICKING_ASSETS_DIR:-~/piece_picking_assets}/models/graspnet/checkpoint.tar` | `graspnet` — `graspnet_baseline`(기본) |
+
+> SAM 가중치는 노드가 뜰 때가 아니라 **첫 관측 때** 올라간다. `sam2_b.pt`가 없어도 `perception`은
+> 정상으로 떠 보이고 첫 명령에서 실패하므로, 새 환경에서는 관측 한 번을 먼저 확인한다.
 
 ### 1. 로봇 드라이버 — 터미널 A
 

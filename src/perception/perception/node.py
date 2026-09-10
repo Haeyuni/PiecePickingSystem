@@ -87,10 +87,10 @@ class PerceptionNode(Node):
     def __init__(self):
         super().__init__("perception_node")
 
-        # 검출기 선택. yolo는 학습한 7클래스만 알고, vlm_sam은 처음 보는 물건도 이름을
-        # 붙인다(docs/vlm_sam_pipeline.md). 스위치로 둔 이유는 물러설 곳을 남기고 같은
-        # 프레임에서 둘을 비교할 수 있게 하기 위해서다.
-        self.declare_parameter("detector", "yolo")
+        # 검출기 선택. 기본은 vlm_sam — 처음 보는 물건도 이름을 붙인다
+        # (docs/vlm_sam_pipeline.md). yolo는 학습한 7클래스만 아는 선택 경로로 남긴다 —
+        # 물러설 곳을 두고 같은 프레임에서 둘을 비교할 수 있게 하기 위해서다.
+        self.declare_parameter("detector", "vlm_sam")
         self.declare_parameter("model_path", "")
         self.declare_parameter("conf", 0.25)
         self.declare_parameter("imgsz", 640)

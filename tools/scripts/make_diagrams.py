@@ -220,16 +220,18 @@ def diagram_architecture() -> Svg:
     s.box(1015, row_y, bw, bh, "planner", ["LLM 계획 + 검증기", "ROS2 무관 (HTTP)"],
           color=PLANNER, title_size=16)
     s.box(385, 396, bw, 54, "graspnet", color=GRASP, badge=":8200", title_size=14)
-    s.box(1015, 396, bw, 54, "db  PostgreSQL 16", color=DB, badge=":5432",
-          title_size=14)
+    # 제목과 배지가 한 줄에 다 들어가지 않는다 — 제품명은 둘째 줄로 내린다.
+    s.box(1015, 396, bw, 62, "db", ["PostgreSQL 16"], color=DB, badge=":5432",
+          title_size=15)
     s.box(700, 496, bw, 82, "control", ["pick · place_into", "home"], color=CONTROL,
           title_size=16)
 
     ay = row_y + bh / 2
+    # 라벨은 외부 상자(아래끝 148)와 패널 윗변(186) 사이에 둔다 — 흰 판이 점선을 끊지 않게.
     s.arrow([(798, 148), (798, row_y)])
-    s.label(810, 182, "HTTP :8000 · /ws/live", size=12, anchor="start")
+    s.label(810, 172, "HTTP :8000 · /ws/live", size=12, anchor="start")
     s.arrow([(1112, 148), (1112, row_y)])
-    s.label(1124, 182, "LLM · VLM", size=12, anchor="start")
+    s.label(1124, 172, "LLM · VLM", size=12, anchor="start")
 
     s.arrow([(265, ay), (385, ay)])
     s.label(325, 332, "world_state_raw", size=11)
@@ -242,7 +244,9 @@ def diagram_architecture() -> Svg:
     s.arrow([(482, 350), (482, 396)], head="both")
     s.arrow([(1112, 350), (1112, 396)], head="both")
     s.arrow([(798, 350), (798, 496)])
-    s.label(810, 430, "pick · place_into · home 액션", size=12, anchor="start")
+    # 한 줄로 두면 오른쪽 db 상자(x=1015)에 닿는다.
+    s.label(810, 424, "pick · place_into", size=12, anchor="start")
+    s.label(810, 444, "home 액션", size=12, anchor="start")
     s.arrow([(760, row_y), (760, 244), (180, 244), (180, row_y)])
     s.label(470, 232, "observe 액션 (온디맨드 관측)", size=12)
 
@@ -491,8 +495,8 @@ def diagram_hardware() -> Svg:
 # --- 6. 작업 셀 배치 ---------------------------------------------------------
 
 OBJECTS = [
-    ("치약", "toothpaste", 4), ("물티슈", "wet_wipes", 4), ("선크림", "sunscreen", 3),
-    ("토끼 인형", "rabbit_doll", 4), ("접이 우산", "umbrella", 3),
+    ("치약", "toothpaste", 4), ("물티슈", "wet_wipes", 2), ("선크림", "sunscreen", 3),
+    ("토끼 인형", "rabbit_doll", 4), ("접이 우산", "umbrella", 1),
     ("섬유탈취제", "fabric_spray", 3), ("젤네일", "gel_nail", 3),
 ]
 

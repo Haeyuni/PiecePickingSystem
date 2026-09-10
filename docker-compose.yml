@@ -51,9 +51,9 @@ services:
       # DNS가 없어 게시된 포트로 부른다 — web_ros/DATABASE_URL과 같은 이유.
       PLANNER_URL: http://localhost:8100
       # 검출기 선택 (perception_launch.py가 이 값을 읽어 detector launch 인자의 기본값으로
-      # 쓴다). 기본은 yolo다 — vlm_sam은 하드웨어에서 아직 실측되지 않았다
-      # (docs/on-demand-perception.md 6절). 바꾸려면 여기 값을 vlm_sam으로.
-      PERCEPTION_DETECTOR: ${PERCEPTION_DETECTOR:-yolo}
+      # 쓴다). 기본은 vlm_sam(SAM+VLM)이다. 학습한 7클래스만 쓰는 yolo로 바꾸려면
+      # .env에 PERCEPTION_DETECTOR=yolo.
+      PERCEPTION_DETECTOR: ${PERCEPTION_DETECTOR:-vlm_sam}
     volumes:
       - ${CYCLONEDDS_CONFIG_DIR:-${HOME}/.config/cyclonedds}:/cyclonedds:ro
       # dsr_msgs2(get_current_posx 서비스 타입)의 출처. src/perception/docker-entrypoint.sh 참조.

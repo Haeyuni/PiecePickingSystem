@@ -26,6 +26,13 @@ GRASP_STRATEGY=heuristic_pca docker compose up -d grasp   # 기본값은 graspne
 `graspnet_baseline.endpoint`(기본 `http://localhost:8200`)가 compose의 `graspnet` 서비스다.
 grasp는 `network_mode: host`라 서비스 이름 DNS 대신 localhost로 부른다.
 
+서버에 보내는 것은 **마스크로 잘라낸 물체 하나의 포인트클라우드**다. GraspNet 결과에서는
+**자세(접근축·닫힘축)만 쓰고, 위치와 개폭은 같은 클라우드로 실측해 다시 잡는다**
+(`strategies/graspnet_baseline.py`의 `_refine_on_cloud`). GraspNet은 장면 전체로 학습된
+모델이라 물체만 넣으면 위치·폭 예측이 틀리지만(2026-09-07 실측: 후보가 물체에서 8~34mm
+벗어남), 국소 형상에서 나오는 자세는 쓸 만하기 때문이다. 대가로 Top-K 후보가 1~2곳으로
+뭉친다 — 장면 전체를 넣으면 풀리지만 GPU 사용량이 커져서 물체만 넣는다.
+
 checkpoint는 저장소 밖 assets에 둔다. compose가 이 경로를 컨테이너의 `/checkpoint.tar`로
 read-only 마운트한다(`docker-compose.yml`의 `graspnet` 서비스):
 

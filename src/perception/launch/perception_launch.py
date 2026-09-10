@@ -47,7 +47,7 @@ def generate_launch_description():
         # detector=vlm_sam 전용 값들(SAM_MODEL/PLANNER_URL)은 node.py가 이미 env_var로
         # 읽는다(_build_detector 참조) — 여기서 다시 다리를 놓을 필요가 없다.
         DeclareLaunchArgument(
-            'detector', default_value=os.environ.get('PERCEPTION_DETECTOR', 'yolo')),
+            'detector', default_value=os.environ.get('PERCEPTION_DETECTOR', 'vlm_sam')),
         DeclareLaunchArgument('model_path', default_value=''),
         DeclareLaunchArgument('sam_model_path', default_value=''),
         DeclareLaunchArgument('planner_url', default_value=''),
