@@ -5,12 +5,11 @@
 - **목표**: 품목이 바뀔 때마다 재티칭·재프로그래밍하는 비용을 없애는 것.  
 사람이 말이나 글로 내린 지시를 로봇이 그대로 해석해 물체를 골라 집고 지정한 곳에 놓는다.
 - **주요 기능**: 도메인(가정·약국·재활용)을 고른 뒤 명령을 넣으면 관측 → LLM 계획 →
-  결정적 검증 → 사람 승인 → `pick` → `place_into`가 이어진다.
+  검증 → 사용자 승인 → `pick` → `place_into`가 이어진다.  
   등록 어휘가 없는 물체도 SAM+VLM 경로로 인지하고 실행 결과와 라벨은 데이터셋·실행 로그로 쌓인다
 - **사용 장비**: Doosan M0609 (6축 협동로봇), OnRobot RG2 그리퍼, RealSense RGB-D (eye-in-hand)
 - **개발 환경**: Ubuntu 24.04 LTS, ROS 2 Jazzy, Docker Compose
-- **주요 기술 스택**: ROS 2, FastAPI + rclpy 브리지, React (Vite/TypeScript), PostgreSQL 16, 
-OpenAI API (LLM/VLM), YOLO11-seg · SAM2, GraspNet-baseline
+- **주요 기술 스택**: ROS 2, FastAPI + rclpy 브리지, React (Vite/TypeScript), PostgreSQL 16, OpenAI API (LLM/VLM), YOLO11-seg · SAM2, GraspNet-baseline
 - **기간**: 2026.09.01 ~ 2026.09.11
 
 ## 1. 시스템 설계
@@ -58,7 +57,7 @@ HTTP      web      :8000  /api/* · /ws/live
 | `place_into` | 같은 스텝을 새 `request_id`로 재전송(로봇이 이미 물체를 쥐고 있어 재계획할 것이 없다) | 재시도 2회 |
 
 - 후보 선택의 최종 결정권은 `control`에 있다. `planner`는 점수 내림차순 후보 전체를
-  실려 보내고, 개폭 유효성·IK·관절 한계·접근 적합도는 로봇에 붙어 있어야 답할 수 있으므로
+  실려 보내고 개폭 유효성·IK·관절 한계·접근 적합도는 로봇에 붙어 있어야 답할 수 있으므로
   `control/grasp_selection.py`가 고른다.
 - 파지 성공 판정은 개폭 추정이 아니라 RG2 컨트롤러의 `Grip detected` 비트를 쓴다.
   변형체를 제대로 물어도 개폭이 끝까지 닫히는 경우가 있기 때문이다.
@@ -80,7 +79,7 @@ HTTP      web      :8000  /api/* · /ws/live
 ### 워크스페이스 배치
 
 이 저장소는 **두산 드라이버 워크스페이스와 별도**다. 드라이버(`dsr_*`, `onrobot_*`)는
-`~/cobot2_ws`에 있고, 컨테이너는 거기서 메시지 패키지만 읽기 전용으로 마운트해 쓴다
+`~/cobot2_ws`에 있고 컨테이너는 거기서 메시지 패키지만 읽기 전용으로 마운트해 쓴다
 (`DOOSAN_WS_DIR`).
 
 ```text
@@ -118,31 +117,17 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 | 로봇 PC | Ubuntu 24.04 · RTX 4060 8GB | 웹·planner·ROS 노드·DB를 전부 구동 |
 | 마이크 | 노트북 내장 마이크 | "hello rokey" 웨이크워드 감지용(`tools/voice/wakeword_bridge.py`) |
 
-- 카메라가 그리퍼에 붙어 있어 좌표 변환이 매 프레임 TCP 자세에 따라 달라진다:
-  `T_base_camera = posx_to_matrix(get_current_posx()) @ T_gripper2camera`.
-- `T_gripper2camera`는 **컨트롤러에 TCP(`GripperDA_v1`)가 선택돼 있는 상태**로 풀려 있다.
-  TCP가 풀리면 좌표 전체가 조용히 약 208mm 어긋난다 — 상태바의 TCP 표시가 그것을 본다.
-  전말은 `docs/problem/2026-09-07-grasp-coordinate-offset.md`에 있다.
+- TCP가 풀리면 좌표 전체가 약 208mm 어긋난다(RG-2 그리퍼 기준)
 
 ### 4.2 작업대 · 작업물
 
 ![작업 셀 배치](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/cell_layout.png)
 
-| 구성 | 값 | 비고 |
-|---|---|---|
-| 목적지 | `left_box`(왼쪽 박스) · `right_box`(오른쪽 박스) | 좌표·상단 내부 모서리 4점·바닥점을 실측해 `src/control/config/bins.yaml`에 고정 |
-| 작업물 (YOLO 경로) | 치약 · 물티슈 · 선크림 · 토끼 인형 · 접이 우산 · 섬유탈취제 · 젤네일 | `models/best.pt`(yolo11n-seg, 7클래스)와 `src/perception/config/objects.yaml`이 1:1 |
-| 작업물 (SAM+VLM 경로) | 제한 없음 | 등록 어휘를 보지 않고 사진을 본 VLM이 이름·속성·파지 단계를 함께 답한다 |
-
-파지력은 힘(N)이 아니라 **5단계 `grip_level`**로 전달한다(1=가장 강하게 40N ~
-5=가장 약하게 20N). 단계→힘 매핑은 `objects.yaml`과 `skill_params.yaml`이 소유하고,
-LLM·VLM은 단계 번호만 고른다. 미확인 신규 클래스는 5로 강제한다.
-
 ## 5. 의존성
 
 ### 5.1 ROS 2 (rosdep)
 
-각 패키지 `package.xml`에 선언돼 있다. 컨테이너로 돌리면 이미지가 알아서 챙기고,
+각 패키지 `package.xml`에 선언돼 있다. 컨테이너로 돌리면 이미지가 알아서 챙기고
 호스트에서 직접 빌드할 때만 필요하다.
 
 ```bash
@@ -157,12 +142,6 @@ rosdep install --from-paths src --ignore-src -r -y
 | `control` | `rclpy`, `sensor_msgs`, `geometry_msgs`, `sort_msgs`, `perception_common`, `dsr_msgs2`, `onrobot_rg_msgs` |
 | `web` | `rclpy`, `sort_msgs` (`MOCK_MODE=0`일 때만 로드) |
 | `perception_common` | `sensor_msgs`, `dsr_msgs2` |
-
-외부 워크스페이스(`~/cobot2_ws`)에서 온다: `dsr_msgs2`(`get_current_posx`·`ikin`·
-`MovejH2r`/`MovelH2r` 등)와 `onrobot_rg_msgs`(`SetCommand`·`GripperPose`)는 이미지에
-굽지 않고 `/doosan_ws`·`/onrobot_ws`로 읽기 전용 마운트한다 — 드라이버 버전이 올라가도
-이미지를 다시 만들 이유가 없게. 드라이버 자체(`m0609_rg2_bringup`)는 컨테이너가 아니라
-호스트에서 띄운다(6절 1단계).
 
 ### 5.2 서비스 — pip
 
@@ -223,7 +202,7 @@ tools/scripts/run_bringup.sh start mode:=real host:=192.168.1.100
 tools/scripts/run_bringup.sh status     # SCHED_FIFO 적용 여부까지 본다
 ```
 
-`ros2 launch m0609_rg2_bringup bringup.launch.py`를 직접 치는 것과 같은 일을 하되,
+`ros2 launch m0609_rg2_bringup bringup.launch.py`를 직접 치는 것과 같은 일을 하되
 `setsid`로 별도 세션에 띄워 **터미널의 Ctrl+C나 창 닫기로 드라이버가 죽지 않게** 한다.
 끄는 것은 `run_bringup.sh stop`이다.
 
@@ -242,7 +221,7 @@ ros2 launch realsense2_camera rs_launch.py align_depth.enable:=true
 FAKE_ROBOT=0 docker compose up -d db planner perception graspnet grasp control
 ```
 
-`FAKE_ROBOT`은 `control`이 읽는다 — 기본값 `1`은 로봇 없이 도는 모의 실행이라, **실물에
+`FAKE_ROBOT`은 `control`이 읽는다 — 기본값 `1`은 로봇 없이 도는 모의 실행이라 **실물에
 붙일 때 `0`을 빠뜨리면 로봇이 움직이지 않는데 성공만 돌아온다.**
 
 | 서비스 | 포트 | 비고 |
@@ -282,8 +261,7 @@ python3 tools/voice/wakeword_bridge.py
 
 로봇 PC 마이크로 "hello rokey"를 듣고 web에 알린다. 브라우저 SpeechRecognition은
 사전에 없는 단어를 신뢰성 있게 못 잡아 이 방식으로 대체했다. 드라이버처럼 계속 떠 있는
-프로세스이고 사용자가 직접 띄우고 끈다 — 참조하는 openwakeword 모델은 이 저장소가
-관리하지 않는 로봇 PC 로컬 자산이라 자동 기동에 넣지 않았다.
+프로세스이고 사용자가 직접 띄우고 끈다.
 
 ### 실행 순서 요약
 
@@ -314,7 +292,7 @@ cd web/frontend && npm install && npm run dev    # http://localhost:5173
 ```
 
 단위 테스트는 계층마다 도는 자리가 다르다. `planner`는 런타임 이미지에 테스트 의존성을
-더하지 않으려고 stdlib `unittest`만 쓰고, `control`/`grasp`는 rclpy와 `sort_msgs`가 필요해
+더하지 않으려고 stdlib `unittest`만 쓰고 `control`/`grasp`는 rclpy와 `sort_msgs`가 필요해
 컨테이너 안에서 돈다.
 
 ```bash
@@ -364,4 +342,4 @@ cd web/frontend && npm run build
 | [`docs/environment.md`](docs/environment.md) | 런타임·CUDA/PyTorch 버전 고정 근거 |
 | [`docs/problem/`](docs/problem) | 실물에서 겪은 문제의 원인 분석 |
 | [`docs/results/`](docs/results) | 단계별 실험 리포트 |
-| [`docs/diagrams/`](docs/diagrams) | 위 그림 6장. `tools/scripts/make_diagrams.py`가 만든다 — 손으로 그리지 않는다 |
+| [`docs/diagrams/`](docs/diagrams) | 위 그림 6장. `tools/scripts/make_diagrams.py`가 만든다 |

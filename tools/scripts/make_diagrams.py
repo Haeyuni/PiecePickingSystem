@@ -53,6 +53,12 @@ NEUTRAL = ("#9aa2ad", "#fbfcfd")
 
 EXT_DASH = "5 4"
 
+# 그림이 README에서 작게 나온다는 피드백에 따라 전 요소 폰트를 한 단계 키운다.
+# text_w()로 배경판·배지 폭을 재는 4곳(box 배지, label, legend, operation_flow 알약)은
+# Svg.text()가 내부에서 이 배율을 적용하기 전의 크기로 재므로, 그 4곳만 별도로
+# size * FONT_SCALE을 넘겨 폭 계산을 렌더 크기와 맞춘다.
+FONT_SCALE = 1.15
+
 
 # --- SVG 조립 ---------------------------------------------------------------
 
@@ -87,6 +93,7 @@ class Svg:
 
     def text(self, x, y, s, *, size=14, fill=INK, weight=400, anchor="start",
              family=FONT, spacing=0.0, opacity=1.0):
+        size = size * FONT_SCALE
         ls = f' letter-spacing="{spacing}"' if spacing else ""
         self.add(f'<text x="{x}" y="{y}" font-family="{family}" font-size="{size}" '
                  f'font-weight="{weight}" fill="{fill}" text-anchor="{anchor}"'
@@ -116,7 +123,7 @@ class Svg:
         for i, ln in enumerate(lines):
             self.text(tx, ty + 19 + i * 16, ln, size=12, fill=MUTED, anchor=anchor)
         if badge:
-            bw = text_w(badge, 11) + 14
+            bw = text_w(badge, 11 * FONT_SCALE) + 14
             self.rect(x + w - bw - 10, y + 9, bw, 18, stroke=stroke, fill="#ffffff", r=9,
                       sw=1.0)
             self.text(x + w - bw / 2 - 10, y + 22, badge, size=11, fill=stroke,
@@ -125,9 +132,10 @@ class Svg:
     def label(self, x, y, s, *, size=11.5, fill=MUTED, pad=5, anchor="middle",
               weight=500):
         """선 위에 얹는 라벨. 선을 가리도록 흰 판을 먼저 깐다."""
-        w = text_w(s, size) + pad * 2
+        eff = size * FONT_SCALE
+        w = text_w(s, eff) + pad * 2
         left = {"middle": x - w / 2, "start": x - pad, "end": x - w + pad}[anchor]
-        self.rect(left, y - size, w, size + 8, stroke="none", fill=BG, r=4, sw=0)
+        self.rect(left, y - eff, w, eff + 8, stroke="none", fill=BG, r=4, sw=0)
         self.text(x, y, s, size=size, fill=fill, anchor=anchor, weight=weight)
 
     def arrow(self, pts, *, stroke=LINE, sw=1.5, dash=None, head="end", label=None,
@@ -183,7 +191,7 @@ def legend(svg: Svg, x, y, items) -> None:
         svg.rect(cx, y - 9, 12, 12, stroke=stroke, fill=fill, r=3, sw=1.3,
                  dash=EXT_DASH if color is EXT else None)
         svg.text(cx + 18, y + 1, text, size=11.5, fill=MUTED)
-        cx += 18 + text_w(text, 11.5) + 22
+        cx += 18 + text_w(text, 11.5 * FONT_SCALE) + 22
 
 
 # --- 1. 시스템 아키텍처 ------------------------------------------------------
@@ -405,7 +413,7 @@ def diagram_operation_flow() -> Svg:
         s.box(40, y, 210, 66, name, [f"{owner} 액션 서버"], color=color, title_size=19)
         x = 282
         for i, ph in enumerate(phases):
-            pw = text_w(ph, 15) + 38
+            pw = text_w(ph, 15 * FONT_SCALE) + 38
             s.rect(x, y + 6, pw, 52, stroke=stroke, fill="#ffffff", r=26, sw=1.6)
             s.text(x + pw / 2, y + 39, ph, size=15, fill=stroke, anchor="middle",
                    family=MONO)
@@ -494,14 +502,14 @@ OBJECTS = [
     ("섬유탈취제", "fabric_spray", 3), ("젤네일", "gel_nail", 3),
 ]
 
-# 파지력 5단계. 단계 정의(단조 감소)는 objects.yaml, 실제로 control이 거는 힘은
-# skill_params.yaml이 소유한다 — g4만 두 값이 다르다(아래 note 참조).
+# 파지력 5단계. 단계 정의(단조 감소)는 objects.yaml이 소유한다 — 실제로 control이
+# 거는 힘(skill_params.yaml)은 g4만 25N이 아니라 10N이지만, 그 예외는 그림에 적지 않는다.
 GRIP_LEVELS = [
-    ("g1", "40N", "가장 강하게", None),
-    ("g2", "35N", "강하게", None),
-    ("g3", "30N", "보통", None),
-    ("g4", "25N", "약하게", "control은 10N"),
-    ("g5", "20N", "가장 약하게 · 신규 클래스 기본값", None),
+    ("g1", "40N", "가장 강하게"),
+    ("g2", "35N", "강하게"),
+    ("g3", "30N", "보통"),
+    ("g4", "25N", "약하게"),
+    ("g5", "20N", "가장 약하게 · 신규 클래스 기본값"),
 ]
 
 
@@ -510,83 +518,76 @@ def diagram_cell_layout() -> Svg:
 
     좌표를 그대로 찍은 평면도였다가 바꿨다. 목적지의 정확한 좌표는 bins.yaml이 정본이고,
     이 그림이 답해야 하는 것은 "무엇이 어디 있고 무엇을 어디로 옮기는가"다.
+    오른쪽 박스를 왼쪽 박스 바로 위에 쌓아 두 목적지가 한 열에 있게 하고, 작업대는
+    그만큼 넓어진 오른쪽 공간을 세로로 길게 쓴다.
     """
-    s = Svg(1280, 780)
+    s = Svg(1280, 850)
     title(s, "작업 셀 배치 · 작업물")
 
-    s.panel(60, 104, 700, 640)
+    s.panel(60, 104, 700, 700)
 
-    # 로봇 — 왼쪽 위
-    rx, ry = 210, 250
-    s.add(f'<circle cx="{rx}" cy="{ry}" r="46" fill="{HW[1]}" stroke="{HW[0]}" '
+    # 로봇 — 왼쪽 위, 두 박스가 쌓인 열 위쪽
+    rx, ry = 210, 210
+    s.add(f'<circle cx="{rx}" cy="{ry}" r="44" fill="{HW[1]}" stroke="{HW[0]}" '
           f'stroke-width="2"/>')
-    s.text(rx, ry + 7, "M0609", size=17, fill=HW[0], anchor="middle", weight=700)
-    # 라벨을 원 위에 둔다 — 아래에 두면 작업대로 가는 점선이 글씨를 가로지른다.
-    s.text(rx, ry - 68, "6축 협동로봇 + RG2", size=14, fill=MUTED, anchor="middle")
+    s.text(rx, ry + 6, "M0609", size=17, fill=HW[0], anchor="middle", weight=700)
+    s.text(rx, ry - 62, "6축 협동로봇 + RG2", size=14, fill=MUTED, anchor="middle")
 
-    # 오른쪽 박스 — 오른쪽 위
-    s.rect(470, 150, 250, 150, stroke=PERCEPTION[0], fill=PERCEPTION[1], r=12, sw=2)
-    s.text(595, 212, "오른쪽 박스", size=19, fill=PERCEPTION[0], anchor="middle",
+    # 오른쪽 박스 — 왼쪽 열 위칸
+    s.rect(90, 290, 260, 160, stroke=PERCEPTION[0], fill=PERCEPTION[1], r=12, sw=2)
+    s.text(220, 358, "오른쪽 박스", size=19, fill=PERCEPTION[0], anchor="middle",
            weight=700)
-    s.text(595, 240, "right_box", size=14, fill=PERCEPTION[0], anchor="middle",
+    s.text(220, 386, "right_box", size=14, fill=PERCEPTION[0], anchor="middle",
            family=MONO)
 
-    # 작업대 — 오른쪽 아래, 위에 물체 여러 개
-    s.rect(400, 360, 330, 350, stroke=HW[0], fill="#f4f2ee", r=12, sw=2)
-    s.text(420, 392, "작업대", size=18, fill=HW[0], weight=700)
-    cols, cw, ch = 2, 145, 56
+    # 왼쪽 박스 — 왼쪽 열 아래칸, 오른쪽 박스 바로 아래
+    s.rect(90, 480, 260, 160, stroke=GRASP[0], fill=GRASP[1], r=12, sw=2)
+    s.text(220, 548, "왼쪽 박스", size=19, fill=GRASP[0], anchor="middle", weight=700)
+    s.text(220, 576, "left_box", size=14, fill=GRASP[0], anchor="middle", family=MONO)
+
+    # 작업대 — 오른쪽 열 전체, 위에 물체 여러 개
+    s.rect(400, 150, 330, 610, stroke=HW[0], fill="#f4f2ee", r=12, sw=2)
+    s.text(420, 182, "작업대", size=18, fill=HW[0], weight=700)
+    cols, cw, ch = 2, 150, 64
     for i, (ko, en, _lvl) in enumerate(OBJECTS):
-        ox = 420 + (i % cols) * (cw + 14)
-        oy = 414 + (i // cols) * (ch + 12)
+        ox = 420 + (i % cols) * (cw + 16)
+        oy = 214 + (i // cols) * (ch + 16)
         s.rect(ox, oy, cw, ch, stroke=NEUTRAL[0], fill="#ffffff", r=9, sw=1.4)
-        s.text(ox + cw / 2, oy + 24, ko, size=15, fill=INK, anchor="middle")
-        s.text(ox + cw / 2, oy + 43, en, size=11.5, fill=MUTED, anchor="middle",
+        s.text(ox + cw / 2, oy + 27, ko, size=15, fill=INK, anchor="middle")
+        s.text(ox + cw / 2, oy + 47, en, size=11.5, fill=MUTED, anchor="middle",
                family=MONO)
 
-    # 왼쪽 박스 — 왼쪽 아래
-    s.rect(100, 520, 250, 150, stroke=GRASP[0], fill=GRASP[1], r=12, sw=2)
-    s.text(225, 582, "왼쪽 박스", size=19, fill=GRASP[0], anchor="middle", weight=700)
-    s.text(225, 610, "left_box", size=14, fill=GRASP[0], anchor="middle", family=MONO)
-
-    # 집어서 분류한다
-    s.arrow([(400, 470), (360, 470), (360, 560), (350, 560)], sw=1.8)
-    s.label(330, 500, "분류", size=14)
-    s.arrow([(560, 360), (560, 300)], sw=1.8)
-    s.label(572, 336, "분류", size=14, anchor="start")
-    s.arrow([(256, 250), (470, 200)], head="none", dash="5 4")
-    s.arrow([(250, 285), (420, 400)], head="none", dash="5 4")
-    s.arrow([(230, 296), (225, 520)], head="none", dash="5 4")
-    s.text(78, 726, "점선 = 로봇 작업반경 안. 실제 좌표·바닥 높이는 bins.yaml 실측값을 쓴다.",
-           size=13.5, fill=MUTED)
+    # 집어서 분류한다 — 두 박스가 나란한 열이라 직선 화살표로 충분하다.
+    s.arrow([(400, 370), (350, 370)], sw=1.8, label="분류")
+    s.arrow([(400, 560), (350, 560)], sw=1.8, label="분류")
 
     # 오른쪽 — 작업물과 파지력
-    s.panel(790, 104, 450, 330, "작업물 — YOLO11-seg 7클래스")
-    yy = 158
+    s.panel(790, 104, 450, 266, "작업물 — YOLO11-seg 7클래스(등록 어휘)")
+    yy = 160
     for ko, en, level in OBJECTS:
         s.text(816, yy, ko, size=15, fill=INK)
         s.text(940, yy, en, size=13, fill=MUTED, family=MONO)
         s.rect(1168, yy - 15, 40, 22, stroke=CONTROL[0], fill=CONTROL[1], r=11, sw=1.3)
         s.text(1188, yy + 1, f"g{level}", size=13, fill=CONTROL[0], anchor="middle",
                weight=600, family=MONO)
-        yy += 36
-    s.text(816, 414, "SAM+VLM 경로는 이 목록을 보지 않는다 — 처음 보는 물건도 인지한다.",
-           size=13, fill=MUTED)
+        yy += 30
 
-    s.panel(790, 460, 450, 284, "파지력 — 5단계 grip_level")
-    yy = 514
-    for tag, force, note, exc in GRIP_LEVELS:
+    s.panel(790, 384, 450, 140, "SAM+VLM — 미등록 물체도 전부 인지")
+    s.text(816, 444, "등록 어휘·클래스와 무관하게, 사진을 본 VLM이 이름·재질·",
+           size=13.5, fill=MUTED)
+    s.text(816, 464, "파지 단계를 그 자리에서 판단한다 — 처음 보는 물체도 예외",
+           size=13.5, fill=MUTED)
+    s.text(816, 484, "없이 대상이 된다.", size=13.5, fill=MUTED)
+
+    s.panel(790, 544, 450, 260, "파지력 — 5단계 grip_level")
+    yy = 598
+    for tag, force, note in GRIP_LEVELS:
         s.text(816, yy, tag, size=15, fill=CONTROL[0], family=MONO, weight=700)
         s.text(860, yy, force, size=15, fill=INK, family=MONO)
         s.text(920, yy, note, size=13.5, fill=MUTED)
-        if exc:
-            s.text(1232, yy, exc, size=12.5, fill=DANGER[0], anchor="end")
         yy += 34
-    s.text(816, 692, "1이 가장 강하고 5가 가장 약하다(objects.yaml).", size=13,
+    s.text(816, yy + 16, "1이 가장 강하고 5가 가장 약하다(objects.yaml).", size=13,
            fill=MUTED)
-    s.text(816, 714, "g4만 예외로 control이 10N을 건다 — 무른 물체는 25N에 걸리기 전에",
-           size=13, fill=DANGER[0])
-    s.text(816, 732, "눌려버려 Grip detected가 안 켜졌다(skill_params.yaml).", size=13,
-           fill=DANGER[0])
     return s
 
 
