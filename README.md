@@ -14,7 +14,7 @@
 
 ## 1. 시스템 설계
 
-![시스템 아키텍처](docs/diagrams/system_architecture.png)
+![시스템 아키텍처](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/system_architecture.png?v=2)
 
 ### 1.1 통신 인터페이스
 
@@ -35,7 +35,7 @@ HTTP      web      :8000  /api/* · /ws/live
 
 ### 1.2 네트워크 구성
 
-![네트워크 구성](docs/diagrams/network.png)
+![네트워크 구성](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/network.png?v=2)
 
 웹·planner·ROS 노드·DB가 **로봇 PC 한 대**에서 전부 돈다.
 
@@ -43,11 +43,11 @@ HTTP      web      :8000  /api/* · /ws/live
 
 ### 2.1 명령 처리 시퀀스
 
-![명령 처리 시퀀스](docs/diagrams/command_flow.png)
+![명령 처리 시퀀스](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/command_flow.png?v=2)
 
 ### 2.2 동작 순서도
 
-![동작 순서도](docs/diagrams/operation_flow.png)
+![동작 순서도](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/operation_flow.png?v=2)
 
 실패했을 때의 갈래는 두 가지이며 서로 다르게 처리한다.
 
@@ -106,7 +106,7 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 
 ### 4.1 로봇 · 제어
 
-![장비 구성](docs/diagrams/hardware_stack.png)
+![장비 구성](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/hardware_stack.png?v=2)
 
 | 장비 | 모델 | 비고 |
 |---|---|---|
@@ -121,7 +121,7 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 
 ### 4.2 작업대 · 작업물
 
-![작업 셀 배치](docs/diagrams/cell_layout.png)
+![작업 셀 배치](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/cell_layout.png?v=2)
 
 ## 5. 의존성
 
