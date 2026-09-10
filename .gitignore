@@ -252,6 +252,10 @@ data/scenes/*
 data/observations/*
 !data/observations/.gitkeep
 
+# GraspNet fine-tuning용 원본 포인트클라우드(D-9) — 위와 같은 이유로 관리하지 않는다.
+data/point_clouds/*
+!data/point_clouds/.gitkeep
+
 # VLM 라벨링 결과로 쌓이는 YOLO 학습용 데이터셋(app.py _save_dataset_items) — 실행할 때마다
 # 계속 늘어나고 재현 가능한 산출물이라 git으로 관리하지 않는다.
 data/datasets/*

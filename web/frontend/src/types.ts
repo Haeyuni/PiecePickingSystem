@@ -142,6 +142,9 @@ export interface GraspAttempt {
     position: { x: number; y: number; z: number }
     orientation: { x: number; y: number; z: number; w: number }
   } | null
+  /** GraspNet fine-tuning용 원본 클라우드 파일 경로(저장소 기준 상대경로). graspnet_baseline
+   *  실행에만 있다 — heuristic_pca나 이 필드가 생기기 전 기록은 null이다. */
+  point_cloud_path: string | null
   result: 'success' | 'failure'
   failure_reason: string
   executed_at: string

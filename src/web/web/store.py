@@ -36,10 +36,10 @@ def insert_execution_log(**kw) -> None:
                 """
                 INSERT INTO execution_logs (
                     log_id, sequence_id, trace_id, request_id, object_id, class_name,
-                    skill_name, grip_level_used, bin_id, grasp_pose, torque_trace,
-                    result, failure_reason,
+                    skill_name, grip_level_used, bin_id, grasp_pose, point_cloud_path,
+                    torque_trace, result, failure_reason,
                     retry_count, cycle_time_ms
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     str(uuid.uuid4()),
@@ -47,6 +47,7 @@ def insert_execution_log(**kw) -> None:
                     kw.get("object_id"), kw.get("class_name"),
                     kw["skill_name"], kw.get("grip_level_used"), kw.get("bin_id"),
                     json.dumps(kw["grasp_pose"]) if kw.get("grasp_pose") else None,
+                    kw.get("point_cloud_path") or None,
                     json.dumps(kw["torque_trace"]) if kw.get("torque_trace") else None,
                     kw["result"], kw.get("failure_reason", "none"),
                     kw.get("retry_count", 0), kw.get("cycle_time_ms"),
@@ -110,8 +111,13 @@ def query_grasp_attempts(result: str | None = None, class_name: str | None = Non
 
     **새 수집 경로가 아니다.** pick 실행마다 execution_logs에 이미 grasp_pose(실제로
     실행한 파지 자세)와 result(success/failure)가 남고 있었다(database/migrations/
-    001_init.sql) — GraspNet류 재학습에 필요한 최소 신호(자세 + 성공 여부)가 이미
-    쌓이는 중이었다는 뜻이라, 여기서는 pick만 걸러 그대로 노출한다.
+    001_init.sql) — 여기서는 pick만 걸러 그대로 노출한다.
+
+    **자세+성공 여부만으로는 GraspNet fine-tuning이 안 된다** — PointNet++ 백본은
+    포인트클라우드 자체로 학습하므로, 그 판정의 근거였던 입력(GraspNet에 실제로 넣은
+    물체 단일 클라우드)이 따로 있어야 한다. point_cloud_path(009_point_cloud_path)가
+    그 파일을 가리킨다 — graspnet_baseline 실행에만 있고, heuristic_pca나 이 마이그레이션
+    이전 행에는 없다(NULL).
 
     query_executions와 다른 함수로 둔 이유: 이력 화면(HistoryPage)은 grasp_pose 같은
     무거운 jsonb를 안 보여줘도 되고, 여기는 그게 핵심이라 SELECT 컬럼이 다르다.
@@ -136,7 +142,7 @@ def query_grasp_attempts(result: str | None = None, class_name: str | None = Non
 
     sql = (
         "SELECT log_id, trace_id, object_id, class_name, grip_level_used, "
-        "grasp_strategy, grasp_pose, result, "
+        "grasp_strategy, grasp_pose, point_cloud_path, result, "
         "failure_reason, executed_at "
         "FROM execution_logs WHERE " + " AND ".join(where) +
         " ORDER BY executed_at DESC LIMIT %s"

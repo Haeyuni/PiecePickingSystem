@@ -152,6 +152,10 @@ class GraspNode(Node):
             **(config.get(self._strategy_name) or {}),
         }
         self._pointcloud_params = config.get("pointcloud") or {}
+        # graspnet_baseline이 실제로 추론에 넣은 물체 단일 포인트클라우드를 남기는 곳.
+        # fine-tuning에는 grasp_pose+성공/실패만으로 부족하고 그 판정의 근거인 입력 자체가
+        # 필요하다 — perception._observations_dir(D-6)와 같은 원칙.
+        self._point_clouds_dir = find_repo_path("data", env_var="DATA_DIR") / "point_clouds"
         self._pose_max_age_s = float(self.get_parameter("pose_max_age_s").value)
         self._max_depth_age_s = float(self.get_parameter("max_depth_age_s").value)
         self._debug_color_max_age_s = float(self.get_parameter("debug_color_max_age_s").value)
@@ -332,7 +336,9 @@ class GraspNode(Node):
             if image is None:
                 continue
             try:
-                candidates = self._candidates_for(obj, image, depth, depth_frame_id, T_base_camera_mm)
+                candidates = self._candidates_for(obj, image, depth, depth_frame_id,
+                                                  T_base_camera_mm, world.trace_id,
+                                                  world.observation_id)
             except InferenceBusy:
                 # busy는 파지 실패가 아니다. 빈 후보 WorldState를 내보내 planner가 정상 물체를
                 # 거부하지 않게 하고, web은 마지막으로 완성된 관측을 계속 보여준다.
@@ -399,8 +405,37 @@ class GraspNode(Node):
             blockers.append("최신 TCP 자세 없음")
         return blockers
 
+    def _save_point_cloud(self, trace_id: str, observation_id: str, object_id: str,
+                         points_cam_mm: np.ndarray, T_base_camera_mm: np.ndarray) -> str:
+        """GraspNet에 실제로 넣은 물체 단일 포인트클라우드(camera frame, mm)를 파일로 남긴다.
+
+        **왜 필요한가.** execution_logs에 이미 쌓이는 grasp_pose+result(성공/실패)만으로는
+        GraspNet fine-tuning이 안 된다 — PointNet++ 백본은 포인트클라우드 자체로 학습하는데,
+        그 판정의 근거였던 입력이 지금까지 어디에도 남지 않았다(추론 서버에 한 번 던지고
+        버려짐). T_base_camera_mm도 함께 남긴다 — eye-in-hand라 관측마다 카메라 자세가
+        달라, 나중에 base 좌표와 맞춰 보려면 그 순간의 변환이 있어야 한다.
+
+        perception._save_observation_image(D-6)와 같은 원칙 — 실패해도 추론 자체를
+        막지 않는다(로그만 남기고 빈 문자열 반환).
+        """
+        if not trace_id or not observation_id:
+            return ""
+        try:
+            directory = self._point_clouds_dir / trace_id
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"{observation_id}_{object_id}.npz"
+            np.savez_compressed(
+                path,
+                points_cam_mm=points_cam_mm.astype(np.float32),
+                T_base_camera_mm=T_base_camera_mm.astype(np.float64))
+            return str(path.relative_to(self._point_clouds_dir.parent.parent))
+        except OSError as e:
+            self.get_logger().warning(f"포인트클라우드 저장 실패({e}) — 추론은 계속한다")
+            return ""
+
     def _candidates_for(self, obj, mask_image: Image, depth: np.ndarray, depth_frame_id: str,
-                        T_base_camera_mm: np.ndarray) -> list[GraspCandidate]:
+                        T_base_camera_mm: np.ndarray, trace_id: str,
+                        observation_id: str) -> list[GraspCandidate]:
         object_id = obj.object_id
         mask = image_to_numpy(mask_image) > 0
         if mask.shape != depth.shape:
@@ -459,6 +494,13 @@ class GraspNode(Node):
             self.get_logger().error(f"{self._strategy_name} 추론 불가: {exc}",
                                     throttle_duration_sec=10.0)
             return []
+        if self._strategy_name == "graspnet_baseline" and candidates:
+            point_cloud_path = self._save_point_cloud(
+                trace_id, observation_id, object_id, points_cam, T_base_camera_mm)
+            if point_cloud_path:
+                for c in candidates:
+                    if isinstance(c, dict):
+                        c["point_cloud_path"] = point_cloud_path
         # 전략이 중간 변환값을 실어 보냈으면(graspnet_baseline) 물체별로 보관한다 —
         # 아래 _process가 로그로 찍는다. GraspCandidate.msg에는 이 필드가 없으므로
         # 메시지로 변환하기 전에 여기서 빼둬야 한다.
@@ -813,6 +855,7 @@ class GraspNode(Node):
         msg.candidate_id = candidate_id
         msg.grasp_depth_mm = float(candidate.get("grasp_depth_mm", 0.0) or 0.0)
         msg.gripper_width_mm = float(candidate.get("width_mm") or 0.0)
+        msg.point_cloud_path = str(candidate.get("point_cloud_path") or "")
         return msg
 
 

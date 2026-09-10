@@ -702,6 +702,7 @@ def _record_selected_candidate(step: dict, result) -> None:
             step["grasp_pose"] = candidate.get("pose")
             step["gripper_width_mm"] = candidate.get("gripper_width_mm")
             step["selected_candidate_id"] = selected_id
+            step["point_cloud_path"] = candidate.get("point_cloud_path")
             return
     logger.warning("control이 고른 후보 %s를 계획 후보 목록에서 못 찾았다 — "
                    "grasp_pose를 1순위인 채로 둔다 (object=%s)",
@@ -881,6 +882,7 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             grip_level_used=step["grip_level"],
             bin_id=step.get("bin_id"),
             grasp_pose=step.get("grasp_pose"),
+            point_cloud_path=step.get("point_cloud_path"),
             torque_trace=result.torque_trace,
             result="success" if result.success else "failure",
             failure_reason=result.failure_reason,

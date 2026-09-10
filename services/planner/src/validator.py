@@ -111,6 +111,7 @@ def _candidate_out(candidate: dict) -> GraspCandidateOut:
         candidate_id=candidate.get("candidate_id") or "",
         grasp_depth_mm=float(candidate.get("grasp_depth_mm") or 0.0),
         strategy=candidate.get("strategy") or "",
+        point_cloud_path=candidate.get("point_cloud_path") or "",
     )
 
 

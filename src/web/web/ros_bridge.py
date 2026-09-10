@@ -166,6 +166,9 @@ def _world_state_to_dict(msg: WorldState) -> dict:
                         # 식별값이 필요하다. "<object_id>#<순위>", 순위 0이 1순위다.
                         "candidate_id": c.candidate_id,
                         "grasp_depth_mm": c.grasp_depth_mm,
+                        # fine-tuning용 원본 클라우드 경로(graspnet_baseline만 채움).
+                        # 빈 문자열이면 미상 — GraspCandidate.msg 주석 참조.
+                        "point_cloud_path": c.point_cloud_path,
                     }
                     for c in o.grasp_candidates
                 ],

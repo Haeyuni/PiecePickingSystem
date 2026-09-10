@@ -1,9 +1,11 @@
 /** 그랩(파지) 학습 데이터 섹션 — DatasetPage의 두 번째 탭.
  *
- * **새 수집 경로가 아니다.** pick을 실행할 때마다 execution_logs에 이미 쌓이고 있던
- * grasp_pose(실행한 자세)+result(성공/실패)를 그대로 보여준다(api.ts getGraspAttempts,
- * web/store.py query_grasp_attempts 참조) — GraspNet류 재학습에 필요한 최소 신호가
- * 이미 있었다는 뜻이라, 여기서는 노출·필터·내보내기만 한다.
+ * pick을 실행할 때마다 execution_logs에 쌓이는 grasp_pose(실행한 자세)+result(성공/실패)
+ * +point_cloud_path(graspnet_baseline이면 원본 클라우드 파일 경로, 009_point_cloud_path)를
+ * 그대로 보여준다(api.ts getGraspAttempts, web/store.py query_grasp_attempts 참조) —
+ * 여기서는 노출·필터·내보내기만 한다. 자세+성공 여부만으로는 GraspNet fine-tuning이
+ * 안 되고 그 판정의 근거였던 클라우드가 있어야 하므로, point_cloud_path 유무가 "이 시도를
+ * 재학습 데이터로 쓸 수 있는지"를 가른다.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { getGraspAttempts, GRASP_ATTEMPTS_EXPORT_URL } from '../api'
@@ -102,6 +104,13 @@ export default function GraspAttemptsSection() {
               <span className={`badge ${item.result === 'success' ? 'badge-g3' : 'badge-nograsp'}`}>
                 {item.result === 'success' ? '성공' : `실패 (${item.failure_reason})`}
               </span>
+              {item.point_cloud_path && (
+                // fine-tuning에 쓸 원본 클라우드가 파일로 남아 있다는 표시일 뿐 — 여기서
+                // 내려받지는 않는다(무겁다, JSON 내보내기에도 경로만 실린다).
+                <div className="muted" style={{ fontSize: 11 }} title={item.point_cloud_path}>
+                  클라우드 저장됨
+                </div>
+              )}
             </div>
           </div>
         ))}

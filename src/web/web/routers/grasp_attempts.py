@@ -44,13 +44,13 @@ def export_grasp_attempts(
     since: str | None = None,
     until: str | None = None,
 ):
-    """지금 가진 최소 신호(실행 자세 + 성공/실패)만 JSON으로 내려준다.
+    """실행 자세 + 성공/실패 + (graspnet_baseline이면) 원본 포인트클라우드 경로를
+    JSON으로 내려준다.
 
-    GraspNet 원 데이터셋(포인트클라우드 + 후보별 품질 점수)에는 못 미친다 — 그건 실행
-    하나당 후보 여러 개를 다 채점해야 하는 훨씬 큰 작업이다(tools/training/grasp/
-    finetune.py 스텁 참조, "파인튜닝 필요성은 결과를 보고 판단한다"). 지금은 "이 자세로
-    집었을 때 실제로 성공했는가"만 있는 가벼운 형태 — 성공/실패 분포부터 보고 다음
-    단계(정말 재학습이 필요한지)를 판단하는 데 쓴다.
+    GraspNet 원 데이터셋(후보별 품질 점수까지)에는 여전히 못 미친다 — 그건 실행 하나당
+    후보 여러 개를 다 채점해야 하는 훨씬 큰 작업이다(tools/training/grasp/finetune.py
+    스텁 참조). point_cloud_path(009_point_cloud_path)가 가리키는 .npz 파일은 이 JSON에
+    안 실린다 — 클라우드는 무겁고 파일로 이미 있으니, 내보낸 JSON의 경로로 따로 읽는다.
     """
     items = store.query_grasp_attempts(
         result=result, class_name=class_name, strategy=strategy,

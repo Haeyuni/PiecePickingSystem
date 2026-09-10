@@ -72,6 +72,10 @@ class GraspCandidateOut(BaseModel):
     # 왕복에서 조용히 0이 된다.
     grasp_depth_mm: float = 0.0
     strategy: str = ""
+    # fine-tuning용 원본 클라우드 경로(graspnet_baseline만). control은 안 쓰지만
+    # grasp_depth_mm과 같은 이유로 빠뜨리면 안 된다 — orchestrator가 execution_logs에
+    # 남기려면 이 왕복(world_state → planner → PlanStep)에서 살아 있어야 한다.
+    point_cloud_path: str = ""
 
 
 class PlanStep(BaseModel):
