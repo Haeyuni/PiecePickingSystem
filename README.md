@@ -60,7 +60,7 @@ PERCEPTION_DETECTOR=yolo docker compose up -d perception
 
 | 전략 | 어떻게 파지점을 찾는가 | 한계 |
 |---|---|---|
-| `graspnet_baseline` | **기본 전략.** 세그된 **물체 포인트클라우드**(마스크 영역만)를 상주 GPU 추론 서버(`graspnet` 서비스)에 HTTP로 보내 **파지 자세(접근·닫힘축)** 를 받는다. **위치와 개폭은 같은 클라우드로 실측해 다시 잡는다**. 자세는 `T_base_camera → T_camera_graspnet → T_graspnet_tcp`를 거쳐 base-mm TCP Pose로 한 번에 변환한다 | 장면 전체를 넘기면 GPU 사용량이 커져서 물체만 잘라 넣는다. 그래서 위치·폭 예측은 믿지 않고 자세만 쓰며 후보가 1~2곳으로 뭉친다. GPU와 checkpoint가 필요하다 |
+| `graspnet_baseline` | **기본 전략.** 세그된 **물체 포인트클라우드**(마스크 영역만)를 상주 GPU 추론 서버(`graspnet` 서비스)에 HTTP로 보내 **파지 자세(접근·닫힘축)** 를 받는다. **위치와 개폭은 같은 클라우드로 실측해 다시 잡는다**. 자세는 `T_base_camera → T_camera_graspnet → T_graspnet_tcp`를 거쳐 base-mm TCP Pose로 한 번에 변환한다 | 장면 전체를 넘기면 GPU 사용량이 커져서 물체만 잘라 넣는다. 그래서 위치·폭 예측은 믿지 않고 자세만 쓰며 후보가 1~2곳으로 뭉친다. GPU와 GraspNet 모델 가중치(`checkpoint.tar`)가 필요하다 |
 | `heuristic_pca` | **선택.** 기하 베이스라인, 물체의 **윗면 점들을 XY로 투영해 PCA**를 돌리고 **짧은 축 방향으로 손가락을 닫는다.** 긴 축을 가로질러 잡으면 개폭을 넘기거나 접촉면이 얕아 미끄러진다. 접근은 위에서 수직(base −Z) | 윗면이 수평이라고 가정하고 접근 방향을 −Z로 고정한다. 기울어진 물체와 클러터를 못 다룬다. |
 
 **파라미터 설정으로 파지점 전략 변경 가능(default: `graspnet_baseline`)**
@@ -135,7 +135,7 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 ├── web/frontend/            # Vite + React UI
 ├── database/migrations/     # PostgreSQL 스키마
 ├── data/                    # 캘리브레이션 결과·mock 픽스처·관측/데이터셋 산출물
-├── models/                  # 로컬 모델 가중치 (git 밖) — sam2_b.pt · best.pt
+├── models/                  # 모델 가중치 — best.pt(파인튜닝 YOLO11-seg)는 git 포함, sam2_b.pt는 git 밖
 ├── tools/
 │   ├── calibration/         # 핸드아이·TCP·박스 좌표 실측
 │   ├── training/
@@ -146,6 +146,10 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 │   └── voice/               # 웨이크워드 브리지
 └── docs/
 ```
+
+GraspNet 모델 가중치(`checkpoint.tar`)는 이 트리 밖에 있다 — 저장소 안 `models/`가 아니라
+`${PIECE_PICKING_ASSETS_DIR:-~/piece_picking_assets}/models/graspnet/checkpoint.tar`에서
+읽는다(경로는 `docker-compose.yml`의 `graspnet` 서비스가 직접 마운트).
 
 `planner`가 ROS2 패키지가 아닌 이유는 HTTP·LLM·DB 어디에도 실시간 토픽이 필요 없기 때문이다.
 
@@ -242,16 +246,44 @@ cp .env.example .env
 | `PERCEPTION_DETECTOR` | `vlm_sam`(기본) 또는 `yolo` |
 | `DOOSAN_WS_DIR` · `CYCLONEDDS_CONFIG_DIR` | 기본값이 아니면 **절대경로로** 지정 |
 
-모델 가중치는 git에 없으므로 직접 넣어 둔다.
+모델 가중치 중 `models/best.pt`(파인튜닝한 YOLO11-seg)는 저장소에 커밋돼 있어 clone만
+하면 그대로 쓸 수 있다. 나머지 둘은 재배포 가능한 사전학습 가중치라 git 밖에 두므로 직접
+받아 넣어야 한다.
 
-| 파일 | 쓰는 곳 |
-|---|---|
-| `models/sam2_b.pt` | `perception` — `vlm_sam`(기본). planner와 `OPENAI_API_KEY`도 함께 필요하다 |
-| `models/best.pt` | `perception` — `yolo`를 고를 때만 |
-| `${PIECE_PICKING_ASSETS_DIR:-~/piece_picking_assets}/models/graspnet/checkpoint.tar` | `graspnet` — `graspnet_baseline`(기본) |
+| 파일 | 쓰는 곳 | git |
+|---|---|---|
+| `models/best.pt` | `perception` — `yolo`를 고를 때만 | ✅ 포함 |
+| `models/sam2_b.pt` | `perception` — `vlm_sam`(기본). planner와 `OPENAI_API_KEY`도 함께 필요하다 | ❌ 직접 배치 |
+| `${PIECE_PICKING_ASSETS_DIR:-~/piece_picking_assets}/models/graspnet/checkpoint.tar` | `graspnet` — `graspnet_baseline`(기본) | ❌ 직접 배치 |
 
-> SAM 가중치는 노드가 뜰 때가 아니라 **첫 관측 때** 올라간다. `sam2_b.pt`가 없어도 `perception`은
-> 정상으로 떠 보이고 첫 명령에서 실패하므로, 새 환경에서는 관측 한 번을 먼저 확인한다.
+`sam2_b.pt`는 지정한 경로에 없으면 ultralytics가 알아서 자동 다운로드하지만, `docker compose`가
+`./models`를 **읽기 전용**으로 마운트하므로 컨테이너 안에서는 받아지지 않는다 — 컨테이너를
+띄우기 전에 호스트에서 한 번 받아 둔다(ultralytics는 `src/perception/requirements.txt`에
+있는 버전을 그대로 쓴다):
+
+```bash
+pip install ultralytics==8.4.138   # 이미 host .venv에 있으면 생략
+python3 -c "from ultralytics import SAM; SAM('models/sam2_b.pt')"   # 저장소 루트에서 실행
+```
+
+`checkpoint.tar`는 공식 [GraspNet-baseline](https://github.com/graspnet/graspnet-baseline) 저장소가
+배포하는 사전학습 가중치다(`src/grasp/docker/graspnet_baseline/Dockerfile`이 그 저장소를
+클론해 이미지를 빌드한다). 카메라가 RealSense라 **RealSense로 학습한 버전**을 받는다
+(공식 README도 이쪽을 권장 — "we recommend the realsense model since it might transfer better"):
+
+| 파일 | 학습 데이터 | 링크 |
+|---|---|---|
+| `checkpoint-rs.tar` ← 이걸 받는다 | RealSense | [Google Drive](https://drive.google.com/file/d/1hd0G8LN6tRpi4742XOTEisbTXNZ-1jmk/view) · [Baidu Pan](https://pan.baidu.com/s/1Eme60l39tTZrilF0I86R5A) |
+| `checkpoint-kn.tar` | Kinect | [Google Drive](https://drive.google.com/file/d/1vK-d0yxwyJwXHYWOtH1bDMoe--uZ2oLX/view) · [Baidu Pan](https://pan.baidu.com/s/1QpYzzyID-aG5CgHjPFNB9g) |
+
+받은 뒤 **파일명을 `checkpoint.tar`로 바꿔** `${PIECE_PICKING_ASSETS_DIR:-~/piece_picking_assets}/models/graspnet/`
+아래 둔다 — `docker-compose.yml`의 `graspnet` 서비스가 정확히 이 이름을 마운트한다
+(`.../checkpoint.tar:/checkpoint.tar:ro`).
+
+> `models/best.pt`는 `perception` 노드가 **뜰 때** 바로 올라가므로 없으면 `yolo`로는 컨테이너
+> 자체가 못 뜬다(이제 git에 포함돼 있어 해당 없음). 반대로 SAM 가중치는 노드가 뜰 때가 아니라
+> **첫 관측 때** 올라간다 — `sam2_b.pt`가 없어도 `perception`은 정상으로 떠 보이고 첫 명령에서
+> 실패하므로 새 환경에서는 관측 한 번을 먼저 확인한다.
 
 ### 1. 로봇 드라이버 — 터미널 A
 
