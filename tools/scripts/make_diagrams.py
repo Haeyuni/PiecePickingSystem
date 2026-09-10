@@ -184,64 +184,70 @@ def legend(svg: Svg, x, y, items) -> None:
 # --- 1. 시스템 아키텍처 ------------------------------------------------------
 
 def diagram_architecture() -> Svg:
-    s = Svg(1280, 800)
+    s = Svg(1280, 860)
     title(s, "시스템 아키텍처",
           "명령은 web → planner로, 로봇은 web → control로. 관측은 perception이 내고 grasp가 완성해 되돌린다.")
 
-    s.box(648, 96, 300, 46, "브라우저 — 제어 · 이력 · 학습 데이터", color=EXT,
-          align="center", title_size=13)
-    s.box(990, 96, 245, 46, "OpenAI API", color=EXT, align="center", title_size=13)
+    s.box(648, 100, 300, 48, "브라우저 — 제어 · 이력 · 학습 데이터", color=EXT,
+          align="center", title_size=14)
+    s.box(990, 100, 245, 48, "OpenAI API", color=EXT, align="center", title_size=14)
 
-    s.rect(40, 168, 1200, 412, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4, dash="6 5")
-    s.text(58, 192, "로봇 PC — Ubuntu 24.04 · ROS 2 Jazzy · RTX 4060 8GB", size=13,
+    # 패널 테두리를 라벨 흰판이 갉아먹지 않도록, 경계에 닿는 라벨을 두지 않는다.
+    s.rect(40, 186, 1200, 420, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4, dash="6 5")
+    s.text(58, 212, "로봇 PC — Ubuntu 24.04 · ROS 2 Jazzy · RTX 4060 8GB", size=13.5,
            fill=MUTED, weight=600)
 
-    row_y, bh, bw = 240, 78, 195
+    row_y, bh, bw = 268, 82, 195
     s.box(70, row_y, bw, bh, "perception", ["온디맨드 관측", "YOLO11-seg / SAM+VLM"],
-          color=PERCEPTION)
-    s.box(385, row_y, bw, bh, "grasp", ["파지 후보 계산", "2전략"], color=GRASP)
-    s.box(700, row_y, bw, bh, "web", ["FastAPI", "+ rclpy 브리지"], color=WEB)
+          color=PERCEPTION, title_size=16)
+    s.box(385, row_y, bw, bh, "grasp", ["파지 후보 계산", "2전략"], color=GRASP,
+          title_size=16)
+    s.box(700, row_y, bw, bh, "web", ["FastAPI", "+ rclpy 브리지"], color=WEB,
+          title_size=16)
     s.box(1015, row_y, bw, bh, "planner", ["LLM 계획 + 검증기", "ROS2 무관 (HTTP)"],
-          color=PLANNER)
-    s.box(385, 366, bw, 52, "graspnet", color=GRASP, badge=":8200", title_size=13)
-    s.box(1015, 366, bw, 52, "db  PostgreSQL 16", color=DB, badge=":5432",
-          title_size=13)
-    s.box(700, 470, bw, bh, "control", ["pick · place_into", "home"], color=CONTROL)
+          color=PLANNER, title_size=16)
+    s.box(385, 396, bw, 54, "graspnet", color=GRASP, badge=":8200", title_size=14)
+    s.box(1015, 396, bw, 54, "db  PostgreSQL 16", color=DB, badge=":5432",
+          title_size=14)
+    s.box(700, 496, bw, 82, "control", ["pick · place_into", "home"], color=CONTROL,
+          title_size=16)
 
-    ay = 292
-    s.arrow([(798, 142), (798, row_y)], label="HTTP :8000 · /ws/live", label_at=0.45)
-    s.arrow([(1112, 142), (1112, row_y)], label="LLM · VLM", label_at=0.5)
+    ay = row_y + bh / 2
+    s.arrow([(798, 148), (798, row_y)])
+    s.label(810, 182, "HTTP :8000 · /ws/live", size=12, anchor="start")
+    s.arrow([(1112, 148), (1112, row_y)])
+    s.label(1124, 182, "LLM · VLM", size=12, anchor="start")
 
     s.arrow([(265, ay), (385, ay)])
-    s.label(325, 258, "world_state_raw", size=10.5)
-    s.label(325, 274, "instance_masks", size=10.5)
+    s.label(325, 332, "world_state_raw", size=11)
+    s.label(325, 348, "instance_masks", size=11)
     s.arrow([(580, ay), (700, ay)])
-    s.label(640, 266, "/world_state", size=10.5)
+    s.label(640, 332, "/world_state", size=11)
     s.arrow([(895, ay), (1015, ay)], head="both")
-    s.label(955, 266, "/internal/plan", size=10.5)
+    s.label(955, 332, "/internal/plan", size=11)
 
-    s.arrow([(482, 318), (482, 366)], head="both")
-    s.label(560, 346, "HTTP", size=10.5, anchor="start")
-    s.arrow([(1112, 318), (1112, 366)], head="both")
-    s.arrow([(798, 318), (798, 470)], label="pick · place_into · home 액션",
-            label_at=0.55)
-    s.arrow([(760, row_y), (760, 222), (180, 222), (180, row_y)],
-            label="observe 액션 (온디맨드 관측)", label_at=0.5, label_dy=-6)
+    s.arrow([(482, 350), (482, 396)], head="both")
+    s.arrow([(1112, 350), (1112, 396)], head="both")
+    s.arrow([(798, 350), (798, 496)])
+    s.label(810, 430, "pick · place_into · home 액션", size=12, anchor="start")
+    s.arrow([(760, row_y), (760, 244), (180, 244), (180, row_y)])
+    s.label(470, 232, "observe 액션 (온디맨드 관측)", size=12)
 
-    s.box(70, 640, 240, 62, "RealSense (eye-in-hand)", color=HW, align="center",
-          title_size=13)
-    s.box(385, 640, 240, 62, "M0609 + OnRobot RG2", color=HW, align="center",
-          title_size=14)
-    s.box(700, 640, 195, 62, "로봇 제어박스", color=HW, align="center", title_size=14)
+    # 하드웨어 — 패널 아래로 충분히 띄워 경계와 라벨이 겹치지 않게 한다.
+    hw_y = 692
+    s.box(70, hw_y, 240, 66, "RealSense", color=HW, align="center", title_size=15)
+    s.box(385, hw_y, 240, 66, "M0609 + RG2", color=HW, align="center", title_size=15)
+    s.box(700, hw_y, 195, 66, "로봇 제어박스", color=HW, align="center", title_size=15)
 
-    s.arrow([(798, 548), (798, 640)], label="이더넷 · dsr 액션 · 서비스", label_at=0.5)
-    s.arrow([(700, 671), (625, 671)], head="both")
-    s.label(662, 663, "로봇 케이블", size=10.5)
-    s.arrow([(385, 671), (310, 671)], head="none")
-    s.label(347, 663, "손목 장착", size=10.5)
-    s.arrow([(190, 640), (190, 318)], label="color · aligned depth", label_at=0.66)
+    s.arrow([(798, 578), (798, hw_y)])
+    s.label(810, 646, "이더넷 · dsr 액션", size=12, anchor="start")
+    s.arrow([(700, hw_y + 33), (625, hw_y + 33)], head="both")
+    s.arrow([(385, hw_y + 33), (310, hw_y + 33)], head="none")
+    s.label(347, hw_y + 16, "장착", size=11)
+    s.arrow([(190, hw_y), (190, 350)])
+    s.label(202, 646, "color · depth", size=12, anchor="start")
 
-    legend(s, 40, 762, [(PERCEPTION, "인지"), (GRASP, "파지"), (PLANNER, "계획"),
+    legend(s, 40, 820, [(PERCEPTION, "인지"), (GRASP, "파지"), (PLANNER, "계획"),
                         (WEB, "웹"), (CONTROL, "제어"), (DB, "저장"), (HW, "하드웨어")])
     return s
 
@@ -249,74 +255,56 @@ def diagram_architecture() -> Svg:
 # --- 2. 네트워크 구성도 ------------------------------------------------------
 
 def diagram_network() -> Svg:
-    s = Svg(1280, 830)
+    """세 덩어리로만 보여준다 — bridge / host / 호스트에서 직접 띄우는 것.
+
+    포트·주소를 전부 적으면 정작 "왜 갈라놨는지"가 안 보인다. 그건 docker-compose.yml이
+    정본이므로 여기서는 경계와 그 이유만 남긴다.
+    """
+    s = Svg(1280, 660)
     title(s, "네트워크 구성",
-          "DDS를 봐야 하는 것만 host 네트워크에 둔다. host에는 서비스 이름 DNS가 없어 나머지를 게시된 포트로 부른다.")
+          "DDS를 봐야 하는 것만 host에 둔다. host에는 서비스 이름 DNS가 없어 나머지를 게시된 포트로 부른다.")
 
-    s.box(60, 96, 240, 46, "브라우저", color=EXT, align="center", title_size=13)
-    s.box(330, 96, 240, 46, "OpenAI API (외부)", color=EXT, align="center",
-          title_size=13)
+    s.box(60, 104, 220, 50, "브라우저", color=EXT, align="center", title_size=15)
+    s.arrow([(170, 154), (170, 212)], head="none", dash="5 4")
+    s.label(182, 190, ":8000", size=12.5, anchor="start")
 
-    s.panel(60, 196, 560, 300, "bridge network — 서비스 이름 DNS로 서로 부른다")
-    s.box(90, 244, 240, 56, "db", color=DB, badge=":5432", title_size=14)
-    s.box(350, 244, 240, 56, "planner", color=PLANNER, badge=":8100", title_size=14)
-    s.box(90, 322, 240, 56, "graspnet", color=GRASP, badge=":8200", title_size=14)
-    s.box(350, 322, 240, 56, "web (mock)", color=WEB, badge=":8000", title_size=14)
-    for i, ln in enumerate([
-            "web(mock)은 MOCK_MODE=1 — data/mock 픽스처로 돈다.",
-            "web_ros와 8000이 겹치므로 둘을 동시에 띄우지 않는다.",
-            "그래서 web_ros는 profile: ros로 기본 기동에서 빠져 있다."]):
-        s.text(90, 416 + i * 22, ln, size=11.5, fill=MUTED)
+    # bridge
+    s.panel(60, 212, 520, 232, "bridge network")
+    s.box(90, 258, 220, 56, "db", color=DB, badge=":5432", title_size=15)
+    s.box(330, 258, 220, 56, "planner", color=PLANNER, badge=":8100", title_size=15)
+    s.box(90, 330, 220, 56, "graspnet", color=GRASP, badge=":8200", title_size=15)
+    s.box(330, 330, 220, 56, "web (mock)", color=WEB, badge=":8000", title_size=15)
+    s.text(90, 418, "서비스 이름으로 서로 부른다", size=12.5, fill=MUTED)
 
-    s.panel(660, 196, 560, 300, "host network — 호스트 DDS를 그대로 본다")
-    s.box(690, 244, 240, 56, "perception", color=PERCEPTION, title_size=14)
-    s.box(950, 244, 240, 56, "grasp", color=GRASP, title_size=14)
-    s.box(690, 322, 240, 56, "control", color=CONTROL, title_size=14)
-    s.box(950, 322, 240, 56, "web_ros", color=WEB, badge=":8000", title_size=14)
-    for i, ln in enumerate([
-            "DDS 디스커버리가 멀티캐스트에 기대므로 브리지에서는",
-            "호스트의 드라이버·카메라 노드를 찾지 못한다.",
-            "RMW는 전부 CycloneDDS로 맞춘다 — 다르면 토픽 목록은",
-            "보이는데 데이터가 흐르지 않는다."]):
-        s.text(690, 416 + i * 22, ln, size=11.5, fill=MUTED)
+    # host
+    s.panel(700, 212, 520, 232, "host network")
+    s.box(730, 258, 220, 56, "perception", color=PERCEPTION, title_size=15)
+    s.box(970, 258, 220, 56, "grasp", color=GRASP, title_size=15)
+    s.box(730, 330, 220, 56, "control", color=CONTROL, title_size=15)
+    s.box(970, 330, 220, 56, "web_ros", color=WEB, badge=":8000", title_size=15)
+    s.text(730, 418, "호스트 DDS를 그대로 본다", size=12.5, fill=MUTED)
 
-    # 브라우저 → 둘 중 떠 있는 web 하나
-    s.arrow([(180, 142), (180, 196)], head="none", dash="5 4")
-    s.arrow([(180, 142), (180, 176), (1070, 176), (1070, 196)], head="none", dash="5 4")
-    s.label(700, 170, "http://localhost:8000  —  web 또는 web_ros 중 하나", size=11.5)
+    s.arrow([(700, 328), (580, 328)], head="both")
+    s.label(640, 284, "게시된 포트로", size=12)
+    s.label(640, 300, "localhost 호출", size=12)
 
-    # planner → OpenAI
-    s.arrow([(450, 244), (450, 142)])
-    s.label(462, 196, "LLM · VLM", anchor="start", size=11)
+    # 호스트에서 직접 띄우는 것
+    s.panel(700, 500, 520, 116, "호스트에서 직접 띄운다 (컨테이너 아님)")
+    s.box(730, 542, 220, 56, "로봇 드라이버", color=HW, align="center", title_size=15)
+    s.box(970, 542, 220, 56, "realsense2_camera", color=HW, align="center",
+          title_size=15)
+    s.arrow([(960, 500), (960, 444)], head="both")
+    s.label(972, 478, "DDS", size=12.5, anchor="start")
 
-    # host → bridge
-    s.arrow([(660, 356), (620, 356)], head="both")
-    s.label(640, 318, "게시된 포트로", size=10.5)
-    s.label(640, 334, "localhost 호출", size=10.5)
+    s.box(60, 542, 520, 56, "로봇 제어박스 · 192.168.1.100", color=HW, align="center",
+          title_size=15)
+    s.arrow([(730, 570), (580, 570)], head="both")
+    s.label(655, 556, "이더넷", size=12.5)
 
-    s.panel(60, 556, 1160, 140, "호스트에서 직접 띄우는 프로세스 (컨테이너 아님)")
-    s.box(85, 600, 340, 74, "로봇 드라이버",
-          ["m0609_rg2_bringup", "tools/scripts/run_bringup.sh"], color=HW)
-    s.box(455, 600, 340, 74, "카메라 드라이버",
-          ["realsense2_camera", "align_depth.enable:=true"], color=HW)
-    s.box(825, 600, 370, 74, "웨이크워드 브리지",
-          ["tools/voice/wakeword_bridge.py",
-           "로봇 PC 마이크 → /api/internal/wake-detected"], color=HW)
-
-    # DDS는 host 네트워크 컨테이너와 호스트 프로세스 사이에서만 흐른다 — bridge 쪽에서
-    # 내려오는 선을 그리면 없는 경로를 그린 것이 된다.
-    s.arrow([(255, 600), (255, 540), (760, 540), (760, 496)], head="both")
-    s.label(470, 534, "DDS", size=11)
-    s.arrow([(625, 600), (625, 512), (880, 512), (880, 496)], head="both")
-    s.label(790, 506, "DDS", size=11)
-    s.arrow([(1010, 600), (1010, 496)], label="HTTP :8000", label_at=0.5)
-
-    s.box(85, 726, 340, 56, "로봇 제어박스 · 192.168.1.100", color=HW, align="center",
-          title_size=14)
-    s.arrow([(255, 674), (255, 726)], head="both", label="이더넷", label_at=0.78)
-
-    legend(s, 500, 758, [(NEUTRAL, "점선 = 브라우저 접속 경로"), (EXT, "외부 · 사용자"),
-                         (HW, "하드웨어 · 호스트 프로세스")])
+    s.text(60, 474, "web과 web_ros는 8000이 겹친다 — 둘을 동시에 띄우지 않는다.",
+           size=12.5, fill=MUTED)
+    s.text(60, 496, "RMW는 전부 CycloneDDS로 맞춘다. 다르면 토픽은 보이는데 데이터가 안 흐른다.",
+           size=12.5, fill=MUTED)
     return s
 
 
@@ -341,7 +329,7 @@ def diagram_command_flow() -> Svg:
     s.box(xs[4], 246, w, 56, "거부 — 종료", color=DANGER, align="center", title_size=14)
 
     s.box(xs[0], y2, w, h, "실행 승인",
-          ["계획 · 판단 근거 표시", "approve / reject / 라벨 수정"], color=EXT)
+          ["계획된 스텝 표시", "approve / reject / 라벨 수정"], color=EXT)
     s.box(xs[1], y2, w, h, "pick", ["후보 최종 선택", "Grip detected로 판정"],
           color=CONTROL)
     s.box(xs[2], y2, w, h, "place_into", ["바구니 경계 검사", "순응 하강 후 놓기"],
@@ -375,18 +363,19 @@ def diagram_command_flow() -> Svg:
           title_size=12.5)
     s.arrow([(138, y2 + h), (138, 470)], dash="6 4", stroke=DANGER[0])
 
-    s.panel(40, 620, 1200, 92, "승인이 필요한 이유")
-    s.text(62, 670, "SAM+VLM 경로는 등록 어휘 없이 물체 이름과 속성(파지력에 직결되는 grip_level 포함)까지 스스로 판단한다.",
-           size=12.5, fill=MUTED)
-    s.text(62, 692, "그래서 검증기를 지났다는 것만으로 실행하지 않고, 명령 1건당 한 번은 사람이 본다. 라벨을 고치면 재계획 후 다시 묻는다.",
-           size=12.5, fill=MUTED)
+    s.rect(40, 616, 1200, 118, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4)
+    s.text(64, 652, "승인이 필요한 이유", size=17, fill=INK, weight=700)
+    s.text(64, 684, "SAM+VLM 경로는 등록 어휘 없이 물체 이름과 속성을 스스로 판단한다 — 파지력에 직결되는 grip_level까지.",
+           size=15, fill=MUTED)
+    s.text(64, 712, "그래서 검증기를 지났다는 것만으로 실행하지 않고, 명령 1건당 한 번은 사람이 본다.",
+           size=15, fill=MUTED)
     return s
 
 
 # --- 4. 동작 순서도 ----------------------------------------------------------
 
 def diagram_operation_flow() -> Svg:
-    s = Svg(1280, 700)
+    s = Svg(1280, 760)
     title(s, "동작 순서도",
           "액션 4종이 내보내는 phase. 화면의 진행바는 이 값을 그대로 받아 그린다.")
 
@@ -405,114 +394,95 @@ def diagram_operation_flow() -> Svg:
          "unreachable · collision_expected"),
     ]
 
-    y = 120
+    y = 118
     for name, owner, color, phases, reasons in tracks:
         stroke, fill = color
-        s.box(40, y, 190, 58, name, [f"{owner} 액션 서버"], color=color)
-        x = 262
+        s.box(40, y, 210, 66, name, [f"{owner} 액션 서버"], color=color, title_size=19)
+        x = 282
         for i, ph in enumerate(phases):
-            pw = text_w(ph, 13) + 34
-            s.rect(x, y + 8, pw, 42, stroke=stroke, fill="#ffffff", r=21, sw=1.4)
-            s.text(x + pw / 2, y + 34, ph, size=13, fill=stroke, anchor="middle",
+            pw = text_w(ph, 15) + 38
+            s.rect(x, y + 6, pw, 52, stroke=stroke, fill="#ffffff", r=26, sw=1.6)
+            s.text(x + pw / 2, y + 39, ph, size=15, fill=stroke, anchor="middle",
                    family=MONO)
             if i < len(phases) - 1:
-                s.arrow([(x + pw, y + 29), (x + pw + 22, y + 29)], stroke=stroke)
-            x += pw + 22
-        s.text(262, y + 74, f"실패 사유:  {reasons}", size=11.5, fill=MUTED)
-        y += 122
+                s.arrow([(x + pw, y + 32), (x + pw + 24, y + 32)], stroke=stroke, sw=1.7)
+            x += pw + 24
+        s.text(282, y + 86, f"실패 사유:  {reasons}", size=13.5, fill=MUTED)
+        y += 140
 
-    s.panel(40, 604, 590, 72)
-    s.text(62, 634, "성공 판정", size=12.5, fill=INK, weight=700)
-    s.text(62, 656, "pick은 RG2 컨트롤러의 Grip detected 비트 하나로 본다 — 개폭 추정은 쓰지 않는다.",
-           size=12, fill=MUTED)
+    s.rect(40, 676, 590, 62, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4)
+    s.text(64, 702, "성공 판정", size=15, fill=INK, weight=700)
+    s.text(64, 726, "pick은 RG2의 Grip detected 비트 하나로 본다 — 개폭 추정은 쓰지 않는다.",
+           size=13.5, fill=MUTED)
 
-    s.panel(650, 604, 590, 72)
-    s.text(672, 634, "후보 선택", size=12.5, fill=INK, weight=700)
-    s.text(672, 656, "planner가 후보 전체를 넘기고, 개폭·IK·관절 한계를 아는 control이 실행할 하나를 고른다.",
-           size=12, fill=MUTED)
+    s.rect(650, 676, 590, 62, stroke=FAINT, fill="#fafbfd", r=14, sw=1.4)
+    s.text(674, 702, "후보 선택", size=15, fill=INK, weight=700)
+    s.text(674, 726, "planner가 후보 전체를 넘기고, control이 실행할 하나를 고른다.",
+           size=13.5, fill=MUTED)
     return s
 
 
 # --- 5. 장비 구성 ------------------------------------------------------------
 
 def diagram_hardware() -> Svg:
-    s = Svg(1280, 800)
+    """장비를 6개로 줄이고 연결선도 6개만 남긴다.
+
+    툴체인저를 따로 그리지 않고 RG2 설명에 넣었고, 마이크는 노트북 내장이라 로봇 PC
+    안에 적었다 — 상자를 늘리면 "무엇이 무엇에 붙어 있는가"가 오히려 안 보인다.
+    """
+    s = Svg(1280, 780)
     title(s, "장비 구성",
-          "팔은 제어박스를 거쳐, 그리퍼는 툴체인저를 거쳐, 카메라·마이크는 USB로 — 셋 다 로봇 PC로 모인다.")
+          "팔은 제어박스를 거치고, 그리퍼는 Modbus로 직접 간다. 카메라는 손목에 붙어 USB로 들어온다.")
 
-    s.box(430, 150, 420, 96, "로봇 PC",
+    s.box(420, 118, 440, 134, "로봇 PC (노트북)",
           ["Ubuntu 24.04 · ROS 2 Jazzy · Python 3.12",
-           "NVIDIA RTX 4060 8GB (드라이버 595.84)",
-           "웹 · planner · ROS 노드 · DB를 전부 구동"], color=HW)
-    s.box(430, 290, 420, 76, "로봇 제어박스",
-          ["두산 표준 제어박스 · 192.168.1.100",
-           "모터 드라이브 · 안전 I/O · 비상정지 하드와이어"], color=HW)
-    s.box(430, 430, 420, 96, "Doosan M0609",
-          ["6축 협동로봇 · 가반하중 6kg · 작업반경 900mm",
-           "관절 토크센서 내장 · 반복정밀도 ±0.03mm",
-           "컨트롤러 TCP 이름 GripperDA_v1"], color=HW)
-    s.box(430, 570, 420, 62, "OnRobot RG2",
-          ["2지 평행 그리퍼 · Grip detected 비트로 파지 판정"], color=HW)
+           "NVIDIA RTX 4060 8GB",
+           "웹 · planner · ROS 노드 · DB를 전부 구동",
+           "내장 마이크 — \"hello rokey\" 웨이크워드"],
+          color=HW, title_size=20)
 
-    s.box(60, 430, 340, 96, "RealSense RGB-D",
-          ["손목 장착 (eye-in-hand)", "color · aligned depth · CameraInfo",
-           "align_depth 필수"], color=HW)
-    s.box(60, 570, 340, 62, "USB 마이크", ['"hello rokey" 웨이크워드 감지'], color=HW)
+    s.box(80, 330, 280, 124, "RealSense RGB-D",
+          ["손목 장착 (eye-in-hand)", "color · aligned depth", "align_depth 필수"],
+          color=HW, title_size=19)
 
-    s.box(920, 290, 300, 76, "비상정지",
-          ["제어박스에 하드웨어 직결 (NFR-01)", "소프트웨어 경로를 거치지 않는다"],
-          color=DANGER)
-    s.box(920, 430, 300, 96, "OnRobot 툴체인저",
-          ["Modbus TCP · 192.168.1.1:502", "onrobot_rg_control 드라이버",
-           "/onrobot/sendCommand · status"], color=HW)
+    s.box(420, 330, 440, 104, "로봇 제어박스",
+          ["두산 표준 제어박스 · 192.168.1.100", "모터 드라이브 · 안전 I/O"],
+          color=HW, title_size=20)
 
-    s.arrow([(640, 246), (640, 290)], head="both", label="이더넷", label_at=0.5)
-    s.arrow([(640, 366), (640, 430)], head="both", label="제어 통신", label_at=0.5)
-    s.arrow([(640, 526), (640, 570)], head="none")
-    s.label(640, 554, "엔드이펙터 장착", size=11)
-    s.arrow([(920, 328), (850, 328)], head="none", dash="5 4", stroke=DANGER[0])
+    s.box(420, 490, 440, 104, "Doosan M0609",
+          ["6축 · 가반하중 6kg · 작업반경 900mm", "관절 토크센서 내장"],
+          color=HW, title_size=20)
 
-    # 비상정지 박스를 관통하지 않도록 오른쪽 바깥 채널로 돌린다.
-    s.arrow([(850, 190), (1252, 190), (1252, 478), (1220, 478)])
-    s.label(1040, 182, "이더넷 · Modbus TCP", size=11)
-    s.arrow([(1070, 526), (1070, 548), (885, 548), (885, 601), (850, 601)])
-    s.label(968, 542, "그리퍼 제어 · 상태", size=11)
+    s.box(420, 650, 440, 104, "OnRobot RG2",
+          ["2지 평행 그리퍼 · Grip detected로 파지 판정",
+           "툴체인저 경유 Modbus TCP · 192.168.1.1:502"],
+          color=HW, title_size=20)
 
-    s.arrow([(230, 430), (230, 198), (430, 198)])
-    s.label(230, 392, "USB", size=11)
-    s.arrow([(400, 601), (415, 601), (415, 214), (430, 214)])
-    s.label(415, 392, "USB", size=11)
+    s.box(80, 650, 280, 104, "비상정지",
+          ["제어박스에 하드웨어 직결", "소프트웨어를 거치지 않는다"],
+          color=DANGER, title_size=19)
 
-    s.panel(60, 676, 790, 96, "eye-in-hand — 카메라 자세는 매 프레임 TCP를 따라간다")
-    s.text(82, 724, "T_base_camera = posx_to_matrix(get_current_posx()) @ T_gripper2camera",
-           size=12.5, fill=MUTED, family=MONO)
-    s.text(82, 750, "T_gripper2camera는 컨트롤러에 TCP가 선택돼 있는 상태로 풀려 있다.",
-           size=12, fill=MUTED)
+    s.arrow([(220, 330), (220, 185), (420, 185)])
+    s.label(232, 260, "USB", size=14, anchor="start")
 
-    s.rect(920, 676, 300, 96, stroke=DANGER[1], fill="#fefaf9", r=14, sw=1.4)
-    s.text(942, 706, "TCP가 풀리면", size=12.5, fill=DANGER[0], weight=700)
-    s.text(942, 730, "좌표 전체가 약 208mm 어긋난다.", size=11.5, fill=DANGER[0])
-    s.text(942, 752, "상태바의 TCP 표시가 그것을 본다.", size=11.5, fill=DANGER[0])
+    s.arrow([(640, 252), (640, 330)], head="both")
+    s.label(652, 296, "이더넷", size=14, anchor="start")
+
+    s.arrow([(640, 434), (640, 490)], head="both")
+    s.label(652, 468, "제어 통신", size=14, anchor="start")
+
+    s.arrow([(640, 594), (640, 650)], head="none")
+    s.label(652, 628, "엔드이펙터 장착", size=14, anchor="start")
+
+    s.arrow([(860, 185), (1040, 185), (1040, 702), (860, 702)])
+    s.label(1052, 450, "Modbus TCP", size=14, anchor="start")
+
+    s.arrow([(360, 702), (392, 702), (392, 382), (420, 382)], head="none",
+            dash="5 4", stroke=DANGER[0])
     return s
 
 
 # --- 6. 작업 셀 배치 ---------------------------------------------------------
-
-# src/control/config/bins.yaml 실측값 (base 좌표계, mm). 여기서 지어낸 값이 아니다.
-BINS = {
-    "left_box": {
-        "name": "왼쪽 박스 (left_box)",
-        "corners": [(385.898, -371.494), (264.086, -368.680),
-                    (256.111, -578.083), (391.268, -569.062)],
-        "floor_z": -5.512,
-    },
-    "right_box": {
-        "name": "오른쪽 박스 (right_box)",
-        "corners": [(67.499, -364.838), (-74.162, -360.260),
-                    (-70.257, -581.734), (61.445, -574.749)],
-        "floor_z": -7.903,
-    },
-}
 
 OBJECTS = [
     ("치약", "toothpaste", 4), ("물티슈", "wet_wipes", 4), ("선크림", "sunscreen", 3),
@@ -520,91 +490,100 @@ OBJECTS = [
     ("섬유탈취제", "fabric_spray", 3), ("젤네일", "gel_nail", 3),
 ]
 
+# 파지력 5단계. 단계 정의(단조 감소)는 objects.yaml, 실제로 control이 거는 힘은
+# skill_params.yaml이 소유한다 — g4만 두 값이 다르다(아래 note 참조).
+GRIP_LEVELS = [
+    ("g1", "40N", "가장 강하게", None),
+    ("g2", "35N", "강하게", None),
+    ("g3", "30N", "보통", None),
+    ("g4", "25N", "약하게", "control은 10N"),
+    ("g5", "20N", "가장 약하게 · 신규 클래스 기본값", None),
+]
+
 
 def diagram_cell_layout() -> Svg:
-    s = Svg(1280, 760)
+    """작업 셀 배치 — 실제 셀에서 보이는 대로 그린 모식도(축척 아님).
+
+    좌표를 그대로 찍은 평면도였다가 바꿨다. 목적지의 정확한 좌표는 bins.yaml이 정본이고,
+    이 그림이 답해야 하는 것은 "무엇이 어디 있고 무엇을 어디로 옮기는가"다.
+    """
+    s = Svg(1280, 780)
     title(s, "작업 셀 배치 · 작업물",
-          "bins.yaml의 실측 좌표를 그대로 그린 평면도 (base 좌표계, mm).")
+          "작업대의 물체를 집어 두 박스로 분류한다. 목적지 좌표의 정본은 bins.yaml이다.")
 
-    # base 좌표 → 화면 좌표. 화면 위쪽이 +X(로봇 정면), 화면 왼쪽이 +Y.
-    # 범위는 실측값이 차지하는 구간(X -74~391, Y -582~-360)에 여백을 더해 잡았다.
-    ox, oy, sc = 130, 150, 0.72
+    s.panel(60, 104, 700, 640)
 
-    def px(yb):
-        return ox + (130 - yb) * sc
+    # 로봇 — 왼쪽 위
+    rx, ry = 210, 250
+    s.add(f'<circle cx="{rx}" cy="{ry}" r="46" fill="{HW[1]}" stroke="{HW[0]}" '
+          f'stroke-width="2"/>')
+    s.text(rx, ry + 7, "M0609", size=17, fill=HW[0], anchor="middle", weight=700)
+    # 라벨을 원 위에 둔다 — 아래에 두면 작업대로 가는 점선이 글씨를 가로지른다.
+    s.text(rx, ry - 68, "6축 협동로봇 + RG2", size=14, fill=MUTED, anchor="middle")
 
-    def py(xb):
-        return oy + (500 - xb) * sc
+    # 오른쪽 박스 — 오른쪽 위
+    s.rect(470, 150, 250, 150, stroke=PERCEPTION[0], fill=PERCEPTION[1], r=12, sw=2)
+    s.text(595, 212, "오른쪽 박스", size=19, fill=PERCEPTION[0], anchor="middle",
+           weight=700)
+    s.text(595, 240, "right_box", size=14, fill=PERCEPTION[0], anchor="middle",
+           family=MONO)
 
-    s.panel(60, 104, 700, 600)
+    # 작업대 — 오른쪽 아래, 위에 물체 여러 개
+    s.rect(400, 360, 330, 350, stroke=HW[0], fill="#f4f2ee", r=12, sw=2)
+    s.text(420, 392, "작업대", size=18, fill=HW[0], weight=700)
+    cols, cw, ch = 2, 145, 56
+    for i, (ko, en, _lvl) in enumerate(OBJECTS):
+        ox = 420 + (i % cols) * (cw + 14)
+        oy = 414 + (i // cols) * (ch + 12)
+        s.rect(ox, oy, cw, ch, stroke=NEUTRAL[0], fill="#ffffff", r=9, sw=1.4)
+        s.text(ox + cw / 2, oy + 24, ko, size=15, fill=INK, anchor="middle")
+        s.text(ox + cw / 2, oy + 43, en, size=11.5, fill=MUTED, anchor="middle",
+               family=MONO)
 
-    # 격자 100mm
-    for yb in range(-600, 101, 100):
-        s.line(px(yb), py(480), px(yb), py(-180), stroke="#f0f2f6", sw=1)
-    for xb in range(-100, 501, 100):
-        s.line(px(100), py(xb), px(-620), py(xb), stroke="#f0f2f6", sw=1)
+    # 왼쪽 박스 — 왼쪽 아래
+    s.rect(100, 520, 250, 150, stroke=GRASP[0], fill=GRASP[1], r=12, sw=2)
+    s.text(225, 582, "왼쪽 박스", size=19, fill=GRASP[0], anchor="middle", weight=700)
+    s.text(225, 610, "left_box", size=14, fill=GRASP[0], anchor="middle", family=MONO)
 
-    # 축
-    s.arrow([(px(0), py(0)), (px(0), py(430))], stroke=MUTED, sw=1.2)
-    s.arrow([(px(0), py(0)), (px(115), py(0))], stroke=MUTED, sw=1.2)
-    s.text(px(0) + 10, py(440), "+X (로봇 정면)", size=11.5, fill=MUTED, family=MONO)
-    s.text(px(120), py(0) - 12, "+Y", size=11.5, fill=MUTED, family=MONO)
+    # 집어서 분류한다
+    s.arrow([(400, 470), (360, 470), (360, 560), (350, 560)], sw=1.8)
+    s.label(330, 500, "분류", size=14)
+    s.arrow([(560, 360), (560, 300)], sw=1.8)
+    s.label(572, 336, "분류", size=14, anchor="start")
+    s.arrow([(256, 250), (470, 200)], head="none", dash="5 4")
+    s.arrow([(250, 285), (420, 400)], head="none", dash="5 4")
+    s.arrow([(230, 296), (225, 520)], head="none", dash="5 4")
+    s.text(78, 726, "점선 = 로봇 작업반경 안. 실제 좌표·바닥 높이는 bins.yaml 실측값을 쓴다.",
+           size=13.5, fill=MUTED)
 
-    # 로봇 base
-    s.add(f'<circle cx="{px(0)}" cy="{py(0)}" r="16" fill="{HW[1]}" stroke="{HW[0]}" '
-          f'stroke-width="1.6"/>')
-    s.text(px(0), py(0) + 5, "R", size=13, fill=HW[0], anchor="middle", weight=700)
-    s.text(px(0), py(0) + 38, "M0609 base (0, 0)", size=11.5, fill=MUTED,
-           anchor="middle")
-
-    # 바구니
-    for key, bin_ in BINS.items():
-        pts = " ".join(f"{px(y)},{py(x)}" for x, y in bin_["corners"])
-        stroke, fill = (GRASP if key == "left_box" else PERCEPTION)
-        s.add(f'<polygon points="{pts}" fill="{fill}" stroke="{stroke}" '
-              f'stroke-width="1.8"/>')
-        cx = sum(px(y) for x, y in bin_["corners"]) / 4
-        cy = sum(py(x) for x, y in bin_["corners"]) / 4
-        s.text(cx, cy - 10, bin_["name"].split(" (")[0], size=14, fill=stroke,
-               anchor="middle", weight=700)
-        s.text(cx, cy + 12, key, size=12, fill=stroke, anchor="middle", family=MONO)
-        # 크기는 실측 모서리에서 직접 잰다 — 따로 적어 두면 좌표만 고칠 때 어긋난다.
-        (ax, ay), (bx, by), (c_x, c_y) = bin_["corners"][:3]
-        width = ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
-        depth = ((bx - c_x) ** 2 + (by - c_y) ** 2) ** 0.5
-        s.text(cx, cy + 32, f"{width:.0f} x {depth:.0f} mm", size=11, fill=MUTED,
-               anchor="middle", family=MONO)
-
-    s.text(78, 672, "격자 100mm · 상단 내부 모서리 4점과 바닥점을 닫힌 손끝으로 접촉해 실측한 값이다.",
-           size=11.5, fill=MUTED)
-    s.text(78, 692, "바닥 z — left_box -5.5mm · right_box -7.9mm. place는 이 값과 물체 높이로 놓는 높이를 정한다.",
-           size=11.5, fill=MUTED)
-
-    # 오른쪽: 작업물과 규칙
-    s.panel(790, 104, 450, 320, "작업물 — YOLO11-seg 7클래스")
-    yy = 156
+    # 오른쪽 — 작업물과 파지력
+    s.panel(790, 104, 450, 330, "작업물 — YOLO11-seg 7클래스")
+    yy = 158
     for ko, en, level in OBJECTS:
-        s.text(818, yy, ko, size=13, fill=INK)
-        s.text(940, yy, en, size=12, fill=MUTED, family=MONO)
-        bw = 34
-        s.rect(1170, yy - 13, bw, 19, stroke=CONTROL[0], fill=CONTROL[1], r=9, sw=1.2)
-        s.text(1170 + bw / 2, yy + 1, f"g{level}", size=11.5, fill=CONTROL[0],
-               anchor="middle", weight=600, family=MONO)
-        yy += 32
-    s.text(818, 400, "SAM+VLM 경로는 이 목록을 보지 않는다 — 처음 보는 물건도 인지한다.",
-           size=11.5, fill=MUTED)
+        s.text(816, yy, ko, size=15, fill=INK)
+        s.text(940, yy, en, size=13, fill=MUTED, family=MONO)
+        s.rect(1168, yy - 15, 40, 22, stroke=CONTROL[0], fill=CONTROL[1], r=11, sw=1.3)
+        s.text(1188, yy + 1, f"g{level}", size=13, fill=CONTROL[0], anchor="middle",
+               weight=600, family=MONO)
+        yy += 36
+    s.text(816, 414, "SAM+VLM 경로는 이 목록을 보지 않는다 — 처음 보는 물건도 인지한다.",
+           size=13, fill=MUTED)
 
-    s.panel(790, 448, 450, 256, "파지력 — 5단계 grip_level")
-    rows = [("g1", "40N", "가장 강하게"), ("g2", "35N", ""), ("g3", "30N", "보통"),
-            ("g4", "10N", "약하게 (무른 물체 예외)"), ("g5", "20N", "가장 약하게 · 신규 클래스 기본값")]
-    yy = 500
-    for tag, force, note in rows:
-        s.text(818, yy, tag, size=12.5, fill=CONTROL[0], family=MONO, weight=600)
-        s.text(858, yy, force, size=12.5, fill=INK, family=MONO)
-        s.text(910, yy, note, size=11.5, fill=MUTED)
-        yy += 30
-    s.text(818, 682, "단계→힘 매핑은 objects.yaml과 skill_params.yaml이 소유한다.",
-           size=11.5, fill=MUTED)
+    s.panel(790, 460, 450, 284, "파지력 — 5단계 grip_level")
+    yy = 514
+    for tag, force, note, exc in GRIP_LEVELS:
+        s.text(816, yy, tag, size=15, fill=CONTROL[0], family=MONO, weight=700)
+        s.text(860, yy, force, size=15, fill=INK, family=MONO)
+        s.text(920, yy, note, size=13.5, fill=MUTED)
+        if exc:
+            s.text(1232, yy, exc, size=12.5, fill=DANGER[0], anchor="end")
+        yy += 34
+    s.text(816, 692, "1이 가장 강하고 5가 가장 약하다(objects.yaml).", size=13,
+           fill=MUTED)
+    s.text(816, 714, "g4만 예외로 control이 10N을 건다 — 무른 물체는 25N에 걸리기 전에",
+           size=13, fill=DANGER[0])
+    s.text(816, 732, "눌려버려 Grip detected가 안 켜졌다(skill_params.yaml).", size=13,
+           fill=DANGER[0])
     return s
 
 
