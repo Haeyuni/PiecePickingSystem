@@ -1,4 +1,4 @@
-# grip_level별 힘/속도 파라미터 + 시각검증 상대이동값
+# grip_level별 힘/속도 파라미터
 # 미확정 — perception/config/objects.yaml의 grip_levels와 일치시켜 관리 (중복 정의 주의)
 # 단위: 길이 mm, 힘 N (인터페이스_정의서.md 1.1절). approach_speed 단위는 objects.yaml의 TODO 참조
 # TODO: 값 확정 (시스템명세서 미확정 항목 참조)
@@ -7,15 +7,23 @@
 # 파지력 5단계: 1=가장 강하게(40N) ~ 5=가장 약하게(20N), 5N 간격.
 # (그리퍼의 힘 제한 close, dsr_motion.move_gripper 참조) — approach_speed·
 # pick은 max_grip_force_n만 쓴다(그리퍼의 힘 제한 close, dsr_motion.gripper_width_command
-# 참조). contact_threshold_n은 place_into 하강의 순응 정지(compliance.contact_exceeded,
-# 아래 compliance 블록 참조)가 쓴다 — 기본은 꺼져 있다. approach_speed는 아직 아무도
+# 참조). **여기 grip_levels의 contact_threshold_n은 아무도 안 쓴다** — place_into 하강의
+# 순응 정지가 쓰는 값은 아래 compliance 블록의 contact_threshold_n 하나뿐이다(place_into는
+# 물체별 grip_level을 받지 않는다, place_server.py 참조). approach_speed도 아직 아무도
 # 안 쓴다(접근 자체의 속도 프로파일링은 여전히 미구현).
 
 grip_levels:
   1: { max_grip_force_n: 40.0, approach_speed: 0.25, contact_threshold_n: 8.0 }  # 매우 강하게
   2: { max_grip_force_n: 35.0, approach_speed: 0.25, contact_threshold_n: 7.0 }  # 강하게
   3: { max_grip_force_n: 30.0, approach_speed: 0.20, contact_threshold_n: 6.0 }  # 보통
-  4: { max_grip_force_n: 25.0, approach_speed: 0.15, contact_threshold_n: 5.0 }  # 약하게
+  # 2026-09-09 (사용자 요청) 25.0 → 10.0. **의도적으로 5단계(20N)보다 낮다 — "1=가장
+  # 강하게 ~ 5=가장 약하게"의 단조성이 여기서 깨진다.** RG2의 Grip detected는 목표
+  # 개폭에 닿기 전에 force 한계로 멈춰야 켜지는데, 봉제 인형처럼 무른 물체는 25N에
+  # 걸리기 전에 저항 없이 목표 개폭까지 눌려버려 grip=False로 오판됐다(2026-09-09 실물,
+  # PICK_VERIFY 실패 — width=35.3mm까지 닫혔는데 gsta 그립 비트는 끝까지 False).
+  # force 한계를 낮춰 접촉 즉시 멈추게 해서 grip detected를 더 쉽게 걸리게 하려는
+  # 목적이라 grip_level 4에만 적용한다 — 5단계는 그대로 20N.
+  4: { max_grip_force_n: 10.0, approach_speed: 0.15, contact_threshold_n: 5.0 }  # 약하게 (예외: 4<5 의도된 역전)
   5: { max_grip_force_n: 20.0, approach_speed: 0.08, contact_threshold_n: 3.0 }  # 매우 약하게
 
 # --- Tool reference model (empirical, not independent physical geometry) ---
@@ -126,7 +134,11 @@ motion:
   #
   # place_server가 시작 시 ikin으로 도달 가능성을 확인하고 안 되면 20mm씩 낮추므로
   # 이 값은 "이상적으로 원하는 여유"이고, 못 닿으면 자동으로 낮아진다.
-  place_safe_clearance_mm: 20.0
+  # 2026-09-09 (사용자 요청) 20.0 → 0.0 → 50.0. 0은 여유가 전혀 없어 이동 경로 중간의
+  # 장애물(작업대·다른 물체·바구니 테두리)을 넘어갈 여지가 사라진다는 우려로 다시
+  # 올린다. 100은 2026-09-07 실물에서 팔이 안 닿는 높이를 만들어 이동 자체가 실패했던
+  # 값이니(위 132행 이력) 50은 그보다는 안전하지만, ikin 도달 범위는 다시 확인할 것.
+  place_safe_clearance_mm: 50.0
   # place_into 완료 뒤 orchestrator가 곧바로 home(관절이동)을 부른다(web/orchestrator.py
   # _execute_steps). place_server가 물러나는 높이(bin 접근 높이)에서 바로 관절이동을
   # 시작하면 바구니 테두리 바로 위라 여유가 적어, place_into 마지막에 이만큼 더
@@ -313,26 +325,41 @@ compliance:
   # 판단되면 목표 높이까지 안 가고 그 자리에서 멈춘다 — 깨지기 쉬운 물체를 계산된
   # 목표 z까지 위치제어로 밀어붙이면, 목표가 실제보다 낮게 잡혔을 때 눌러 찍는다.
   #
-  # **기본은 꺼져 있다.** 이 저장소엔 dsr_msgs2가 컨테이너에 마운트로만 존재해서
-  # (docker-entrypoint.sh 참조) GetToolForce 서비스도 아래 contact_threshold_n
-  # 임계값도 실물로 검증한 적이 없다. 켜기 전에 저속·안전한 물체로 먼저 확인할 것 —
-  # 임계값이 너무 낮으면 정상 마찰에도 일찍 멈춰 물체가 목표보다 높이 뜬 채로 놓이고,
-  # 너무 높으면 이 기능이 없는 것과 같아진다(그냥 끝까지 눌러붙인다).
+  # **원래 기본은 꺼져 있었다**(GetToolForce 서비스도 아래 contact_threshold_n 임계값도
+  # 실물로 검증한 적이 없었다). 2026-09-08에 켰다 — 임계값이 너무 낮으면 정상 마찰에도
+  # 일찍 멈춰 물체가 목표보다 높이 뜬 채로 놓이고, 너무 높으면 이 기능이 없는 것과
+  # 같아진다(그냥 끝까지 눌러붙인다). 실제로 감시가 돌았는지는 매 하강마다 남는
+  # `[COMPLIANCE] 하강 감시 ...` 로그로 확인한다(무응답 횟수가 거기 찍힌다).
   place_descent_enabled: true
-  # 하강을 이 간격(mm)으로 쪼개 매 스텝 사이에 GetToolForce를 확인한다. 작을수록 접촉을
-  # 빨리 감지하지만 movel 호출이 늘어 사이클이 느려진다.
-  place_descent_step_mm: 5.0
+  # 2026-09-09 (사용자 요청) **스텝 방식을 걷어냈다.** 예전에는 place_descent_step_mm(5mm)
+  # 간격으로 하강을 쪼개 movel을 여러 번 보내고 스텝 사이에서만 힘을 확인했다 — 멈출 수
+  # 있는 지점이 스텝 경계뿐이라 사실상 5mm 단위 위치제어였고, 80mm 하강에 movel이 16번
+  # 나가 그만큼 느렸다. 지금은 목표까지 **한 번의 movel로 내려가면서** 감시하고, 임계값을
+  # 넘으면 그 자리에서 movel goal을 취소해 멈춘다(compliance.ContactWatch +
+  # dsr_motion.call_action_blocking의 stop_when).
+  #
+  # 이 구간만 쓰는 하강 속도(mm/s). **오버슈트가 속도에 그대로 비례한다** — 접촉을
+  # 알아채고 로봇이 실제로 서기까지 (확인 주기 + 취소 왕복 + 감속)만큼 더 내려가기
+  # 때문이다. place 공용 속도(place_linear_vel_mm_s=90)로 내려가면 확인 주기 0.1초만으로도
+  # 9mm를 더 눌러 버려서, 이 구간만 느리게 간다. 접촉이 너무 늦게 걸리면 더 낮출 것.
+  place_descent_vel_mm_s: 30.0
+  # 하강 중 GetToolForce 확인 주기(초). 짧을수록 빨리 멈추지만 aux_control 서비스를
+  # 그만큼 자주 부른다 — 같은 네임스페이스의 get_current_posx가 movel 직후 10~20초씩
+  # 무응답인 구간이 실물에서 관측됐으므로(dsr_motion.get_current_posx 주석) 무한정
+  # 낮추지 말 것. 0.1초면 위 속도(30mm/s)에서 확인 사이 3mm다.
+  place_descent_poll_s: 0.1
   # 접촉 판정 임계값(N, GetToolForce의 Fx/Fy/Fz 크기 기준). PlaceInto.action은 물체별
   # grip_level을 받지 않으므로(pick과 달리 놓을 때는 이미 잡고 있는 물체 정보뿐) 물체별로
   # 나누지 않고 고정값 하나만 쓴다. 0/미설정이면 place_descent_enabled가 켜져 있어도
   # 순응 하강을 건너뛴다(place_server.py 참조).
-  # 2026-09-08 (사용자 요청) 0.0 → 5.0. **실물로 검증되지 않은 값이다** — 저속·안전한
-  # 물체로 먼저 확인할 것. 정상 마찰에도 5N은 쉽게 넘을 수 있어(주석 참조) 너무 일찍
-  # 멈출 위험이 있다.
-  contact_threshold_n: 5.0
-
-visual_verification:
-  wrist_camera_offset_mm: null   # TODO: 그리퍼 사이 확인을 위한 상대이동값 (미확정). 단위 mm
+  # 2026-09-08 (사용자 요청) 0.0 → 5.0.
+  # 2026-09-09 (사용자 요청) 5.0 → 10.0. **5.0은 실물에서 너무 일찍 걸렸다** — 하강
+  # 시작 직후(가속 구간, z가 2mm도 안 내려간 지점)에 3회 안쪽 확인만으로 5.1~14.6N이
+  # 찍혀 즉시 정지했다(최근 place_into 5건 중 3건, 2026-09-09 로그). 그 결과 depth
+  # 기반으로 계산한 목표 높이(69~92mm대)까지 못 내려가고 시작 지점 근처에서 놓아버려,
+  # "depth 맞춰 내려놓기"가 사실상 죽어 있었다. 10.0도 실물로 검증된 값은 아니다 —
+  # 여전히 너무 일찍 걸리면 더 올리고, 물체를 누르는 게 보이면 낮출 것.
+  contact_threshold_n: 10.0
 
 home:
   # 2026-09-04 실측: dsr_msgs2/MoveJoint·MovejH2r이 요구하는 단위 그대로(도, deg/sec) 둔다.

@@ -21,6 +21,8 @@ class PlacePlan:
     target_tcp_posx: tuple[float, ...]
     translated_footprint: tuple[tuple[float, float], ...]
     box: BoxGeometry
+    # 파지 자세에서 수직축(base +Z)으로 얼마나 돌려 놓는지. 0이면 파지 자세 그대로다.
+    yaw_deg: float = 0.0
 
 
 def _point3(value, name: str) -> tuple[float, float, float]:
@@ -92,23 +94,41 @@ def _centroid(points: tuple[tuple[float, float], ...]) -> tuple[float, float]:
 
 
 def _inside_with_margin(point, polygon, margin_mm: float) -> bool:
+    return _overflow_mm(point, polygon, margin_mm) <= 0.0
+
+
+def _overflow_mm(point, polygon, margin_mm: float) -> float:
+    """이 점이 여유선을 **몇 mm 넘어섰는지**. 0 이하면 안쪽(여유가 그만큼 남음).
+
+    판정(`_inside_with_margin`)과 진단이 같은 계산을 쓰게 해서, "안 들어간다"는 거절에
+    항상 **얼마나** 모자란지를 붙일 수 있게 한다 — 그 숫자가 없으면 벽 여유를 조금
+    줄이면 될 일인지, 아예 다른 바구니가 필요한 일인지 로그만 보고는 구분할 수 없다.
+    """
     area_sign = 1.0 if sum(
         x1 * y2 - x2 * y1
         for (x1, y1), (x2, y2) in zip(polygon, polygon[1:] + polygon[:1])
     ) > 0.0 else -1.0
     px, py = point
+    worst = -math.inf
     for (x1, y1), (x2, y2) in zip(polygon, polygon[1:] + polygon[:1]):
         edge_length = math.hypot(x2 - x1, y2 - y1)
         signed_distance = area_sign * ((x2 - x1) * (py - y1) - (y2 - y1) * (px - x1))
-        if signed_distance / edge_length < margin_mm:
-            return False
-    return True
+        worst = max(worst, margin_mm - signed_distance / edge_length)
+    return worst
+
+
+def _footprint_overflow_mm(points, polygon, margin_mm: float) -> float:
+    return max(_overflow_mm(point, polygon, margin_mm) for point in points)
 
 
 def plan_box_place(*, box: BoxGeometry, wall_margin_mm: float,
                    release_clearance_mm: float, pickup_tcp_posx,
                    footprint_xy, tcp_to_object_bottom_mm: float) -> PlacePlan:
-    """Center the observed footprint and require its whole boundary inside the box."""
+    """Center the observed footprint and require its whole boundary inside the box.
+
+    파지 자세 그대로 들어가면 그대로 놓고, 안 들어가면 수직축으로 돌려서 들어가는 각을
+    찾는다(`_fit_yaw`). 어떤 각으로도 안 들어가면 **얼마나 모자랐는지를 붙여** 거절한다.
+    """
     footprint = tuple((float(x), float(y)) for x, y in footprint_xy)
     tcp = tuple(float(v) for v in pickup_tcp_posx)
     if len(footprint) < 3 or len(tcp) != 6:
@@ -123,14 +143,67 @@ def plan_box_place(*, box: BoxGeometry, wall_margin_mm: float,
 
     bin_center = box.center_base_mm[:2]
     footprint_center = _centroid(footprint)
-    dx = bin_center[0] - footprint_center[0]
-    dy = bin_center[1] - footprint_center[1]
-    translated = tuple((x + dx, y + dy) for x, y in footprint)
-    if not all(_inside_with_margin(point, box.corners_xy, wall_margin_mm)
-               for point in translated):
-        raise ValueError("object footprint does not fit inside measured box boundary")
 
-    target = (tcp[0] + dx, tcp[1] + dy,
+    yaw_deg, translated, overflow_mm = _fit_yaw(
+        footprint, footprint_center, bin_center, box.corners_xy, float(wall_margin_mm))
+    if yaw_deg is None:
+        raise ValueError(
+            "object footprint does not fit inside measured box boundary "
+            f"(어떤 각도로도 최소 {overflow_mm:.1f}mm 초과 — 바구니 내부 "
+            f"{box.width_mm:.0f}x{box.depth_mm:.0f}mm, 벽 여유 {wall_margin_mm:.0f}mm)")
+
+    # 물체를 수직축으로 yaw_deg 돌려 놓으므로 TCP도 같은 축·같은 각으로 돈다. 회전
+    # 중심은 footprint 무게중심이고, 그 무게중심을 바구니 중심으로 옮긴다.
+    tcp_x, tcp_y = _rotate_about(
+        (tcp[0], tcp[1]), footprint_center, yaw_deg, bin_center)
+    # **ZYZ에서 base +Z 회전은 첫 각도에 더하기만 하면 된다**: posx_to_matrix가
+    # R = Rz(rx)·Ry(ry)·Rz(rz)로 만들므로(perception_common.geometry) 왼쪽에서 Rz(yaw)를
+    # 곱하면 Rz(yaw+rx)·Ry(ry)·Rz(rz)가 되어 rx만 바뀐다. 행렬 왕복 변환이 필요 없고,
+    # ry가 180도 근처(특이점)여도 파라미터가 새로 튀지 않는다.
+    target = (tcp_x, tcp_y,
               box.floor_z_mm + float(tcp_to_object_bottom_mm) + float(release_clearance_mm),
-              tcp[3], tcp[4], tcp[5])
-    return PlacePlan(target_tcp_posx=target, translated_footprint=translated, box=box)
+              tcp[3] + yaw_deg, tcp[4], tcp[5])
+    return PlacePlan(target_tcp_posx=target, translated_footprint=translated, box=box,
+                     yaw_deg=yaw_deg)
+
+
+def _rotate_about(point, pivot, yaw_deg: float, new_pivot):
+    """`pivot` 기준으로 `yaw_deg`(도, base +Z 오른손) 돌린 뒤 `new_pivot`으로 옮긴다."""
+    angle = math.radians(yaw_deg)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    dx, dy = point[0] - pivot[0], point[1] - pivot[1]
+    return (new_pivot[0] + dx * cos_a - dy * sin_a,
+            new_pivot[1] + dx * sin_a + dy * cos_a)
+
+
+def _fit_yaw(footprint, footprint_center, bin_center, corners_xy, wall_margin_mm):
+    """바구니에 들어가는 수직축 회전각을 찾는다. 반환: (각도 또는 None, 옮긴 footprint, 초과 mm).
+
+    **0도(=파지 자세 그대로)를 가장 먼저, 그다음 작은 각도부터 본다.** 손목을 덜 돌릴수록
+    이동이 짧고 도달 가능성도 높아서다 — 들어가기만 하면 되는 문제라 "가장 잘 맞는 각"을
+    찾을 이유가 없다.
+
+    **왜 회전이 필요한가**: 예전에는 평행이동만 했기 때문에, 물체가 작업대에 놓여 있던
+    방향이 바구니의 짧은 축과 나란하면 그대로 거절됐다. 2026-09-09 실물에서 spray_can이
+    파지 자세로는 13.9mm 초과였는데 약 120도 돌리면 3.6mm 여유로 들어갔다 — 벽 여유를
+    0으로 줄여도 안 되는(3.9mm 모자란) 경우라 회전 말고는 방법이 없었다.
+
+    회전은 손목만 돌리고 파지 자체는 그대로다(물체는 그리퍼에 잡힌 채 같이 돈다).
+    """
+    best_overflow = math.inf
+    for yaw_deg in _yaw_candidates():
+        moved = tuple(_rotate_about(point, footprint_center, yaw_deg, bin_center)
+                      for point in footprint)
+        overflow = _footprint_overflow_mm(moved, corners_xy, wall_margin_mm)
+        if overflow <= 0.0:
+            return yaw_deg, moved, overflow
+        best_overflow = min(best_overflow, overflow)
+    return None, (), best_overflow
+
+
+def _yaw_candidates():
+    """0도부터 시작해 좌우로 1도씩 벌려 나가는 순서 (0, +1, -1, +2, -2, … ±180)."""
+    yield 0.0
+    for step in range(1, 181):
+        yield float(step)
+        yield float(-step)

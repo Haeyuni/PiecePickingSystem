@@ -613,7 +613,8 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
                          cancel_timeout_s: float = 5.0, overall_timeout_s: float = 60.0,
                          on_timeout_verify=None, feedback_callback=None,
                          verify_poll_s: float = 1.0, logger=None,
-                         error_monitor=None):
+                         error_monitor=None,
+                         stop_when=None, stop_poll_s: float = 0.1):
     """액션을 보내고 결과를 기다린다(현재 스레드를 막는다). goal_handle이 취소 요청을
     받으면(웹의 정지 버튼) 원격 목표도 함께 취소한다 — 안 그러면 화면엔 "취소됨"으로
     보이는데 로봇은 계속 움직이는 상태가 된다.
@@ -645,6 +646,28 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     알람을 매 주기 확인해 **즉시** 실패로 끊는다. 이게 없으면 "goal은 accept됐는데
     로봇은 안 움직이는" 경우가 `overall_timeout_s`(60초)를 다 채운다 —
     `MotionErrorMonitor` 주석의 2026-09-07 place 사고가 그것이다.
+
+    **`stop_when`**: 이동 **도중** `stop_poll_s`마다 부르는 콜러블 — True면 목표에 도착하기
+    전이라도 원격 goal을 취소해 **로봇을 그 자리에 세우고 성공으로 돌려준다.** place_into의
+    순응 하강(`compliance.ContactWatch`)이 이 자리를 쓴다: 목표 z까지 한 번에 내려가되
+    접촉하면 거기서 멈추는 동작이 이 훅 하나로 표현된다.
+
+    "도착"과 "중간에 멈춤"을 둘 다 성공(True)으로 돌려주는 것은 의도다 — 중간 정지는 실패가
+    아니라 요청된 동작이고, 어디서 멈췄는지는 호출부가 자기 콜러블의 상태로 안다
+    (`ContactWatch.triggered`). 반환값에 세 번째 상태를 만들면 이 함수를 쓰는 다른 모든
+    이동(pick/place/home)의 호출부까지 그 상태를 다루게 된다.
+
+    **취소는 곧 정지다.** movel_h2r goal을 취소하면 드라이버가 그 모션을 멈춘다(이 모듈
+    docstring과 `_release_remote_goal` 참조) — 그래서 `stop_when`이 True인 순간
+    `_release_remote_goal`로 취소를 보내고 짧게 종료를 기다린다. 취소 없이 그냥 반환하면
+    로봇은 계속 내려가는데 호출부는 멈춘 줄 알고 그리퍼를 여는, 가장 나쁜 경우가 된다.
+
+    goal 수락 응답을 못 받은 구간에서는 `stop_when`을 보지 않는다 — 취소할 handle이 없어
+    **로봇을 세울 방법이 없는** 상태라, 거기서 우리만 먼저 빠져나오면 위와 같은 사고가 된다.
+
+    `stop_poll_s`의 하한은 이 함수의 루프 주기(0.1초)다 — 그보다 작게 줘도 그만큼 자주
+    불리지는 않는다. `stop_when` 자체가 서비스를 부르며 블로킹하면(GetToolForce 등) 그
+    시간만큼 루프 전체가 늦어지는 것도 같이 감안할 것.
 
     반환: (성공 여부, 원격 액션의 result 객체 또는 None).
     """
@@ -733,11 +756,27 @@ def call_action_blocking(client, goal, goal_handle, send_timeout_s: float = 10.0
     result_future.add_done_callback(lambda _f: finished.set())
 
     next_verify = time.monotonic() + verify_poll_s if on_timeout_verify is not None else None
+    # 접촉 감시는 첫 주기부터 본다 — 내려가기 전에 이미 닿아 있는 경우(직전 물체 위에
+    # 그대로 놓으려는 상황)도 첫 확인에서 걸러야 한다.
+    next_stop_check = time.monotonic() if stop_when is not None else None
     while not finished.wait(timeout=0.1):
         if goal_handle.is_cancel_requested:
             remote_handle.cancel_goal_async()
             finished.wait(timeout=cancel_timeout_s)
             return False, None
+        if next_stop_check is not None and time.monotonic() >= next_stop_check:
+            # 알람 확인보다 먼저 본다 — 접촉은 지금 이 순간 로봇을 세워야 하는 일이고,
+            # 알람은 "애초에 못 가는 목표"라 조금 늦게 알아도 결과가 같다.
+            if stop_when():
+                if logger:
+                    logger.info("call_action_blocking: stop_when 요청으로 이동 중단 "
+                                "— 목표 전에 멈추고 성공 처리한다")
+                # 도착 확인 경로와 같은 이유로 반드시 취소해서 로봇을 세우고 드라이버
+                # 실행 스레드를 정리한다(_release_remote_goal 참조).
+                _release_remote_goal(remote_handle, finished, logger,
+                                     "stop_when 요청으로 이동을 여기서 끊는다")
+                return True, None
+            next_stop_check = time.monotonic() + stop_poll_s
         blocked_reason = blocked()
         if blocked_reason is not None:
             # **컨트롤러가 이 목표를 거부했다.** goal은 accept된 채 남아 있고 결과 통지도
@@ -819,7 +858,8 @@ def move_linear(client, target_pos: list[float], goal_handle,
                 vel_deg_s: float, acc_deg_s2: float,
                 posx_client=None,
                 position_tolerance_mm: float = 3.0, rotation_tolerance_deg: float = 3.0,
-                logger=None, error_monitor=None) -> tuple[bool, list[float] | None]:
+                logger=None, error_monitor=None,
+                stop_when=None, stop_poll_s: float = 0.1) -> tuple[bool, list[float] | None]:
     """MovelH2r 하나를 블로킹으로 실행. `target_pos`는 [x,y,z,rx,ry,rz](mm, deg).
 
     `posx_client`를 넘기면 타임아웃 시 get_current_posx로 실제 위치를 한 번 더
@@ -836,6 +876,11 @@ def move_linear(client, target_pos: list[float], goal_handle,
     회전 도중의 값이었다). ZYZ는 ry가 180도 근처면 다른 (rx,rz) 조합이 같은 방향을
     나타낼 수 있어(모듈 docstring) 성분별 차이가 아니라 회전행렬 각도차로 비교한다
     (`_rotation_angle_diff_deg`).
+
+    `stop_when`을 주면 이동 도중 `stop_poll_s`마다 확인해서, True인 순간 목표 전이라도
+    로봇을 세우고 성공으로 돌려준다(`call_action_blocking`의 같은 이름 인자 참조).
+    place_into의 순응 하강이 이걸로 "내려가다 접촉하면 그 자리에서 멈춘다"를 만든다 —
+    **멈춘 지점은 반환된 pose(feedback 마지막값)가 알려 준다.**
 
     반환: (성공 여부, 도착 시점의 실제 pose 또는 None). 이 pose는 액션 feedback
     (`MovelH2r.Feedback.pos`, 드라이버가 100Hz로 채워 보낸다)에서 그대로 가져온
@@ -915,7 +960,8 @@ def move_linear(client, target_pos: list[float], goal_handle,
 
     success, _ = call_action_blocking(client, goal, goal_handle, on_timeout_verify=verify_arrived,
                                       feedback_callback=on_feedback, logger=logger,
-                                      error_monitor=error_monitor)
+                                      error_monitor=error_monitor,
+                                      stop_when=stop_when, stop_poll_s=stop_poll_s)
     if logger and not success:
         logger.error(
             f"move_linear 실패: feedback 마지막값={last_pose}, 목표={list(target_pos)} "

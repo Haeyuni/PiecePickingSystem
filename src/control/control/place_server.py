@@ -6,7 +6,6 @@
 control은 planner를 거치지 않는 호출(재전송, 수동 테스트, 향후 다른 클라이언트)도 받는다.
 좌표를 실제로 아는 쪽에서 마지막으로 확인하는 것이 옳다.
 """
-import math
 import os
 import pathlib
 import threading
@@ -126,12 +125,19 @@ class PlaceServer(Node):
         # 여유가 적어, 그만큼 더 올라간 뒤에 home으로 넘어가도록 한다.
         self._home_rise_mm = float(motion.get("home_rise_mm", 200.0))
 
-        # 순응 하강(compliance.py) — 기본은 꺼져 있다(skill_params.yaml compliance 블록
-        # 주석 참조. 이 저장소엔 dsr_msgs2가 없어 실물 검증을 못 했다).
+        # 순응 하강(compliance.py). 목표까지 **한 번의 movel로** 내려가면서 ContactWatch가
+        # 힘을 보고, 임계값을 넘으면 그 자리에서 goal을 취소해 멈춘다(2026-09-09 구조 변경 —
+        # 예전에는 place_descent_step_mm로 쪼개 스텝 사이에만 확인했다).
         params = load_skill_params()
         compliance_cfg = params.get("compliance") or {}
         self._place_descent_enabled = bool(compliance_cfg.get("place_descent_enabled", False))
-        self._place_descent_step_mm = float(compliance_cfg.get("place_descent_step_mm", 5.0))
+        # 이 구간만 느리게 간다. **오버슈트가 속도에 그대로 비례하기 때문이다** — 접촉을
+        # 알아채고 멈추기까지 (확인 주기 + 취소 왕복 + 감속)만큼은 더 내려간다. place의
+        # 공용 속도(place_linear_vel_mm_s, 90mm/s)로 내려가면 확인 주기 0.1초만으로도
+        # 9mm를 더 눌러 버린다.
+        self._place_descent_vel_mm_s = float(
+            compliance_cfg.get("place_descent_vel_mm_s", 30.0))
+        self._place_descent_poll_s = float(compliance_cfg.get("place_descent_poll_s", 0.1))
         # 접촉 임계값(N) — place_into는 물체별 grip_level을 받지 않으므로(PlaceInto.action
         # 참조) profile/grip_level별로 나누지 않고 고정값 하나만 쓴다. 0/미설정이면
         # 순응 하강을 건너뛴다(임계값 없이 "접촉했다"고 판단할 기준이 없다).
@@ -148,7 +154,7 @@ class PlaceServer(Node):
             GetCurrentPosx, dsr_motion.GET_CURRENT_POSX_SERVICE, callback_group=callbacks)
         self._gripper_cmd_client = self.create_client(
             SetCommand, dsr_motion.GRIPPER_COMMAND_SERVICE, callback_group=callbacks)
-        # 순응 하강(compliance.contact_exceeded)용 — place_descent_enabled가 꺼져 있으면
+        # 순응 하강(compliance.ContactWatch)용 — place_descent_enabled가 꺼져 있으면
         # 이 클라이언트는 만들어지되 쓰이지 않는다.
         self._tool_force_client = self.create_client(
             GetToolForce, dsr_motion.GET_TOOL_FORCE_SERVICE, callback_group=callbacks)
@@ -249,7 +255,10 @@ class PlaceServer(Node):
                 f"object={goal.object_id} bin={goal.bin_id} target="
                 f"{[round(v, 2) for v in target_posx]} footprint_points={len(footprint)} "
                 f"center={tuple(round(v, 2) for v in box.center_base_mm)} "
-                f"width={box.width_mm:.1f} depth={box.depth_mm:.1f} yaw={box.yaw_deg:.1f}deg")
+                f"width={box.width_mm:.1f} depth={box.depth_mm:.1f} yaw={box.yaw_deg:.1f}deg "
+                # 파지 자세 그대로 넣는지, 돌려서 넣는지 — 돌린 경우 손목이 그만큼 더
+                # 움직이므로(안전고도에서의 제자리 회전) 사고 분석 때 구분이 필요하다.
+                f"place_rotation={plan.yaw_deg:+.1f}deg")
         else:
             bottom_offset_mm = max(
                 0.0, float(getattr(goal, "object_bottom_offset_mm", 0.0) or 0.0))
@@ -395,9 +404,10 @@ class PlaceServer(Node):
 
         순응 하강 여부는 self._place_descent_enabled/self._place_contact_threshold_n
         (skill_params.yaml compliance 블록의 고정값)이 정한다 — 켜져 있고 임계값이
-        설정돼 있을 때만 마지막 하강(바구니 접근 높이 → 목표 높이)을 스텝으로 쪼개
-        GetToolForce로 접촉을 확인한다. 나머지 구간(안전고도 이동, 물러나기)은 그대로
-        위치제어다 — 접촉 위험이 있는 구간은 바구니 안으로 들어가는 그 한 구간뿐이다.
+        설정돼 있을 때만 마지막 하강(바구니 접근 높이 → 목표 높이)을 **한 번의 movel로
+        내려가면서** GetToolForce로 접촉을 감시하고, 넘으면 그 자리에서 멈춘다
+        (descend_compliant). 나머지 구간(안전고도 이동, 물러나기)은 그대로 위치제어다 —
+        접촉 위험이 있는 구간은 바구니 안으로 들어가는 그 한 구간뿐이다.
         """
         target_posx = list(target_posx)
         approach_posx = list(target_posx)
@@ -405,12 +415,17 @@ class PlaceServer(Node):
         target_xyz = target_posx[:3]
         approach_xyz = approach_posx[:3]
 
-        def move(pos):
+        def move(pos, vel_mm_s=None, stop_when=None, stop_poll_s=0.1):
+            """`vel_mm_s`를 주면 그 이동만 다른 속도로 간다(순응 하강만 느리게 쓴다).
+            `stop_when`은 이동 도중 로봇을 세우는 훅이다 — dsr_motion.move_linear 참조."""
             return dsr_motion.move_linear(self._movel_client, pos, goal_handle,
-                                          self._linear_vel_mm_s, self._linear_acc_mm_s2,
+                                          vel_mm_s if vel_mm_s is not None
+                                          else self._linear_vel_mm_s,
+                                          self._linear_acc_mm_s2,
                                           self._rot_vel_deg_s, self._rot_acc_deg_s2,
                                           posx_client=self._posx_client, logger=self.get_logger(),
-                                          error_monitor=self._motion_errors)
+                                          error_monitor=self._motion_errors,
+                                          stop_when=stop_when, stop_poll_s=stop_poll_s)
 
         def next_target(xyz, last_pose):
             """`xyz`로 위치만 바꾸고 회전은 유지한다 (dsr_motion.py 모듈 docstring —
@@ -437,43 +452,49 @@ class PlaceServer(Node):
                 return None
             return [xyz[0], xyz[1], xyz[2], last_pose[3], last_pose[4], last_pose[5]]
 
-        def descend_compliant(xy, start_pose, target_z, threshold_n, step_mm):
-            """`start_pose`의 z에서 `target_z`까지 `step_mm` 간격으로 내려가며 매 스텝
-            사이 GetToolForce로 접촉을 확인한다. 임계값을 넘으면 그 자리에서 멈추고
-            더 내려가지 않는다 — 깨지기 쉬운 물체를 계산된 목표까지 위치제어로
+        def descend_compliant(xy, start_pose, target_z, threshold_n):
+            """`start_pose`의 z에서 `target_z`까지 **한 번의 movel로 쭉 내려가면서**
+            GetToolForce로 접촉을 감시한다. 임계값을 넘으면 그 자리에서 movel을 취소해
+            멈추고 더 내려가지 않는다 — 깨지기 쉬운 물체를 계산된 목표까지 위치제어로
             밀어붙이지 않기 위해서다(compliance.py 모듈 docstring 참조).
+
+            **2026-09-09에 스텝 방식을 걷어냈다.** 예전에는 5mm씩 쪼개 movel을 여러 번
+            보내고 스텝 사이에서만 힘을 봤다 — 멈출 수 있는 지점이 스텝 경계뿐이라
+            사실상 5mm 단위 위치제어였고, 80mm 하강에 movel이 16번 나가 그만큼 느렸다.
+            지금은 `stop_when`으로 이동 도중에 멈춘다(dsr_motion.call_action_blocking).
+
+            **오버슈트는 남는다.** 접촉을 알아채고 로봇이 실제로 서기까지
+            (확인 주기 + 취소 왕복 + 감속)만큼은 더 내려간다 — 그래서 이 구간만
+            `place_descent_vel_mm_s`로 느리게 간다. 스텝 방식에도 같은 한계가 있었고
+            (스텝 경계까지는 무조건 내려갔다) 그쪽이 더 컸다.
 
             반환: (ok, 최종 pose, 접촉으로 조기 정지했는지). ok=False면 호출부가 다른
             move() 실패와 똑같이 취소/RuntimeError로 처리한다 — 취소는 `move()`가 내부에서
             이미 감지하므로 여기서 또 확인할 필요는 없다(그 결과를 그대로 돌려준다).
             """
-            start_z = start_pose[2]
-            remaining = start_z - target_z
-            if remaining <= 0.0:
-                # 이미 목표 높이거나 더 낮다 — 쪼갤 게 없다.
+            if start_pose[2] - target_z <= 0.0:
+                # 이미 목표 높이거나 더 낮다 — 내려갈 구간이 없으니 감시할 것도 없다.
                 return (*move([xy[0], xy[1], target_z,
                               start_pose[3], start_pose[4], start_pose[5]]), False)
-            steps = max(1, math.ceil(remaining / step_mm))
-            current = start_pose
-            for i in range(1, steps + 1):
-                z = start_z - remaining * i / steps
-                waypoint = next_target([xy[0], xy[1], z], current)
-                if waypoint is None:
-                    return False, None, False
-                ok, pose = move(waypoint)
-                if not ok:
-                    return False, pose, False
-                current = pose if pose is not None else waypoint
-                if goal_handle.is_cancel_requested:
-                    return True, current, False
-                hit = compliance.contact_exceeded(self._tool_force_client, threshold_n)
-                if hit:
-                    self.get_logger().warning(
-                        f"[COMPLIANCE] place 하강 접촉 감지(임계값 {threshold_n:.1f}N) — "
-                        f"z={z:.1f}mm에서 멈춤 (목표 {target_z:.1f}mm, {i}/{steps}스텝) "
-                        "— 그 아래로는 안 내려간다")
-                    return True, current, True
-            return True, current, False
+
+            waypoint = next_target([xy[0], xy[1], target_z], start_pose)
+            if waypoint is None:
+                return False, None, False
+
+            watch = compliance.ContactWatch(self._tool_force_client, threshold_n)
+            ok, pose = move(waypoint, vel_mm_s=self._place_descent_vel_mm_s,
+                            stop_when=watch, stop_poll_s=self._place_descent_poll_s)
+            # **감시가 실제로 돌았는지를 매번 남긴다.** GetToolForce가 무응답이면 접촉은
+            # 영영 안 잡히는데 하강 자체는 성공으로 끝나므로, 이 줄이 없으면 "순응 하강을
+            # 켜 뒀다"와 "순응 하강이 사실상 꺼져 있었다"를 로그로 구분할 수 없다.
+            self.get_logger().info(
+                f"[COMPLIANCE] 하강 감시 ({start_pose[2]:.1f} → {target_z:.1f}mm, "
+                f"{self._place_descent_vel_mm_s:.0f}mm/s): {watch.summary()}")
+            if watch.triggered and pose is not None:
+                self.get_logger().warning(
+                    f"[COMPLIANCE] place 하강 접촉 감지 — z={pose[2]:.1f}mm에서 멈춤 "
+                    f"(목표 {target_z:.1f}mm) — 그 아래로는 안 내려간다")
+            return ok, pose, watch.triggered
 
         # place_into 접근은 **수직·수평만** 쓴다: ①제자리 수직 상승 ②제자리 회전
         # ③안전고도 수평 이동 ④바구니 바로 위에서 수직 하강.
@@ -590,8 +611,8 @@ class PlaceServer(Node):
         self._publish_phase(goal_handle, PlaceInto.Feedback.PHASE_INSERTING)
         if self._place_descent_enabled and self._place_contact_threshold_n > 0.0:
             insert_ok, insert_pose, contact_stopped = descend_compliant(
-                approach_xyz, approach_pose, target_xyz[2], self._place_contact_threshold_n,
-                self._place_descent_step_mm)
+                approach_xyz, approach_pose, target_xyz[2],
+                self._place_contact_threshold_n)
         else:
             insert_posx = next_target(target_xyz, approach_pose)
             if insert_posx is None:
@@ -656,9 +677,9 @@ class PlaceServer(Node):
                 return None
             raise RuntimeError("home 이동 전 상승 실패")
 
-        self.get_logger().warning(
-            "place_into 완료 — visual_verification 미구현이라 손목 카메라로는 확인되지 "
-            "않았다. 순응 하강은 " + ("켜짐" if self._place_descent_enabled else "꺼짐(기본값)") +
+        self.get_logger().info(
+            "place_into 완료 — 순응 하강은 " +
+            ("켜짐" if self._place_descent_enabled else "꺼짐(기본값)") +
             " — 꺼져 있으면 위치제어만으로 목표까지 내려간다")
         return True
 
