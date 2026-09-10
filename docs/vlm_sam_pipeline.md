@@ -71,18 +71,18 @@ python3.12 -m venv .venv
 cp .env.example .env && $EDITOR .env            # OPENAI_API_KEY
 
 # 테스트 이미지는 test_image/에 넣는다 (인자 없이 돌리면 그 안 전부를 돈다)
-cp services/planner/image.png test_image/
+cp data/samples/vlm_sam_reference.png test_image/
 
 # 기본 경로(som): SAM 먼저 → VLM이 이름 → planner가 지시 해석 (3단계 전부)
-.venv/bin/python tools/scripts/vlm_sam_test.py test_image/image.png \
+.venv/bin/python tools/scripts/vlm_sam_test.py test_image/vlm_sam_reference.png \
     --command "치약 왼쪽으로"
 
 # SAM 전체 분할(CPU 26초)만 재사용하고 지시만 바꿔 가며
-.venv/bin/python tools/scripts/vlm_sam_test.py test_image/image.png \
+.venv/bin/python tools/scripts/vlm_sam_test.py test_image/vlm_sam_reference.png \
     --reuse-marks --command "우산 왼쪽으로"
 
 # 원래 물어본 경로 (VLM 박스 → SAM 프롬프트)
-.venv/bin/python tools/scripts/vlm_sam_test.py test_image/image.png \
+.venv/bin/python tools/scripts/vlm_sam_test.py test_image/vlm_sam_reference.png \
     --mode box --command "치약 왼쪽으로" --plan
 ```
 
@@ -112,7 +112,7 @@ json은 안 만들고, "LLM에 보내기 전"과 "VLM이 걸러낸 후"를 나�
 
 ## 실측 결과 (2026-09-07)
 
-측정 조건: `services/planner/image.png`(1280x720, 물티슈·섬유탈취제·치약 3종), gpt-4o
+측정 조건: `data/samples/vlm_sam_reference.png`(1280x720, 물티슈·섬유탈취제·치약 3종), gpt-4o
 (이 계정에서 쓸 수 있는 이미지 입력 모델은 gpt-4o뿐이다), MobileSAM, **CPU 추론**
 (측정 노트북 GPU는 MX450 2GB — 워크스테이션 RTX 4060에서는 SAM 쪽이 훨씬 빠르다).
 
@@ -194,7 +194,7 @@ som 모드의 SAM 전체 분할은 CPU에서 26초다 — GPU에서는 1~2초대
 
 ### 테스트 사진의 오염
 
-`services/planner/image.png`에는 이전 YOLO 검출 결과가 이미 그려져 있다(파란 사각형과
+`data/samples/vlm_sam_reference.png`에는 이전 YOLO 검출 결과가 이미 그려져 있다(파란 사각형과
 `dentimate_new_total_care_toothpaste 0.98` 배너). SAM은 그 배너를 별도 조각으로 잡았고,
 gpt-4o는 배너의 **글자를 읽고** 그것을 치약의 일부라고 답했다. 지금은 조각 합치기에
 기하 검사를 넣어(대표 조각보다 크거나 외접 사각형을 1.6배 넘게 키우면 버린다) 걸러내지만,

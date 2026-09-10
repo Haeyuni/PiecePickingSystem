@@ -1,10 +1,10 @@
 # perception 검출 모델 테스트
 
-`models/best.pt` = ultralytics **yolo11n-seg** (task=segment, imgsz=640, nc=6)
-클래스: `0 suncream`, `1 tape`, `2 nail_product`, `3 denmark_probiotics`, `4 ecla_wet_tissue`,
-`5 pigeon_spray_blue_bianca`. `config/objects.yaml`의 `model_labels`는 아직 앞의 3종만
-매핑한다 — 나머지 3종은 신규 클래스로 잡혀 fragile이 강제된다(개발계획.md D-7, 2026-09-04
-클래스 수 정정 참조).
+`models/best.pt` = ultralytics **yolo11n-seg** (task=segment, imgsz=640, **7클래스**,
+2026-09-07 배치): 치약·물티슈·선크림·토끼 인형·접이 우산·섬유탈취제·젤네일.
+`config/objects.yaml`의 `model_labels`가 이 7종을 전부 매핑하고, 롤백 대비로 구 가중치
+(`models/best_v1.pt`, 6클래스)의 어휘도 함께 남겨 둔다 — 표에 없는 라벨은 신규 클래스로
+떨어져 `grip_level 5`(가장 약하게)가 강제된다(개발계획.md D-7).
 
 ## 1회 준비
 
@@ -60,8 +60,12 @@ launch가 `.venv/bin/python`을 prefix로 붙인다 — `ros2 run`이 만드는 
 (`attr_source=llm_suggested`). 위 두 문단은 `detector:=yolo`(기본값) 이야기다 —
 `docs/vlm_sam_pipeline.md`의 [클래스 어휘를 주지 않는다] 참조.
 
-주요 파라미터: `conf`(0.25), `period_s`(0.5), `min_depth_valid_ratio`(0.35),
-`pose_max_age_s`(1.0), `require_robot_pose`(true).
+주요 파라미터: `conf`(0.25), `min_depth_valid_ratio`(0.35), `pose_max_age_s`(1.0),
+`require_robot_pose`(true), `detector`(`yolo`/`vlm_sam`).
+
+**주기 발행은 없다.** `observe` 액션 goal을 받았을 때만 한 번 검출한다(온디맨드 전환,
+`docs/on-demand-perception.md`) — `ros2 topic echo /world_state`가 조용한 것은 정상이고,
+명령을 넣거나 `observe`를 직접 쏴야 한 프레임이 나온다.
 
 검증: `python3 tools/scripts/check_perception.py` — 발행 내용이 인터페이스 계약을 지키는지 본다
 (두 토픽의 stamp 짝, 마스크 형식·해상도, 좌표계, 속성 일치, object_id 유지).
@@ -71,15 +75,19 @@ launch가 `.venv/bin/python`을 prefix로 붙인다 — `ros2 run`이 만드는 
 - ~~`node.py`가 스텁이다~~ → **구현 완료**. 위 세 스크립트는 여전히 모델 검증용 임시 도구다
   (노드를 띄우지 않고 가중치만 확인할 때 쓴다).
 - ~~3D 좌표가 카메라 좌표계까지만 나온다~~ → **base 좌표 변환 구현**(`geometry.py`).
-- **`grasp`가 아직 스텁이라 `/world_state`가 나오지 않는다.** perception은
-  `/perception/world_state_raw`까지만 낸다(릴레이 구조, 인터페이스_정의서 2.0절). planner/web은
-  `/world_state`를 구독하므로, grasp가 붙기 전까지 상위 계층은 `fake_world_publisher`를 본다.
+- ~~`grasp`가 아직 스텁이라 `/world_state`가 나오지 않는다~~ → **해소.** `grasp`가 구현돼
+  `world_state_raw`+`instance_masks`를 받아 파지 후보를 채운 뒤 `/world_state`로 낸다
+  (릴레이 구조, 인터페이스_정의서 2.0절). perception은 여전히 `/perception/world_state_raw`
+  까지만 내며, `grasp` 없이 상위 계층만 돌려볼 때는 `fake_world_publisher`를 쓴다.
 - **좌표 정확도는 아직 실측되지 않았다.** 변환 수식이 캘리브레이션 코드와 같은 해석인지는
   대조했고(무작위 자세 2000개, 최대 오차 5e-13mm), 정지 물체 측정의 반복 표준편차는
   0.1~0.3mm였다. 그러나 **절대 오차**는 로봇을 두 자세로 옮겨 같은 물체가 같은 base 좌표로
-  나오는지 보거나, `calibration/verify.py`로 TCP를 실제로 보내 재야 알 수 있다.
-- ~~`config/objects.yaml`의 클래스가 학습된 3종과 다르다~~ → **해소(2026-09-03, D-7)**.
-  `objects.yaml`이 `suncream`/`nail`/`tape` 3종을 담고 있다. 단 **모델 라벨은 `nail_product`이고
-  정식 `class_name`은 `nail`**이라, `node.py`가 모델 출력을 `DetectedObject.class_name`으로
-  옮길 때 `objects.yaml`의 `model_labels` 표를 반드시 지나야 한다. 안 지나면 네일이 매번
-  미확인 신규품목으로 떨어지고 fragile 프로파일이 강제된다 — 오류로 보이지 않고 느려지기만 한다.
+  나오는지 보거나, `tools/calibration/verify.py`로 TCP를 실제로 보내 재야 알 수 있다.
+- ~~`config/objects.yaml`의 클래스가 학습된 모델과 다르다~~ → **해소(2026-09-07)**.
+  7클래스 재학습에 맞춰 `objects.yaml`이 같은 7종을 담고 있다. 단 **모델 라벨과 정식
+  `class_name`이 다르다**(예: `dentimate_new_total_care_toothpaste` → `toothpaste`).
+  `node.py`가 모델 출력을 `DetectedObject.class_name`으로 옮길 때 `model_labels` 표를 반드시
+  지나야 한다 — 안 지나면 매번 미확인 신규품목으로 떨어져 `grip_level 5`가 강제된다.
+  오류로 보이지 않고 느려지기만 하는 종류의 어긋남이다.
+- **`objects.yaml`의 `mass_g`는 저울 실측이 아니라 제품 규격 기준 추정치다.** `attribute_db`가
+  이 값을 `needs_confirmation=false`로 내보내 확인된 값처럼 보인다 — 실측하면 고칠 것.
