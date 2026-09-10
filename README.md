@@ -2,26 +2,20 @@
 
 ## 0. 프로젝트 개요
 
-- **목표**: 품목이 바뀔 때마다 재티칭·재프로그래밍하는 비용을 없애는 것. 사람이 말이나
-  글로 내린 지시를 로봇이 그대로 해석해 물체를 골라 집고 지정한 곳에 놓는다
+- **목표**: 품목이 바뀔 때마다 재티칭·재프로그래밍하는 비용을 없애는 것.  
+사람이 말이나 글로 내린 지시를 로봇이 그대로 해석해 물체를 골라 집고 지정한 곳에 놓는다.
 - **주요 기능**: 도메인(가정·약국·재활용)을 고른 뒤 명령을 넣으면 관측 → LLM 계획 →
-  결정적 검증 → 사람 승인 → `pick` → `place_into`가 이어진다. 등록 어휘가 없는 물체도
-  SAM+VLM 경로로 인지하고, 실행 결과와 라벨은 데이터셋·실행 로그로 쌓인다
-- **사용 장비**: Doosan M0609 (6축 협동로봇), OnRobot RG2 그리퍼, RealSense RGB-D
-  (eye-in-hand)
+  결정적 검증 → 사람 승인 → `pick` → `place_into`가 이어진다.
+  등록 어휘가 없는 물체도 SAM+VLM 경로로 인지하고 실행 결과와 라벨은 데이터셋·실행 로그로 쌓인다
+- **사용 장비**: Doosan M0609 (6축 협동로봇), OnRobot RG2 그리퍼, RealSense RGB-D (eye-in-hand)
 - **개발 환경**: Ubuntu 24.04 LTS, ROS 2 Jazzy, Docker Compose
-- **주요 기술 스택**: ROS 2, FastAPI + rclpy 브리지, React (Vite/TypeScript),
-  PostgreSQL 16, OpenAI API (LLM/VLM), YOLO11-seg · SAM2, GraspNet-baseline
+- **주요 기술 스택**: ROS 2, FastAPI + rclpy 브리지, React (Vite/TypeScript), PostgreSQL 16, 
+OpenAI API (LLM/VLM), YOLO11-seg · SAM2, GraspNet-baseline
 - **기간**: 2026.09.01 ~ 2026.09.11
 
 ## 1. 시스템 설계
 
 ![시스템 아키텍처](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/system_architecture.png)
-
-`perception`이 `grasp_candidates`가 빈 `/perception/world_state_raw`를 1차 발행하고,
-`grasp`가 `instance_masks`와 짝지어 후보를 채운 뒤 `/world_state`로 최종 발행한다.
-**`/world_state`의 발행자는 `grasp` 하나뿐이다** — 두 노드가 같은 토픽에 쓰면 구독자가
-"빈 버전"과 "완성 버전"을 구분할 수 없다.
 
 ### 1.1 통신 인터페이스
 
@@ -38,53 +32,20 @@ HTTP      web      :8000  /api/* · /ws/live
           graspnet :8200  /health · 추론 엔드포인트
 ```
 
-- 이 저장소가 **정의하는 ROS2 서비스는 없다.** 서비스 호출은 전부 외부 드라이버 쪽이다
-  (`get_current_posx`·`ikin`·`fkin` 등 dsr, `/onrobot/sendCommand`·`/onrobot/pose`).
 - 외부 의존 토픽: `realsense2_camera`의 `/camera/color/image_raw`,
-  `/camera/aligned_depth_to_color/image_raw`, `/camera/color/camera_info`.
-  depth는 color와 같은 픽셀 grid·camera frame의 `16UC1`(mm)이어야 한다.
-- 길이는 계층 경계 어디서나 **mm**다. 두산 API(`get_current_posx`·`ikin`)도 mm라 지금은
-  환산이 일어나는 곳이 없고, ROS 관례(m)로 바꿔야 할 스택이 붙으면 그 환산은
-  `src/control/control/units.py` 한 곳에서만 한다.
+  `/camera/aligned_depth_to_color/image_raw`, `/camera/color/camera_info`
 
 ### 1.2 네트워크 구성
 
-웹·planner·ROS 노드·DB가 **로봇 PC 한 대**에서 전부 돈다.
-
 ![네트워크 구성](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/network.png)
 
-- `perception`/`grasp`/`control`/`web_ros`는 `network_mode: host`다. DDS 디스커버리가
-  멀티캐스트에 기대므로 브리지 네트워크에서는 호스트의 드라이버·카메라 노드를 못 찾는다.
-- host 네트워크에는 서비스 이름 DNS가 없어 `planner`/`db`/`graspnet`을 게시된 포트로
-  `localhost` 호출한다.
-- 외부로 나가는 통신은 OpenAI API(planner) 하나뿐이다. 키는 `.env`에만 두고 이미지에
-  굽지 않는다.
+웹·planner·ROS 노드·DB가 **로봇 PC 한 대**에서 전부 돈다.
 
 ## 2. 플로우 차트
 
 ### 2.1 명령 처리 시퀀스
 
 ![명령 처리 시퀀스](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/command_flow.png)
-
-| 단계 | 하는 일 | 담당 |
-|---|---|---|
-| 명령 접수 | 텍스트 또는 음성(STT). `robot_state.mode`가 idle이 아니면 즉시 거부 | web |
-| 관측 A | `Observe` `MODE_FULL` — SAM everything + VLM 라벨링으로 "무엇이 있는가"를 새로 안다 | perception → planner |
-| 계획 | 관측된 물체·목적지 목록 안에서만 시퀀스를 생성한다(그라운딩) | planner |
-| 검증 | 결정적 검증기 — 가반하중·작업반경·파지 가능 여부·안전 이벤트를 본다 | planner |
-| 실행 승인 | 계획된 스텝과 판단 근거를 보여주고 승인/거부/라벨 수정을 받는다 | 브라우저 |
-| 실행 | `pick` → `place_into`를 순서대로 액션 호출 | web → control |
-
-- **검증을 통과해도 곧바로 실행하지 않는다.** SAM+VLM 경로가 어휘 없이 물체 속성
-  (파지력에 직결되는 `grip_level` 포함)까지 스스로 판단하므로, 명령 1건당 한 번은 사람이
-  본다. 승인 응답은 `approve` / `reject` / `correct_label` 셋이고, `correct_label`은
-  라벨을 고쳐 재계획한 뒤 같은 승인을 다시 요청한다.
-- 정지(`/api/robot/stop`)와 홈복귀(`/api/robot/home`)는 자연어 해석이 필요 없는 동작이라
-  planner를 거치지 않고 web이 control을 직접 부른다. 특히 정지는 `mode`와 무관하게 항상
-  받는다.
-- 관측 B(`MODE_REPROMPT`)는 VLM을 부르지 않고 직전 관측 물체가 아직 있는지만 재투영
-  박스로 확인한다. 쓰는 곳은 두 군데다 — 파지 후보가 없어 거부됐을 때의 재시도,
-  `place_into`를 끝낸 뒤 화면·최신 상태 갱신.
 
 ### 2.2 동작 순서도
 
@@ -141,10 +102,7 @@ PiecePickingSystem/          # ROS2 컨테이너 안에서는 /ros2_ws
 └── docs/
 ```
 
-`services/planner`, `tools/{calibration,training,scripts}`, `data/`에는 `COLCON_IGNORE`가
-있어 `colcon build`가 그 폴더를 스캔조차 하지 않는다. `planner`가 ROS2 패키지가 아닌 이유는
-HTTP·LLM·DB 어디에도 실시간 토픽이 필요 없기 때문이다 — `control`로는 web을 거쳐서만
-도달한다.
+`planner`가 ROS2 패키지가 아닌 이유는 HTTP·LLM·DB 어디에도 실시간 토픽이 필요 없기 때문이다.
 
 ## 4. 사용한 장비 목록
 
@@ -159,7 +117,7 @@ HTTP·LLM·DB 어디에도 실시간 토픽이 필요 없기 때문이다 — `c
 | 비전 | RealSense RGB-D | 손목 장착(eye-in-hand). `realsense2_camera`가 color/aligned depth/CameraInfo 발행 |
 | 제어박스 | 두산 표준 제어박스 | 비상정지 하드와이어 직결 |
 | 로봇 PC | Ubuntu 24.04 · RTX 4060 8GB | 웹·planner·ROS 노드·DB를 전부 구동 |
-| 마이크 | 로봇 PC 연결 USB 마이크 | "hello rokey" 웨이크워드 감지용(`tools/voice/wakeword_bridge.py`) |
+| 마이크 | 노트북 내장 마이크 | "hello rokey" 웨이크워드 감지용(`tools/voice/wakeword_bridge.py`) |
 
 - 카메라가 그리퍼에 붙어 있어 좌표 변환이 매 프레임 TCP 자세에 따라 달라진다:
   `T_base_camera = posx_to_matrix(get_current_posx()) @ T_gripper2camera`.
