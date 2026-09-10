@@ -115,9 +115,7 @@ motion:
   # 안전고도 = max(현재 z, 바구니 접근 z) + 이 값. 픽 직후 위치와 바구니 접근 높이
   # 둘 중 더 높은 곳보다도 이만큼 더 올라가야 그 사이(작업대·다른 물체·바구니 테두리)를
   # 확실히 넘어간다는 뜻이다 — 둘 중 큰 값 자체를 그대로 쓰면(2026-09-05 이전 코드)
-  # 안전 여유가 전혀 없었다. place_server가 이 높이에서 ikin으로 실제 도달 가능한지
-  # 확인해 안 되면 단계적으로 낮추므로, 여기 값은 "이상적으로 원하는" 여유이지
-  # 그대로 강행하는 값이 아니다.
+  # 안전 여유가 전혀 없었다.
   # 2026-09-07 (실물) 100.0 → 20.0. **100은 팔이 안 닿는 높이를 만들었다.**
   #   release_z 213.8 + 접근 80 = 293.8, 거기에 100을 더해 안전고도 393.8이 됐는데,
   #   그 높이에서 바구니 상공(334.7, -479.2)으로 가려면 J3가 171도까지 가야 한다
@@ -132,13 +130,41 @@ motion:
   # 지금 씬에서 가장 높은 물체 윗면이 약 230(작업대 위 148mm)이라 78mm 여유가 남는다.
   # (파지 깊이 정책상 물체 바닥이 거의 손끝 높이라, 손끝만 넘으면 물체도 넘어간다.)
   #
-  # place_server가 시작 시 ikin으로 도달 가능성을 확인하고 안 되면 20mm씩 낮추므로
-  # 이 값은 "이상적으로 원하는 여유"이고, 못 닿으면 자동으로 낮아진다.
+  # **2026-09-10부터 이 높이는 낮아지지 않는다.** 예전에는 IK가 안 풀리면 20mm씩 깎아
+  # 재시도했는데, 그 높이는 이동 중 물체가 작업대·바구니 테두리를 넘어가라고 둔 값이라
+  # IK 사정으로 깎으면 둔 이유 자체가 사라진다. 지금은 높이를 고정한 채 관절
+  # configuration(solution space 0~7)과 경로(direct/우회)를 바꿔 가며 찾고, 그래도 안
+  # 되면 safe_transit_unreachable로 보고한다 — 즉 이 값은 상한이 아니라 **실제로 지키는
+  # 높이**이므로, 팔이 닿는 범위 안인지 셀을 바꿀 때마다 ikin으로 확인해야 한다.
   # 2026-09-09 (사용자 요청) 20.0 → 0.0 → 50.0. 0은 여유가 전혀 없어 이동 경로 중간의
   # 장애물(작업대·다른 물체·바구니 테두리)을 넘어갈 여지가 사라진다는 우려로 다시
   # 올린다. 100은 2026-09-07 실물에서 팔이 안 닿는 높이를 만들어 이동 자체가 실패했던
   # 값이니(위 132행 이력) 50은 그보다는 안전하지만, ikin 도달 범위는 다시 확인할 것.
   place_safe_clearance_mm: 50.0
+  # 안전고도 이송에서 **실제로 실행해 볼** (경로 x solution space) 조합의 최대 개수.
+  # ikin이 해를 준 목표를 컨트롤러가 조용히 거부하는 경우가 있어(movel이 accept만 하고
+  # 안 움직인다), 사전 검사만 믿고 하나만 실행하면 그대로 끝나 버린다 — 2026-09-10
+  # 실물에서 로봇이 멈춰 선 채 아무 변화가 없던 원인이다. 무한정 돌 수 없는 이유는
+  # 실패 한 번이 최대 60초(무응답이면 타임아웃을 다 채운다)라서다. 정상이면 1회로 끝난다.
+  place_transit_attempts: 3
+  # 다른 solution space만 가능한 경우 Safe-Z의 같은 TCP 지점에서 movej로 configuration을
+  # 바꾼다. **이 값 자체는 더 이상 그 전환을 막지 않는다** (STEP 3, 2026-09-10) — 실제
+  # 판정은 motion_feasibility.config_switch_feasible이 그 전환 구간의 FK를 실제로 찍어
+  # 명백한 충돌(지지면 아래로 내려가는지)만 본다. 이 값을 넘으면 참고용 경고 로그만
+  # 남긴다. 예전엔 이 각도로 전환 자체를 막아서, solution space를 바꾸는 데 정상적으로
+  # 필요한 폭(실물 168~257도)까지 함께 거부돼 place가 매번 안전 이송 불가로 끝났다.
+  place_max_config_switch_jump_deg: 90.0
+  # box geometry 모드에서 한 자세(yaw)가 바구니엔 들어가지만 그 자세로는 8개 solution
+  # space 어디로도 안전 이송이 안 될 때, 그 각을 건너뛰고 box_geometry가 다음으로 잘
+  # 맞는 각을 고르게 해 처음부터 다시 계획하는 횟수(STEP 3, 2026-09-10). 시도 한 번이
+  # 8 space x 2 pass 전수 조사라 수 초~수십 초가 걸릴 수 있어 무한정 돌리지 않는다.
+  # legacy_taught_pose는 시도할 다른 자세가 없어 이 값과 무관하게 항상 1회다.
+  place_yaw_retry_attempts: 4
+  # 위치와 회전을 한 movel에 같이 크게 바꾸면 로봇이 오류 없이 그냥 안 움직인 적이 있다
+  # (ry가 180도 근처라 ZYZ 표현이 널뛴다 — place_server.py ②/③ 분리 주석). 이송을 한
+  # 번에 끝내는 direct 경로는 회전량이 이 값 이하일 때만 쓰고, 넘으면 상승→회전→이동
+  # 처럼 한 구간에 하나씩만 바꾸는 우회 경로로 간다.
+  place_direct_rotation_limit_deg: 20.0
   # place_into 완료 뒤 orchestrator가 곧바로 home(관절이동)을 부른다(web/orchestrator.py
   # _execute_steps). place_server가 물러나는 높이(bin 접근 높이)에서 바로 관절이동을
   # 시작하면 바구니 테두리 바로 위라 여유가 적어, place_into 마지막에 이만큼 더
@@ -247,11 +273,14 @@ gripper:
 # 실행 전에 탈락한 후보는 다음 후보로 넘어간다 — 후보 하나가 안 된다고 pick 전체가
 # 실패하지 않는다. 전부 탈락하면 로봇을 움직이지 않고 no_feasible_grasp로 끝낸다.
 #
-# **여기서 하지 않는 것**: 3D collision 검사, 주변 물체와의 간섭 예측, 특이점 판정,
-# 경로(두 끝점 사이) 검사. grasp_selection.py 모듈 docstring에 이유가 적혀 있다.
+# **여기서 하지 않는 것**: 3D collision 검사, 주변 물체와의 간섭 예측, 특이점 판정.
+# 경로(두 끝점 사이) 검사는 STEP 2에서 motion_feasibility.py로 분리했다 — 랭킹이 끝난
+# 뒤 pick_server가 순서대로 실행 가능성을 확인한다(motion_feasibility_enabled).
+# 나머지 이유는 grasp_selection.py 모듈 docstring에 적혀 있다.
 grasp_selection:
   # 검사할 후보 수 상한. ikin 한 번이 실측 약 31ms(2026-09-07, 이 셀)라 후보당 접근+파지
-  # 2회 = 약 66ms다. grasp_params.yaml의 top_k(10)와 맞춰 두면 받은 만큼 전부 본다.
+  # 2회 = 약 66ms다. grasp_params.yaml의 execution_pool_size(10)와 맞춰 두면 받은 만큼
+  # 전부 본다 — 더 작게 두면 뒤쪽 후보가 조용히 버려진다(아래 truncated 경고 참조).
   max_evaluated: 10
 
   # 지지면(= 물체 윗면 z - height_mm)보다 이만큼까지 내려가는 것은 허용한다.
@@ -301,23 +330,34 @@ grasp_selection:
   approach_travel_ref_mm: 400.0
   approach_rotation_ref_deg: 120.0
 
+  # --- robot comfort (STEP 1, 2026-09-10) ---
+  # 접근 IK 해 → 파지 IK 해의 관절 이동량(도, 성분별 최대)이 이 값 이상이면 0점.
+  # **판정이 아니라 선호도다** — 도달 가능성은 IK가 이미 봤고, 여기는 "둘 다 되면 어느
+  # 쪽이 자연스럽나"만 본다. 추가 서비스 호출은 없다(이미 받은 IK 결과의 posj만 쓴다).
+  # 근거 없는 초기값이다.
+  comfort_joint_delta_ref_deg: 60.0
+
+  # STEP 2 pick 모션 실행 가능성 검사 (multi-IK + 구간 경로). production에서는 항상 켠다.
+  # 끄면 robot-aware selection이라는 최종 계약 자체가 사라지므로 A/B 실험용 기본-off
+  # 설명은 제거했다. Place의 안전고도 고정·경로 탐색은 이 값과 무관하게 항상 켜져 있다.
+  motion_feasibility_enabled: true
+
   # 점수 가중치. 각 항은 [0,1]로 정규화돼 있고, 판단할 정보가 없는 항은 빠진 뒤 남은
   # 가중치로 다시 정규화된다(정보 없음이 감점이 되지 않게).
   # **GraspNet score는 여러 판단 요소 중 하나일 뿐이다** — 그것만으로 고르던 것을
   # 바꾸는 것이 이 블록의 목적이다.
+  #
+  # 최종 production selector의 가중치다. 실물 shadow 비교에서 legacy와 같은 후보를
+  # 선택한 것을 확인해 STEP 3부터 runtime mode 분기 없이 이 값 하나만 쓴다.
   weights:
     grasp_score: 0.30       # GraspCandidate.score (전략이 이미 0~1로 clip해서 낸다)
     width_fit: 0.15         # RG2 개폭 적합성 (너무 넓으면 최대개방으로 떨어지고, 너무 좁으면 스친다)
-    center_proximity: 0.15  # 파지점이 물체 중심(xy)에 가까운가
+    center_proximity: 0.10  # 파지점이 물체 중심(xy)에 가까운가 (보조 heuristic — reject 아님)
     height_fit: 0.10        # 물체 높이의 중간을 무는가 (윗모서리만 물면 미끄러진다)
-    joint_margin: 0.10      # 관절 한계까지 여유
     depth_quality: 0.05     # depth_valid_ratio. 물체 단위 값이라 같은 물체 안에서는 동점이다
-    # 2026-09-08(2.5차) 추가. grasp이 각도로 미리 자르지 않게 된 만큼 그 판단이 여기로
-    # 왔다 — 합을 1로 유지하려고 grasp_score/width_fit/center_proximity에서 덜어냈다.
-    # **접근각을 너무 올리면 예전 hard filter와 같아진다**(수직 후보만 뽑힘). 기울어진
-    # 후보가 계속 뽑혀 미끄러지면 올리고, 멀쩡한 후보가 각도만으로 밀리면 내린다.
-    approach_angle: 0.10    # 수직에 가까운 접근인가
-    approach_travel: 0.05   # 지금 자세에서 접근 지점까지 얼마나 움직여야 하나
+    joint_margin: 0.10      # 관절 한계까지 여유
+    contact_support: 0.15   # 손가락 사이에 실제로 물릴 재료가 있는가 (-1이면 항에서 빠진다)
+    robot_comfort: 0.05     # 접근→파지 관절 이동이 자연스럽게 이어지는가
 
 
 compliance:

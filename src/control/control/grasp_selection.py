@@ -22,8 +22,10 @@ GraspNet score 최고 후보 하나를 골라 그대로 Pick으로 보냈다. �
 - singularity 판정. dsr_msgs2에 특이점을 **질의**하는 서비스가 없다
   (`SetSingularityHandling`/`SetSingularHandlingForce`는 회피 동작 설정이지 질의가 아니다).
   J5 값은 참고용으로 기록만 하고 점수에는 넣지 않는다.
-- 경로(path) 검사. 검사하는 것은 접근점·파지점 **두 끝점**뿐이다. 그 사이를 movel이
-  실제로 어떻게 지나가는지는 보지 않는다.
+- 경로(path) 검사. **이 모듈이** 보는 것은 접근점·파지점 두 끝점뿐이다. 그 사이를
+  movel이 어떻게 지나가는지는 STEP 2(2026-09-10)에서 `motion_feasibility.py`로 옮겼고,
+  pick_server가 랭킹 순서대로 후보를 꺼내며 그것으로 거른다 — 여기의 점수에는 들어오지
+  않는다(점수는 "이 자세가 좋은가", 경로 검사는 "거기까지 갈 수 있는가"로 나눠 둔다).
 """
 import math
 from dataclasses import dataclass, field
@@ -71,6 +73,10 @@ class Candidate:
     score: float              # GraspCandidate.score — 계약상 0.0~1.0이고 전략들이 clip한다
     gripper_width_mm: float   # 0이면 "전략이 폭을 못 냈다"(미상)
     strategy: str = ""
+    # 손가락 사이 실측 재료 지지도 0~1 (grasp의 되잡기가 계산, GraspCandidate.msg).
+    # **-1은 미상**이고 0.0(지지 없음)과 뜻이 다르다 — score_contact_support가 -1을
+    # None으로 바꿔 랭킹에서 빼고, 0.0은 그대로 낮은 점수로 쓴다.
+    contact_support_score: float = -1.0
 
 
 @dataclass(frozen=True)
@@ -158,19 +164,42 @@ class SelectionParams:
     approach_travel_ref_mm: float = 400.0
     approach_rotation_ref_deg: float = 120.0
 
+    # --- robot comfort (STEP 1, 2026-09-10) ---
+    # 접근 IK 해와 파지 IK 해 사이의 관절 이동량(도, 성분별 최대)이 이 값 이상이면 0점.
+    # 두 자세는 접근축을 따라 몇 cm 떨어져 있을 뿐이라 관절해도 이어져야 정상인데, 크게
+    # 갈리면 그 근방에서 관절 공간이 불연속이라는 뜻이다. **판정이 아니라 선호도다** —
+    # 도달 가능성은 IK가 이미 봤다. 근거 없는 초기값이고, 추가 서비스 호출은 하지 않는다
+    # (이미 받아 둔 IK 결과의 posj만 쓴다).
+    comfort_joint_delta_ref_deg: float = 60.0
+
     # --- 가중치 (합이 1이 아니어도 된다 — 사용 가능한 항만 모아 정규화한다) ---
+    # **enhanced 랭킹의 가중치다** (STEP 1). 기존 release 랭킹은 아래 LEGACY_WEIGHTS로
+    # 회귀 비교용 legacy 값도 계산하지만 production 실행은 pick_server가 enhanced로 고정한다.
+    # enhanced에는 approach_angle/approach_travel을 **중복해서 넣지 않는다** — 접근각
+    # hard 상한(45도)이 grasp에 그대로 있고, 이 STEP의 관심사는 contact/robot_comfort다.
     weights: dict = field(default_factory=lambda: {
         "grasp_score": 0.30,       # GraspNet 품질. 여러 판단 요소 중 하나일 뿐이다
         "width_fit": 0.15,         # RG2 개폭 적합성
-        "center_proximity": 0.15,  # 파지점이 물체 중심에 가까운가
+        "center_proximity": 0.10,  # 파지점이 물체 중심에 가까운가 (보조 heuristic)
         "height_fit": 0.10,        # 물체 높이의 중간쯤을 무는가 (윗모서리만 물면 미끄러진다)
-        "joint_margin": 0.10,      # 관절 한계까지 여유
         "depth_quality": 0.05,     # depth 신뢰도. 물체 단위 값이라 같은 물체 안에서는 동점이다
-        # 2026-09-08(2.5차)에 들어온 두 항. grasp이 각도로 미리 자르지 않게 된 만큼
-        # 그 판단이 여기로 옮겨왔다 — 합을 1로 맞추느라 위 두 항에서 0.05씩 덜어냈다.
-        "approach_angle": 0.10,    # 수직에 가까운 접근인가
-        "approach_travel": 0.05,   # 지금 자세에서 접근 지점까지 얼마나 움직여야 하나
+        "joint_margin": 0.10,      # 관절 한계까지 여유
+        "contact_support": 0.15,   # 손가락 사이에 실제로 물릴 재료가 있는가 (STEP 1)
+        "robot_comfort": 0.05,     # 접근→파지 관절 이동이 자연스럽게 이어지는가 (STEP 1)
     })
+
+
+# 기존 release(2026-09-09까지)의 랭킹을 회귀 테스트용으로 보존한 스냅샷이다.
+LEGACY_WEIGHTS = {
+    "grasp_score": 0.30,
+    "width_fit": 0.15,
+    "center_proximity": 0.15,
+    "height_fit": 0.10,
+    "joint_margin": 0.10,
+    "depth_quality": 0.05,
+    "approach_angle": 0.10,
+    "approach_travel": 0.05,
+}
 
 
 @dataclass
@@ -193,8 +222,15 @@ class Evaluation:
     approach_rotation_deg: float | None = None
     safety_ok: bool | None = None
     geometry: PickGeometry | None = None
+    # 접근 IK 해와 파지 IK 해 사이 관절 이동량(도). robot_comfort의 원시값 — 추가 서비스
+    # 호출 없이 이미 받은 두 IK 결과의 posj 차이로 낸다. 둘 중 하나라도 없으면 None.
+    joint_delta_deg: float | None = None
+    # enhanced production 랭킹(신규 항 포함).
     terms: dict = field(default_factory=dict)
     total_score: float | None = None
+    # legacy 회귀 비교 랭킹(기존 release 그대로, LEGACY_WEIGHTS).
+    legacy_terms: dict = field(default_factory=dict)
+    legacy_score: float | None = None
 
     @property
     def rejected_before_motion(self) -> bool:
@@ -360,6 +396,54 @@ def score_approach_travel(travel_mm: float | None, rotation_deg: float | None,
     if not parts:
         return None
     return _clamp01(sum(parts) / len(parts))
+
+
+def score_contact_support(candidate: Candidate) -> float | None:
+    """GraspCandidate.contact_support_score — 손가락 사이에 실제로 물릴 재료가 있는가.
+
+    grasp의 되잡기가 실측 클라우드로 계산해 실어 보낸 값이다(별도 클라우드 패스 없음).
+    **"물체 중심에 가까운가"의 대체가 아니라 보완이다** — 물체 끝을 잡아도 양쪽 손가락에
+    재료가 충분하면 높게 나온다. 명백히 재료가 없는 후보(cloud_mismatch/no_grip_material)는
+    grasp 단계에서 이미 hard reject되므로 여기서는 soft 점수로만 쓴다.
+
+    -1(미상: 되잡기를 못 한 전략/경로)이면 None — 정보 없음이 감점이 되면 안 된다.
+    """
+    value = float(candidate.contact_support_score)
+    if value < 0.0:
+        return None
+    return _clamp01(value)
+
+
+def joint_delta_deg(approach_verdict, grasp_verdict) -> float | None:
+    """접근 IK 해 → 파지 IK 해의 관절 이동량(도, 성분별 최대). 둘 중 하나라도 없으면 None.
+
+    **추가 서비스 호출을 만들지 않는다** — 후보 검사에서 이미 받아 둔 두 IkVerdict의
+    posj만 뺀다. 두 자세는 접근축을 따라 몇 cm 떨어져 있을 뿐이라 관절해도 이어지는 것이
+    정상이고, 크게 갈리면 그 근방에서 관절 공간이 불연속이라는 뜻이다.
+    """
+    approach_posj = getattr(approach_verdict, "posj", None)
+    grasp_posj = getattr(grasp_verdict, "posj", None)
+    if not approach_posj or not grasp_posj:
+        return None
+    return max(abs(float(a) - float(g)) for a, g in zip(approach_posj, grasp_posj))
+
+
+def score_robot_comfort(delta_deg: float | None, params: SelectionParams) -> float | None:
+    """관절 이동이 자연스럽게 이어지는 후보를 선호한다. 확인 못 했으면 None.
+
+    **hard reject가 아니다** — IK가 풀리는지는 이미 앞에서 봤고, 여기는 "둘 다 되면 어느
+    쪽이 편한가"만 본다. J5 단독 특이점 판정·다중 solution space·경로 계획은 이 STEP에서
+    하지 않는다(STEP 2의 motion feasibility에서 하나로 다룬다).
+
+    joint_margin(관절 한계까지 여유)과는 다른 것을 본다 — 그쪽은 "한계에 얼마나 가깝나",
+    이쪽은 "접근에서 파지로 가며 얼마나 크게 움직이나"다.
+    """
+    if delta_deg is None:
+        return None
+    reference = float(params.comfort_joint_delta_ref_deg)
+    if reference <= 0.0:
+        return 1.0
+    return _clamp01(1.0 - float(delta_deg) / reference)
 
 
 def combined_score(terms: dict, weights: dict) -> float:
@@ -552,34 +636,56 @@ def evaluate_candidates(candidates, obj: ObjectContext, params: SelectionParams,
             continue
 
         evaluation.status = STATUS_VALID
-        evaluation.terms = {
+        # 항 값은 **한 번만** 계산하고, legacy/enhanced는 그것을 다른 가중치로 합치기만
+        # 한다 — IK도 기하 검사도 두 번 돌리지 않는다(STEP 1 §14).
+        shared = {
             "grasp_score": score_grasp_quality(candidate),
             "width_fit": score_width_fit(candidate.gripper_width_mm, params),
             "center_proximity": score_center_proximity(candidate, obj, scale_mm),
             "height_fit": score_height_fit(candidate, obj),
             "joint_margin": score_joint_margin(evaluation.joint_margin_deg, params),
             "depth_quality": score_depth_quality(obj),
+        }
+        evaluation.legacy_terms = {
+            **shared,
             "approach_angle": score_approach_angle(evaluation.approach_angle_deg, params),
             "approach_travel": score_approach_travel(
                 evaluation.approach_travel_mm, evaluation.approach_rotation_deg, params),
+        }
+        evaluation.legacy_score = combined_score(evaluation.legacy_terms, LEGACY_WEIGHTS)
+        evaluation.joint_delta_deg = joint_delta_deg(approach, grasp)
+        evaluation.terms = {
+            **shared,
+            "contact_support": score_contact_support(candidate),
+            "robot_comfort": score_robot_comfort(evaluation.joint_delta_deg, params),
         }
         evaluation.total_score = combined_score(evaluation.terms, params.weights)
 
     return evaluations
 
 
-def select(evaluations) -> Evaluation | None:
-    """valid 후보 중 총점이 가장 높은 하나를 selected로 표시하고 돌려준다. 없으면 None.
+def select(evaluations, mode: str = "legacy"):
+    """valid 후보 중 하나를 selected로 표시한다.
 
-    동점이면 입력 순위(GraspNet score 순)가 앞선 쪽 — 순서가 실행마다 흔들리지 않아야
+    반환: `(실제로 고른 Evaluation 또는 None, legacy_best, enhanced_best)`.
+
+    - `mode="legacy"`(기본) — 기존 release 랭킹(LEGACY_WEIGHTS)으로만 고른다. mode를 주지
+      않는 호출부·테스트가 전부 이 경로를 타므로, 이 함수만 놓고 보면 STEP 1 이전과 선택
+      결과가 같다.
+    - `mode="enhanced"` — contact_support/robot_comfort가 들어간 total_score로 고른다.
+    `legacy`와 `log_only`는 회귀 테스트 API로만 남아 있고 runtime에서는 호출하지 않는다.
+
+    두 랭킹 모두 동점이면 입력 순위(rank)가 앞선 쪽 — 순서가 실행마다 흔들리지 않아야
     같은 장면에서 같은 후보가 나온다.
     """
     valid = [e for e in evaluations if e.status == STATUS_VALID]
     if not valid:
-        return None
-    best = min(valid, key=lambda e: (-(e.total_score or 0.0), e.candidate.rank))
-    best.status = STATUS_SELECTED
-    return best
+        return None, None, None
+    legacy_best = min(valid, key=lambda e: (-(e.legacy_score or 0.0), e.candidate.rank))
+    enhanced_best = min(valid, key=lambda e: (-(e.total_score or 0.0), e.candidate.rank))
+    chosen = enhanced_best if mode == "enhanced" else legacy_best
+    chosen.status = STATUS_SELECTED
+    return chosen, legacy_best, enhanced_best
 
 
 def counts(evaluations) -> dict:
@@ -618,11 +724,20 @@ def log_line(evaluation: Evaluation) -> str:
         parts.append(f"travel={evaluation.approach_travel_mm:.0f}mm")
     if evaluation.approach_rotation_deg is not None:
         parts.append(f"rot={evaluation.approach_rotation_deg:.0f}deg")
+    if evaluation.joint_delta_deg is not None:
+        parts.append(f"joint_delta={evaluation.joint_delta_deg:.0f}deg")
     parts.append(f"safety={_flag(evaluation.safety_ok)}")
+    # legacy(실제 실행이 쓰는 값)와 enhanced(비교용)를 나란히 남긴다 — contact_support와
+    # robot_comfort는 enhanced 쪽 terms에 있다(STEP 1 §18).
+    if evaluation.legacy_score is not None:
+        terms = " ".join(f"{name}={value:.2f}"
+                         for name, value in evaluation.legacy_terms.items()
+                         if value is not None)
+        parts.append(f"legacy={evaluation.legacy_score:.3f} [{terms}]")
     if evaluation.total_score is not None:
         terms = " ".join(f"{name}={value:.2f}" for name, value in evaluation.terms.items()
                          if value is not None)
-        parts.append(f"total={evaluation.total_score:.3f} [{terms}]")
+        parts.append(f"enhanced={evaluation.total_score:.3f} [{terms}]")
     parts.append(f"status={evaluation.status}")
     if evaluation.rejection_reason:
         parts.append(f"reason={evaluation.rejection_reason}")

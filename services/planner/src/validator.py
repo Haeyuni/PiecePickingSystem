@@ -2,7 +2,7 @@
 
 검증 항목: 스키마 유효성, 작업공간 경계, 가반하중, 스킬 전제조건, 활성 SafetyEvent 유무.
 
-**파지 후보는 여기서 하나로 좁히지 않는다.** 작업반경 안에 있는 것을 점수 순으로 전부
+**파지 후보는 여기서 하나로 좁히지 않는다.** 작업반경 안에 있는 것을 grasp가 만든 순서로
 넘기고, 실행할 하나는 control이 고른다(control/grasp_selection.py) — 개폭 유효성·IK·
 관절 한계는 로봇에 붙어 있어야만 답할 수 있고 planner는 ROS2를 모르기 때문이다.
 
@@ -76,7 +76,8 @@ def resolve_grip_level(obj: dict) -> int:
 
 
 def _reachable_candidates(obj: dict) -> list[dict]:
-    """작업반경 안에 있는 파지 후보를 점수 내림차순으로 돌려준다. 하나도 없으면 Rejected.
+    """작업반경 안에 있는 파지 후보를 **grasp가 구성한 순서 그대로** 돌려준다.
+    하나도 없으면 Rejected.
 
     **후보 하나가 아니라 목록을 넘긴다.** 예전에는 점수 최고 후보 하나만 골라 보냈고,
     그 하나가 실행 불가능하면(개폭 미상, IK 안 풀림) pick 전체가 실패했다 — 나머지
@@ -84,7 +85,14 @@ def _reachable_candidates(obj: dict) -> list[dict]:
     (control/grasp_selection.py) 여기서는 **로봇 없이도 확실히 아는 것**만 거른다:
     팔이 물리적으로 닿지 않는 거리에 있는 후보.
 
-    그래서 작업반경 검사도 "1순위가 벗어나면 거부"가 아니라 "전부 벗어나면 거부"다.
+    **여기서 점수로 다시 정렬하지 않는다 (2026-09-10, STEP 1).** grasp가 최종 pose 기준
+    Diverse-TopK로 순서를 정해 보낸다(grasp/diverse_pool.py) — 0번이 GraspNet 최고점이고
+    그 뒤는 서로 다른 선택지가 남도록 고른 순서다. planner가 점수순으로 다시 세우면 그
+    다양성이 사라진다. planner가 하지 않는 것: 점수 재정렬 / best 재선택 / 개수 자르기 /
+    IK·관절·모션 판단.
+
+    그래서 작업반경 검사도 "1순위가 벗어나면 거부"가 아니라 "전부 벗어나면 거부"이고,
+    통과한 후보들의 상대 순서는 입력 그대로 유지된다.
     """
     candidates = obj.get("grasp_candidates") or []
     if not candidates:
@@ -92,12 +100,11 @@ def _reachable_candidates(obj: dict) -> list[dict]:
             f"'{obj['object_id']}'({obj.get('name_ko') or obj.get('class_name')})에 "
             f"유효한 파지 후보가 없습니다"
         )
-    ordered = sorted(candidates, key=lambda c: c.get("score", 0.0), reverse=True)
-    in_reach = [c for c in ordered
+    in_reach = [c for c in candidates
                 if _reach_mm(c["pose"]["position"]) <= WORKSPACE_RADIUS_MM]
     if not in_reach:
         raise Rejected(
-            f"'{obj['object_id']}'의 파지 후보 {len(ordered)}개가 모두 "
+            f"'{obj['object_id']}'의 파지 후보 {len(candidates)}개가 모두 "
             f"작업반경 {WORKSPACE_RADIUS_MM:g}mm를 벗어납니다"
         )
     return in_reach
@@ -112,6 +119,10 @@ def _candidate_out(candidate: dict) -> GraspCandidateOut:
         grasp_depth_mm=float(candidate.get("grasp_depth_mm") or 0.0),
         strategy=candidate.get("strategy") or "",
         point_cloud_path=candidate.get("point_cloud_path") or "",
+        # -1(미상)과 0.0(지지 없음)은 뜻이 다르다 — `or`를 쓰면 0.0이 미상으로 뒤집힌다.
+        contact_support_score=(
+            float(candidate["contact_support_score"])
+            if candidate.get("contact_support_score") is not None else -1.0),
     )
 
 

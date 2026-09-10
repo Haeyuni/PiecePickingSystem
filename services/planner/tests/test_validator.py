@@ -9,6 +9,8 @@
 """
 import unittest
 
+from pydantic import ValidationError
+
 from src.schema import LlmStep
 from src.validator import MAX_PAYLOAD_G, Rejected, resolve_grip_level, validate
 
@@ -48,6 +50,13 @@ def pick_place(object_id="obj_001", bin_id="left_box"):
             LlmStep(skill="place_into", object_id=object_id, bin_id=bin_id)]
 
 
+class LlmBoundaryTest(unittest.TestCase):
+    def test_llm_cannot_add_robot_pose_or_coordinates(self):
+        for extra in ({"pose": {}}, {"x": 100.0}, {"robot_pose": [1, 2, 3]}):
+            with self.subTest(extra=extra), self.assertRaises(ValidationError):
+                LlmStep(skill="pick", object_id="obj_001", **extra)
+
+
 class TestHappyPath(unittest.TestCase):
     def test_pick_then_place_is_approved(self):
         steps = validate(pick_place(), world(make_object()), BINS)
@@ -56,7 +65,13 @@ class TestHappyPath(unittest.TestCase):
         self.assertEqual(steps[0].grasp_pose.position["x"], 450.0)
         self.assertEqual(steps[1].bin_id, "left_box")
 
-    def test_best_scoring_candidate_is_chosen(self):
+    def test_candidate_order_is_not_resorted_by_score(self):
+        """**planner는 점수로 다시 정렬하지 않는다 (STEP 1).**
+
+        grasp가 최종 pose 기준 Diverse-TopK로 순서를 정해 보내므로(0번=GraspNet 최고점,
+        그 뒤는 서로 다른 선택지), 여기서 점수순으로 세우면 그 다양성이 사라진다.
+        점수가 더 높은 후보가 **뒤에** 실려 와도 순서를 바꾸지 않는다.
+        """
         obj = make_object()
         obj["grasp_candidates"].append({
             "pose": {"position": {"x": 460.0, "y": 0.0, "z": 80.0},
@@ -64,7 +79,9 @@ class TestHappyPath(unittest.TestCase):
             "score": 0.99, "strategy": "contact_graspnet",
         })
         steps = validate(pick_place(), world(obj), BINS)
-        self.assertEqual(steps[0].grasp_pose.position["x"], 460.0)
+        self.assertEqual([c.score for c in steps[0].grasp_candidates], [0.9, 0.99])
+        self.assertEqual(steps[0].grasp_pose.position["x"], 450.0,
+                         "grasp_pose는 목록의 첫 후보(=grasp가 1순위로 보낸 것)다")
 
     def test_grasp_width_is_carried_into_plan_step(self):
         obj = make_object()
@@ -221,18 +238,55 @@ class TestCandidateListReachesControl(unittest.TestCase):
         })
         return obj
 
-    def test_all_reachable_candidates_are_passed_in_score_order(self):
+    def test_all_reachable_candidates_are_passed_in_the_given_order(self):
+        """grasp가 만든 순서(Diverse-TopK)를 그대로 넘긴다 — 자르지도 세우지도 않는다."""
         steps = validate(pick_place(), world(self._object_with_two_candidates()), BINS)
         candidates = steps[0].grasp_candidates
-        self.assertEqual([c.candidate_id for c in candidates], ["obj_001#1", "obj_001#0"])
-        self.assertEqual([c.gripper_width_mm for c in candidates], [55.0, 30.0])
-        self.assertEqual([c.grasp_depth_mm for c in candidates], [12.0, 8.0])
+        self.assertEqual([c.candidate_id for c in candidates], ["obj_001#0", "obj_001#1"])
+        self.assertEqual([c.gripper_width_mm for c in candidates], [30.0, 55.0])
+        self.assertEqual([c.grasp_depth_mm for c in candidates], [8.0, 12.0])
 
-    def test_grasp_pose_still_holds_the_top_candidate(self):
-        """후보 목록을 못 읽는 경로(로그·DB·구 control)를 위해 1순위는 그대로 남는다."""
+    def test_only_out_of_workspace_candidates_are_removed(self):
+        """workspace 필터만 작동하고 나머지 상대 순서는 그대로다 (STEP 1 [G])."""
+        obj = self._object_with_two_candidates()
+        obj["grasp_candidates"].insert(1, {
+            "pose": {"position": {"x": 1500.0, "y": 0.0, "z": 80.0},
+                     "orientation": {"x": 0.0, "y": 1.0, "z": 0.0, "w": 0.0}},
+            "score": 0.95, "strategy": "graspnet_baseline", "candidate_id": "obj_001#far",
+        })
+        steps = validate(pick_place(), world(obj), BINS)
+        self.assertEqual([c.candidate_id for c in steps[0].grasp_candidates],
+                         ["obj_001#0", "obj_001#1"])
+
+    def test_grasp_pose_still_holds_the_first_candidate(self):
+        """후보 목록을 못 읽는 경로(로그·DB·구 control)를 위해 첫 후보는 그대로 남는다."""
         steps = validate(pick_place(), world(self._object_with_two_candidates()), BINS)
-        self.assertEqual(steps[0].grasp_pose.position["x"], 460.0)
-        self.assertEqual(steps[0].gripper_width_mm, 55.0)
+        self.assertEqual(steps[0].grasp_pose.position["x"], 450.0)
+        self.assertEqual(steps[0].gripper_width_mm, 30.0)
+
+    def test_contact_support_and_point_cloud_path_survive_the_round_trip(self):
+        """[H] 전달 검증 — 0.73은 0.73으로, -1은 -1로, 경로 문자열은 그대로."""
+        obj = self._object_with_two_candidates()
+        obj["grasp_candidates"][0]["contact_support_score"] = 0.73
+        obj["grasp_candidates"][0]["point_cloud_path"] = "data/point_clouds/tr-1/o.npz"
+        obj["grasp_candidates"][1]["contact_support_score"] = -1.0
+        candidates = validate(pick_place(), world(obj), BINS)[0].grasp_candidates
+        self.assertAlmostEqual(candidates[0].contact_support_score, 0.73)
+        self.assertEqual(candidates[0].point_cloud_path, "data/point_clouds/tr-1/o.npz")
+        self.assertEqual(candidates[1].contact_support_score, -1.0)
+
+    def test_zero_contact_support_is_not_turned_into_unknown(self):
+        """0.0(지지 없음)이 -1(미상)로 뒤집히면 안 된다 — `or` 사용 금지 계약."""
+        obj = self._object_with_two_candidates()
+        obj["grasp_candidates"][0]["contact_support_score"] = 0.0
+        candidates = validate(pick_place(), world(obj), BINS)[0].grasp_candidates
+        self.assertEqual(candidates[0].contact_support_score, 0.0)
+
+    def test_missing_contact_support_defaults_to_unknown(self):
+        """아예 안 실려 온 후보는 0이 아니라 -1(미상)이어야 한다."""
+        candidates = validate(pick_place(), world(self._object_with_two_candidates()),
+                              BINS)[0].grasp_candidates
+        self.assertEqual(candidates[0].contact_support_score, -1.0)
 
     def test_object_context_for_ranking_is_carried(self):
         """control은 /world_state를 안 보므로 물체 중심·높이·depth 신뢰도가 실려 가야 한다."""

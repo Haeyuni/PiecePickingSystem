@@ -120,12 +120,9 @@ graspnet_baseline:
   # 되잡기는 이제 **GraspNet의 가로 위치를 그대로 두고** 깊이·개폭만 실측으로 잡는다.
   # 예전에는 가로 위치까지 클라우드 중앙값으로 다시 정해서, Top-K 후보 10개가 가로로
   # 45~61mm씩 끌려가 **최종 위치가 2곳으로 뭉쳤다**(2026-09-08 물티슈 실측).
-  # 그 대신 "물체에 안 걸친 후보"는 끌어오지 않고 버린다 — 아래 두 값이 그 기준이다.
+  # 그 대신 "물체에 안 걸친 후보"는 끌어오지 않고 버린다 — 아래 값이 그 기준이다.
+  # (cloud_lateral_tolerance_mm는 손가락 패드 반폭 상수로 흡수돼 없어졌다.)
   #
-  # 후보의 그리퍼 중심선에서 가장 가까운 물체 점까지의 거리 상한.
-  # **임의값이 아니라 손가락 패드 반폭이다** — 이보다 멀면 닫아도 재료에 안 닿는다.
-  # 올리면 물체 가장자리를 스치는 후보가 살아나고, 내리면 후보가 줄어든다.
-  cloud_lateral_tolerance_mm: 12.0
   # 손가락 창 안에 있어야 하는 최소 점 수. 이보다 적으면 물릴 재료가 없다고 본다.
   # depth가 성긴 물체(투명·검은색)에서 후보가 전멸하면 낮춘다.
   min_grip_material_points: 20
@@ -179,7 +176,26 @@ graspnet_baseline:
   # 실제로 집을 후보는 control이 고른다(control/grasp_selection.py). planner는 작업반경만
   # 걸러 목록을 그대로 넘긴다(2차에서 validator._best_grasp를 없앴다).
   # 늘릴수록 오버레이가 빽빽해지고 world_state 메시지가 커진다.
-  top_k: 10
+  #
+  # --- 후보 수 구조 (STEP 1, 2026-09-10) --------------------------------------
+  #   max_candidates(50)   GraspNet raw 최대 후보 (서버가 NMS+sort까지 마친 것)
+  #   refine_pool_size(12) 되잡기/기하검사를 통과시켜 **다양성 선택 전에 확보할** 유효 후보
+  #   execution_pool_size(10) 최종 pose Diverse-TopK 이후 planner/control로 보낼 후보
+  # control의 grasp_selection.max_evaluated(10)는 skill_params.yaml에 따로 있고, 이 값보다
+  # 작으면 뒤쪽 후보가 평가되지 않는다 — pick_server가 그 경우 경고를 남긴다.
+  #
+  # 되잡기는 후보마다 물체 클라우드 전체를 투영하므로(실측 173k점) 12가 공짜는 아니다.
+  # 실제로 살펴보는 수는 refine_pool_size의 3배로 묶이고, raw가 max_candidates(50)라
+  # 최악의 경우에도 50개를 넘지 않는다.
+  refine_pool_size: 12
+  execution_pool_size: 10
+
+  # 다양성 거리의 환산 기준(위치 mm ↔ 각도 도). **실물 근거가 아직 없는 초기값이다** —
+  # "30mm 떨어진 것"과 "접근축이 30도 다른 것"을 같은 크기의 차이로 본다는 뜻이다.
+  # threshold가 아니라 스케일이라 이 값으로 후보를 버리지는 않는다(diverse_pool.py).
+  # 후보가 여전히 한자리에 몰리면 줄이고, 물체 범위를 벗어나 흩어지면 늘린다.
+  diversity_position_scale_mm: 30.0
+  diversity_orientation_scale_deg: 30.0
 
   num_points: 20000       # 서버로 보낼 최대 점 수. 많을수록 추론이 느려진다
   min_points: 80          # 이보다 적으면 후보를 내지 않는다

@@ -24,22 +24,31 @@ import unittest
 SOURCE = pathlib.Path(__file__).parents[1] / "web" / "orchestrator.py"
 
 
-def _function(name):
+def _function(name, namespace=None):
     """orchestrator에서 함수 하나만 떼어 컴파일한다 — FastAPI/DB/planner를 import하지 않는다."""
     tree = ast.parse(SOURCE.read_text(encoding="utf-8"))
     node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    namespace = {}
+    namespace = dict(namespace or {})
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(SOURCE), "exec"), namespace)
     return namespace[name]
 
 
 class_of = _function("class_of")
+# 실제 프로덕션 함수를 그대로 떼어 쓴다 — 판정 로직을 테스트용으로 다시 베끼면
+# 코드와 테스트가 각자 따로 고쳐질 수 있다. class_of를 의존하므로 같이 넣어준다.
+_off_scope_intruders = _function("_off_scope_intruders", {"class_of": class_of})
 
 
 def intruders(allowed_classes, targets):
-    """`_run_command_body`의 판정과 같은 식 — 새로 들어온 pick 대상 클래스."""
-    step_classes = {name for skill, _, name in targets if skill == "pick"}
-    return {name for name in step_classes if name not in allowed_classes}
+    """`_off_scope_intruders`와 같은 판정을 (skill, id, class) 튜플 목록에 바로 적용한다.
+
+    world_state를 만들지 않고 이미 알고 있는 클래스명으로 바로 시험하고 싶은 기존 테스트들을
+    위한 얇은 래퍼다 — 실제 판정은 여전히 `_off_scope_intruders`가 한다.
+    """
+    world = {"objects": [{"object_id": oid, "class_name": name}
+                         for _, oid, name in targets]}
+    steps = [{"skill": skill, "object_id": oid} for skill, oid, _ in targets]
+    return _off_scope_intruders(steps, world, allowed_classes)
 
 
 class ClassOfTest(unittest.TestCase):

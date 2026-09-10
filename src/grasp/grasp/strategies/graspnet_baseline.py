@@ -70,7 +70,7 @@ _BASE_DOWN = np.array([0.0, 0.0, -1.0])
 # 기울면 그리퍼가 작업대와 거의 나란히 쓸고 들어온다 — control의 최소 안전 검사는
 # 파지점 한 점의 z만 보므로(check_min_safety) 그 진입 경로를 못 본다.
 # 90도를 넘으면 작업대 아래에서 위로 찌르는 자세다(각도를 abs()로 재지 않는 이유).
-_DEFAULT_HARD_MAX_DEG = 75.0
+_DEFAULT_HARD_MAX_DEG = 45.0
 
 
 def _camera_offset(params: dict) -> tuple[float, float, float]:
@@ -100,7 +100,6 @@ _MIN_LOCAL_POINTS = 40
 # --- 후보 기하 판정 (2026-09-08, 2.6차) ---------------------------------------
 GEOMETRY_OK = "ok"
 # 후보의 그리퍼 중심선 근처에 물체 점이 없다 = 물체 **옆 허공**을 잡는 자세.
-GEOMETRY_CLOUD_MISMATCH = "cloud_mismatch"
 # 중심선은 물체 위인데 손가락 창 안에 물릴 재료가 없다(스치듯 지나간다).
 GEOMETRY_NO_MATERIAL = "no_grip_material"
 # 되잡기(_refine_on_cloud)가 실측 클라우드로 다시 잰 개폭이 그리퍼 한계를 벗어난다 —
@@ -111,12 +110,9 @@ GEOMETRY_NO_MATERIAL = "no_grip_material"
 # Top-K 자리에 남겨두느니 여기서 걸러 그 자리를 실행 가능한 후보에게 준다.
 GEOMETRY_WIDTH_INVALID = "width_invalid"
 
-# 중심선에서 물체까지 이 이상 떨어지면 손가락이 물체 옆을 지나간다. **임의값이 아니라
-# 손가락 패드 반폭(_PAD_HALF_MM)이다** — 패드보다 멀리 있는 재료는 닫아도 안 닿는다.
-_CLOUD_LATERAL_TOL_MM = _PAD_HALF_MM
 # 손가락 창 안에 있어야 하는 최소 점 수. 창을 풀어 줄 때 쓰던 기준과 같은 값이다.
 _MIN_GRIP_POINTS = 20
-# 기하 검사에서 버려지는 후보를 감안해 top_k의 몇 배까지 살펴볼지. 되잡기가 후보마다
+# 기하 검사에서 버려지는 후보를 감안해 refine_pool_size의 몇 배까지 살펴볼지. 되잡기가 후보마다
 # 클라우드 전체를 투영하므로(실측 173k점) 무한정 늘릴 수 없다.
 _GEOMETRY_EXAMINE_FACTOR = 3
 
@@ -137,7 +133,6 @@ def _local_surface(proj_a, lateral, radius_mm: float) -> float:
 
 def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
                      grasp_depth_mm: float,
-                     lateral_tol_mm: float = _CLOUD_LATERAL_TOL_MM,
                      min_grip_points: int = _MIN_GRIP_POINTS
                      ) -> tuple[np.ndarray, float, dict]:
     """GraspNet이 준 **자세는 유지**하고, 위치와 개폭은 실측 포인트클라우드로 다시 잡는다.
@@ -176,9 +171,10 @@ def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
     """
     closing, other, approach = T_base_tcp[:3, 0], T_base_tcp[:3, 1], T_base_tcp[:3, 2]
     origin = T_base_tcp[:3, 3]
-    proj_c = points_base @ closing
-    proj_o = points_base @ other
-    proj_a = points_base @ approach
+    # **투영을 한 번의 행렬곱으로 묶는다.** 축마다 따로 돌리면 클라우드(실측 170k점)를
+    # 세 번 훑는다 — 같은 값이 나오지만 메모리 대역폭만 3배로 쓴다(실측 14.4ms → 5ms대).
+    projections = points_base @ np.column_stack([closing, other, approach])
+    proj_c, proj_o, proj_a = projections[:, 0], projections[:, 1], projections[:, 2]
 
     # 1) 그리퍼 중심선: 물체의 가로 중앙값(이상치에 끌리지 않게 median)
     c0, o0 = float(np.median(proj_c)), float(np.median(proj_o))
@@ -222,8 +218,47 @@ def _refine_on_cloud(T_base_tcp: np.ndarray, points_base: np.ndarray,
         "status": GEOMETRY_OK,
         "window_width_mm": round(float(c_hi - c_lo), 1),
         "depth_shift_mm": round(float(a_grasp - (origin @ approach)), 1),
+        "contact_support_score": _contact_support(
+            proj_c, proj_a, window, float(c_lo + c_hi) / 2.0, int(min_grip_points)),
     })
     return position, float(c_hi - c_lo), diag
+
+
+def _contact_support(proj_c: np.ndarray, proj_a: np.ndarray, window: np.ndarray,
+                     grip_center_c: float, min_grip_points: int) -> float:
+    """"이 자세에서 두 손가락 사이에 안정적으로 물릴 재료가 있는가"를 0~1로 (STEP 1).
+
+    **새 클라우드 패스를 만들지 않는다.** `_refine_on_cloud`가 이미 계산해 둔 축 투영
+    (`proj_c`/`proj_a`)과 손가락 창(`window`), 그리고 그 창에서 잰 파지 중심만 다시 읽는다.
+
+    세 가지를 섞는다 — 전부 기존 기준을 재사용해 새 임계값을 늘리지 않았다.
+      1. **좌우 균형**: 닫힘축 기준 파지 중심의 양쪽에 재료가 고르게 있는가. 한쪽이 비어
+         있으면 닫는 순간 물체가 그쪽으로 밀려 미끄러진다. **"중심에서 멀다"와는 다르다** —
+         물체 끝을 잡아도 양쪽 손가락에 재료만 있으면 여기서는 높은 점수가 나온다.
+      2. **창 재료량**: 창 안 점 수를 `min_grip_material_points`(하드 리젝트 기준선)의
+         3배를 "넉넉함"으로 보고 정규화. 그 기준선 자체는 이미 no_grip_material이 쓴다.
+      3. **두께**: 창 안 재료가 접근축 방향으로 얼마나 두꺼운지를 창 반폭(`_PAD_HALF_MM`)
+         으로 정규화. 표면 잡음 한 겹인지 실제 두께가 있는지를 가른다.
+
+    **soft feature다.** 명백히 물릴 재료가 없는 경우(cloud_mismatch/no_grip_material)는
+    이 함수에 오기 전에 이미 hard reject된다 — 여기서 낮은 점수가 나온다고 후보를 버리지
+    않는다. 가중치 배분(0.5/0.3/0.2)은 실물 근거가 아직 없는 초기값이다.
+    """
+    selected_c = proj_c[window]
+    if selected_c.size == 0:
+        return -1.0
+    left = int((selected_c < grip_center_c).sum())
+    right = int(selected_c.size - left)
+    balance = min(left, right) / max(left, right, 1)
+    coverage = _clamp01(selected_c.size / max(1.0, 3.0 * float(min_grip_points)))
+    selected_a = proj_a[window]
+    thickness_mm = float(selected_a.max() - selected_a.min()) if selected_a.size else 0.0
+    thickness = _clamp01(thickness_mm / _PAD_HALF_MM)
+    return round(float(_clamp01(0.5 * balance + 0.3 * coverage + 0.2 * thickness)), 3)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
 
 
 def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
@@ -231,13 +266,14 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
                        legacy_max_deg: float = 30.0,
                        camera_offset_mm=(0.0, 0.0, 0.0),
                        points_base=None, refine_depth_mm: float = 8.0,
-                       top_k: int = 10,
-                       lateral_tol_mm: float = _CLOUD_LATERAL_TOL_MM,
+                       refine_pool_size: int = 12,
                        min_grip_points: int = _MIN_GRIP_POINTS,
                        min_width_mm: float = 5.0,
                        max_opening_mm: float = 110.0) -> tuple[list, dict]:
     """camera frame GraspNet 후보들을 base로 한 번에 옮기고, **명백히 위험한 접근각만**
-    걷어낸 뒤 점수 상위 `top_k`개를 돌려준다. (후보 리스트, 진단정보)를 반환한다.
+    걷어낸 뒤, 되잡기(refine)를 통과한 후보로 `refine_pool_size`개짜리 pool을 채워
+    **점수 순서 그대로** 돌려준다. 다양성 선택은 여기가 아니라 node.py가 최종 pose를
+    확정한 뒤에 한다(STEP 1). (후보 리스트, 진단정보)를 반환한다.
 
     **왜 base로 옮긴 뒤에 각도를 재는가.** GraspNet의 접근축은 `rotation_matrix[:, 0]`인데
     그건 **카메라 좌표** 기준이다. 카메라가 손목에 달려 있어(eye-in-hand) 로봇 자세마다
@@ -371,6 +407,9 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
     diagnostics["hard_max_deg"] = round(float(hard_max_deg), 1)
     keep = angle_deg <= float(hard_max_deg)
     diagnostics["passed_count"] = int(keep.sum())
+    # STEP 1의 lifecycle 보고가 쓰는 이름. passed_count와 같은 값이지만 "각도에서 몇 개가
+    # 살아남았나"를 단계 이름으로 남겨 두면 뒤 단계(refine/diverse)와 나란히 읽힌다.
+    diagnostics["angle_pass_count"] = int(keep.sum())
     if not keep.any():
         return [], diagnostics
 
@@ -385,9 +424,10 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
     # 랭킹으로 고른다. planner는 그 사이에서 작업반경만 걸러 목록을 그대로 넘긴다.
     # 이 단계는 "선택지를 잃지 않는 것"까지만 한다.
     #
-    # **hard_max_deg를 넓혀도 여기서 나가는 수는 top_k로 묶인다.** 각도 정책을 풀면
-    # 통과 후보가 수십 개가 되는데, 그걸 그대로 내보내면 world_state 메시지가 커지고
-    # 웹 오버레이가 빽빽해진다(1차에서 top_k를 둔 이유 그대로).
+    # **hard_max_deg를 넓혀도 여기서 나가는 수는 refine_pool_size로 묶인다.** 각도
+    # 정책을 풀면 통과 후보가 수십 개가 되는데, 그걸 그대로 되잡으면 시간이 그만큼 들고
+    # world_state도 커진다. 최종 개수는 그 pool에서 다양성으로 고른
+    # execution_pool_size개다(node.py).
     kept = np.flatnonzero(keep)
     ranked = kept[np.argsort(-score[kept])]
     # **Top-K를 '점수 상위 K개'가 아니라 '기하 검사를 통과한 상위 K개'로 채운다**
@@ -395,17 +435,30 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
     # 후보를 끌어오지 않고 **버리므로** 그대로 두면 published가 K보다 적어진다. 뒤에
     # 남은 후보로 채우는 것이 Top-K를 둔 이유(선택지를 남긴다)에 맞는다.
     #
+    # **여기서 실행 후보 수(10)까지만 채우고 멈추지 않는다** (STEP 1, 2026-09-10).
+    # 다양성 선택은 이 함수 뒤에서 **최종 pose 기준으로** 하는데(node._candidates_for가
+    # _fit_grasp_depth까지 끝낸 뒤 diverse_pool로 고른다), 그 전에 점수 상위 10개만
+    # 남겨 버리면 고를 대상 자체가 이미 한쪽으로 몰려 있을 수 있다. 그래서 여기서는
+    # **refined valid pool을 refine_pool_size(12)까지 채우는 것**까지만 한다.
+    #
+    # GraspNet score는 그대로 쓴다 — 후보의 기본 품질이자 **검사 순서**다(점수 높은 것부터
+    # 되잡기를 시도한다). 바뀐 것은 "score Top-10에서 끝내지 않는다"는 것뿐이다.
+    #
     # 살펴보는 수에 상한을 둔다 — 되잡기는 후보마다 클라우드 전체를 투영하므로
-    # (물티슈 실측 173k점) 전부 돌리면 관측당 시간이 눈에 띄게 늘어난다.
-    examine_limit = min(len(ranked), max(1, int(top_k)) * _GEOMETRY_EXAMINE_FACTOR)
+    # (물티슈 실측 173k점) 전부 돌리면 관측당 시간이 눈에 띄게 늘어난다. 상한은 pool
+    # 크기(refine_pool_size, 현재 12)의 3배지만, raw 자체가 max_candidates(50)로 묶여
+    # 있어 실제 상한은 50이다.
+    examine_limit = min(len(ranked), max(1, int(refine_pool_size)) * _GEOMETRY_EXAMINE_FACTOR)
     order = ranked[:examine_limit]
     diagnostics["examined_count"] = int(len(order))
 
     results = []
     geometry_rejects: dict = {}
+    refine_attempted = 0
     for best in (int(v) for v in order):
-        if len(results) >= max(1, int(top_k)):
+        if len(results) >= max(1, int(refine_pool_size)):
             break
+        refine_attempted += 1
         rank = len(results)
         T_best = T_base_tcp[best]
         chosen_width_mm = float(width_mm[best])
@@ -419,7 +472,7 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
         if points_base is not None and len(points_base) >= 30:
             position, chosen_width_mm, refine_diag = _refine_on_cloud(
                 T_best, points_base, refine_depth_mm,
-                lateral_tol_mm, min_grip_points)
+                min_grip_points)
             status = refine_diag.get("status", GEOMETRY_OK)
             if status != GEOMETRY_OK:
                 # **끌어오지 않고 버린다.** 이 후보를 물체 중심으로 옮겨 살리면 Top-K가
@@ -457,6 +510,10 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
             # 두 값은 같아야 한다: 여기 pose의 Z축이 곧 GraspNet 접근축이다
             # (T_graspnet_tcp_mm이 GraspNet X(접근) → TCP Z(접근)로 맞바꾼다).
             "approach_angle_deg": float(angle_deg[best]),
+            # 손가락 사이 실측 재료 지지도 0~1. 되잡기를 못 한 경우(-1)는 "미상"이고
+            # 0(지지 없음)과 뜻이 다르다 — control이 None으로 바꿔 랭킹에서 뺀다.
+            "contact_support_score": float(
+                refine_diag.get("contact_support_score", -1.0)),
             # 후보 정합성 진단(로그 전용, 메시지로 나가지 않는다). node가 물체 중심과의
             # 거리까지 붙여 한 줄로 찍는다.
             "geometry_debug": {
@@ -492,7 +549,8 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
             entry["debug"] = diagnostics
         results.append(entry)
     diagnostics["geometry_rejects"] = geometry_rejects
-    diagnostics["topk_count"] = len(results)
+    diagnostics["refine_attempted"] = refine_attempted
+    diagnostics["refine_valid"] = len(results)
     return results, diagnostics
 
 
@@ -595,8 +653,9 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
         _camera_offset(params),
         np.asarray(points_base, dtype=float) if points_base is not None else None,
         float(params.get("refine_grasp_depth_mm", 8.0)),
-        int(params.get("top_k", 10)),
-        float(params.get("cloud_lateral_tolerance_mm", _CLOUD_LATERAL_TOL_MM)),
+        # refined valid pool 목표치. 실행 후보 수(execution_pool_size)와 **다른 값**이다 —
+        # 다양성 선택은 이 pool에서 최종 pose 기준으로 고른다(node._candidates_for).
+        int(params.get("refine_pool_size", 12)),
         int(params.get("min_grip_material_points", _MIN_GRIP_POINTS)),
         float(params.get("min_width_mm", 5.0)),
         float(params.get("max_opening_mm", 110.0)))

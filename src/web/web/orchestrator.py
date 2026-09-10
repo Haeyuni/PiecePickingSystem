@@ -49,7 +49,9 @@ MAX_WORLD_STATE_AGE_S = float(os.environ.get("MAX_WORLD_STATE_AGE_S", "5.0"))
 # 지연이라 따로 둔다.
 OBSERVE_FULL_TIMEOUT_S = float(os.environ.get("OBSERVE_FULL_TIMEOUT_S", "60.0"))
 OBSERVE_REPROMPT_TIMEOUT_S = float(os.environ.get("OBSERVE_REPROMPT_TIMEOUT_S", "10.0"))
-WORLD_STATE_RELAY_TIMEOUT_S = float(os.environ.get("WORLD_STATE_RELAY_TIMEOUT_S", "3.0"))
+# GraspNet 상주 서버 실측이 보통 5~8초이고 설정상 최대 30초다. 3초면 정상 추론도
+# 실패로 보고 직전 world_state를 읽을 수 있으므로 추론 timeout보다 조금 길게 둔다.
+WORLD_STATE_RELAY_TIMEOUT_S = float(os.environ.get("WORLD_STATE_RELAY_TIMEOUT_S", "35.0"))
 
 # trace_id → 스냅샷. WebSocket 재연결 시 GET /api/traces/{trace_id}로 돌려줄 현재 상태.
 traces: dict[str, dict] = {}
@@ -355,28 +357,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor, domain: 
             return
 
         trace["steps"] = _build_steps(result.get("steps", []), world_state)
-
         trace["objects"] = world_state.get("objects", [])
-        decision = await _await_approval(trace, world_state, command_text,
-                                         previous_failure, executor, domain)
-        if decision is None:
-            if trace["validation_status"] == "rejected":
-                # correct_label로 재계획했는데 이번엔 검증을 못 지났다 — 사용자 거부가
-                # 아니라 검증 거부다(위 306행과 같은 사유 표시).
-                logger.info("재계획이 거부됨 (trace=%s): %s", trace_id, trace["validation_reason"])
-                await hub.broadcast({
-                    "type": "execution_result", "trace_id": trace_id, "request_id": "",
-                    "success": False, "failure_reason": "rejected",
-                    "validation_reason": trace["validation_reason"],
-                })
-            else:
-                logger.info("사용자가 실행을 거부함 (trace=%s)", trace_id)
-                await hub.broadcast({
-                    "type": "execution_result", "trace_id": trace_id, "request_id": "",
-                    "success": False, "failure_reason": "user_rejected",
-                })
-            return
-        world_state, trace["steps"] = decision
 
         # **재계획마다 대상 물체가 바뀔 수 있다.** planner는 매 시도 새 world_state로
         # 명령을 다시 그라운딩하는데, object_id는 관측마다 새로 매겨지므로 같은 물체라도
@@ -405,14 +386,19 @@ async def _run_command_body(trace_id: str, command_text: str, executor, domain: 
         # 계획의 나머지를 계속하는 것은 허용된다 — 부분집합이면 통과하기 때문이다.
         # 클래스를 모르는(None) 대상은 새로 들어온 것으로 본다: 판별할 수 없으면 멈추는
         # 쪽이 엉뚱한 물체를 집는 것보다 낫다.
+        #
+        # **승인을 묻기 전에 확인한다 (2026-09-10 실물).** 예전에는 승인까지 다 받은
+        # 뒤에야 이 검사를 해서, 사용자가 재계획 결과를 승인했는데도 로봇이 그대로
+        # 멈춰버렸다 — 버릴 계획인데 승인만 받고 실행은 안 하는 것처럼 보인 것이다.
+        # 이미 범위를 벗어난 게 확실하면 승인 화면조차 띄우지 않고 바로 멈춘다.
         step_classes = {name for skill, _, name in targets if skill == "pick"}
         if allowed_classes is None:
             allowed_classes = step_classes
         else:
-            intruders = {name for name in step_classes if name not in allowed_classes}
+            intruders = _off_scope_intruders(trace["steps"], world_state, allowed_classes)
             if intruders:
                 logger.error(
-                    "재계획이 명령에 없던 물체를 대상으로 삼았다 — 실행하지 않고 멈춘다 "
+                    "재계획이 명령에 없던 물체를 대상으로 삼았다 — 승인을 묻지 않고 멈춘다 "
                     "(trace=%s, 처음 대상=%s, 새 대상=%s)", trace_id,
                     sorted(n or "?" for n in allowed_classes),
                     sorted(n or "?" for n in intruders))
@@ -425,6 +411,46 @@ async def _run_command_body(trace_id: str, command_text: str, executor, domain: 
                         + ")를 대상으로 삼아 중단했습니다."),
                 })
                 return
+
+        decision = await _await_approval(trace, world_state, command_text,
+                                         previous_failure, executor, domain)
+        if decision is None:
+            if trace["validation_status"] == "rejected":
+                # correct_label로 재계획했는데 이번엔 검증을 못 지났다 — 사용자 거부가
+                # 아니라 검증 거부다(위 306행과 같은 사유 표시).
+                logger.info("재계획이 거부됨 (trace=%s): %s", trace_id, trace["validation_reason"])
+                await hub.broadcast({
+                    "type": "execution_result", "trace_id": trace_id, "request_id": "",
+                    "success": False, "failure_reason": "rejected",
+                    "validation_reason": trace["validation_reason"],
+                })
+            else:
+                logger.info("사용자가 실행을 거부함 (trace=%s)", trace_id)
+                await hub.broadcast({
+                    "type": "execution_result", "trace_id": trace_id, "request_id": "",
+                    "success": False, "failure_reason": "user_rejected",
+                })
+            return
+        world_state, trace["steps"] = decision
+
+        # `_await_approval` 중 correct_label로 다시 그라운딩됐을 수 있다 — 그 결과가
+        # 범위를 벗어났는지 승인 후에도 한 번 더 본다(위와 같은 이유, 같은 검사).
+        intruders = _off_scope_intruders(trace["steps"], world_state, allowed_classes)
+        if intruders:
+            logger.error(
+                "라벨 수정 재계획이 명령에 없던 물체를 대상으로 삼았다 — 실행하지 않고 멈춘다 "
+                "(trace=%s, 처음 대상=%s, 새 대상=%s)", trace_id,
+                sorted(n or "?" for n in allowed_classes),
+                sorted(n or "?" for n in intruders))
+            await hub.broadcast({
+                "type": "execution_result", "trace_id": trace_id, "request_id": "",
+                "success": False, "failure_reason": "replan_changed_target",
+                "validation_reason": (
+                    "재계획이 명령과 다른 물체("
+                    + ", ".join(sorted(n or "?" for n in intruders))
+                    + ")를 대상으로 삼아 중단했습니다."),
+            })
+            return
 
         failure = await _execute_steps(trace, world_state, executor)
         if failure is None:
@@ -762,6 +788,14 @@ def class_of(world_state: dict, object_id: str) -> str | None:
     return None
 
 
+def _off_scope_intruders(steps: list[dict], world_state: dict,
+                         allowed_classes: set) -> set:
+    """`steps`의 pick 대상 중 `allowed_classes`(최초 명령의 범위)에 없는 클래스들."""
+    step_classes = {class_of(world_state, s["object_id"])
+                    for s in steps if s["skill"] == "pick"}
+    return {name for name in step_classes if name not in allowed_classes}
+
+
 async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | None:
     """스텝을 순서대로 실행한다. 실패하면 previous_failure 형태로 반환."""
     class_map = store.object_class_map(world_state)
@@ -850,6 +884,13 @@ async def _execute_steps(trace: dict, world_state: dict, executor) -> dict | Non
             result = await executor.call_place_into(goal, on_feedback)
             for retry in range(1, MAX_PLACE_RETRIES + 1):
                 if result.success or result.cancelled:
+                    break
+                # 고정 Safe-Z에서 route/configuration을 서버가 이미 모두 탐색한 결정적 실패다.
+                # 같은 PickSnapshot과 목적지로 액션 전체를 다시 보내도 결과가 달라지지 않고,
+                # 실물 로그에서 같은 8-space 탐색만 세 번 반복해 사람에게는 멈춘 것처럼 보였다.
+                if result.failure_reason == "safe_transit_unreachable":
+                    logger.error("place_into 재시도 중단: 고정 Safe-Z 이송 불가 (trace=%s)",
+                                 trace["trace_id"])
                     break
                 # 새 request_id로 보낸다 — control의 중복요청 캐시(RequestCache)가 같은
                 # id를 "재실행 대신 이전 결과 반환"으로 처리하기 때문이다. trace의 스텝에도

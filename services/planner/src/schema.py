@@ -8,13 +8,14 @@ LLM이 정하는 것과 코드가 정하는 것을 나눈다:
 - 코드: 파지 후보 목록(`grasp_candidates`)과 파지력 단계(`grip_level`, 속성 DB 기준).
   **실행할 후보 하나를 최종 선택하는 것은 control이다** — 개폭 유효성·IK·관절 한계는
   로봇에 붙어 있어야 답할 수 있고(ikin 서비스), planner는 ROS2를 모르는 별도 서비스다.
-  여기서는 작업반경 안에 있는 후보만 점수 순으로 추려서 넘긴다.
+  여기서는 작업반경 안에 있는 후보만 걸러서 **grasp가 만든 순서 그대로** 넘긴다
+  (2026-09-10 STEP 1 — 점수로 재정렬하지 않는다).
 
 파지 자세와 파지력 단계는 물리적 안전에 직결되므로 LLM 출력에 맡기지 않는다(NFR-03a).
 """
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_VERSION = "1.0.0"
 
@@ -32,6 +33,8 @@ Domain = Literal["general", "pharmacy", "recycle"]
 class LlmStep(BaseModel):
     """LLM이 생성하는 스텝 하나. 좌표·힘 같은 물리량은 포함하지 않는다."""
 
+    model_config = ConfigDict(extra="forbid")
+
     skill: SkillName
     object_id: str = Field(description="world_state에 실제로 존재하는 object_id만 사용")
     bin_id: str = Field(
@@ -42,6 +45,8 @@ class LlmStep(BaseModel):
 
 class LlmPlan(BaseModel):
     """LLM 응답 전체. 거부도 '자유 텍스트'가 아니라 이 구조 안에서 표현한다."""
+
+    model_config = ConfigDict(extra="forbid")
 
     steps: list[LlmStep] = Field(
         description="실행할 스킬 시퀀스. 수행할 수 없는 지시면 빈 배열",
@@ -76,6 +81,10 @@ class GraspCandidateOut(BaseModel):
     # grasp_depth_mm과 같은 이유로 빠뜨리면 안 된다 — orchestrator가 execution_logs에
     # 남기려면 이 왕복(world_state → planner → PlanStep)에서 살아 있어야 한다.
     point_cloud_path: str = ""
+    # 손가락 사이 실측 재료 지지도 0~1, **-1이면 미상**(GraspCandidate.msg 주석 참조).
+    # control의 enhanced ranking이 쓴다. 기본값을 0.0으로 두면 안 된다 — "미상"이
+    # "지지 없음"으로 읽혀 멀쩡한 후보가 매번 감점된다.
+    contact_support_score: float = -1.0
 
 
 class PlanStep(BaseModel):
@@ -86,7 +95,9 @@ class PlanStep(BaseModel):
     # 그대로 쓴다. **실제로 실행할 후보는 control이 grasp_candidates에서 고른다.**
     grasp_pose: Pose | None = None   # pick일 때만
     gripper_width_mm: float | None = None  # pick일 때만. 1순위 후보의 예측 그리퍼 개폭(mm) — 없으면 미상
-    # 작업반경 안에 있는 후보 전체(점수 내림차순). control이 개폭·IK·관절·안전을 보고 고른다.
+    # 작업반경 안에 있는 후보 전체. **grasp가 만든 순서 그대로다**(0번=GraspNet 최고점, 그 뒤는
+    # 최종 pose Diverse-TopK 순서) — planner는 점수로 재정렬하지 않는다. control이 개폭·IK·
+    # 관절·안전·랭킹을 보고 그중 하나를 고른다.
     grasp_candidates: list[GraspCandidateOut] = Field(default_factory=list)
     # --- control의 후보 랭킹이 쓰는 물체 정보 (DetectedObject에서 그대로 옮긴다) ---
     # control은 /world_state를 구독하지 않으므로 여기 실어 보내지 않으면 볼 방법이 없다.

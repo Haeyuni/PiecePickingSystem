@@ -26,7 +26,7 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
-from dsr_msgs2.action import MovelH2r
+from dsr_msgs2.action import MovejH2r, MovelH2r
 from dsr_msgs2.srv import Fkin, GetCurrentPosx, GetCurrentSolutionSpace, GetExternalTorque, Ikin
 from onrobot_rg_msgs.msg import OnRobotRGInput
 from onrobot_rg_msgs.srv import GripperPose, SetCommand
@@ -35,7 +35,7 @@ from sensor_msgs.msg import JointState
 from sort_msgs.action import Pick
 from sort_msgs.msg import SelectedGrasp
 
-from . import compliance, dsr_motion, grasp_selection
+from . import compliance, dsr_motion, grasp_selection, motion_feasibility
 from .config_paths import skill_params_path
 from .request_cache import RequestCache
 from .robot_state_publisher import is_fake_robot, store
@@ -46,6 +46,12 @@ SCHEMA_VERSION = "1.0.0"
 # 하나만 다른 색으로 그린다 — 화면에 숫자를 늘리지 않고 "무엇이 뽑혔는지"만 보여준다.
 # 최신 하나만 의미가 있고 늦게 붙은 구독자도 그것을 받아야 하므로 transient local이다.
 SELECTED_GRASP_TOPIC = "/control/selected_grasp"
+
+
+def _posx_key(posx) -> tuple:
+    """IK 결과를 기하(posx)별로 기억할 때 쓰는 키. 0.1mm/0.1도까지만 본다 — 같은 값을
+    실수 비교로 놓치지 않으면서 서로 다른 자세를 뭉치지도 않는 해상도다."""
+    return tuple(round(float(v), 1) for v in list(posx)[:6])
 
 
 class _LiftFailedError(RuntimeError):
@@ -146,6 +152,49 @@ class PickServer(Node):
         # 후보 선택 파라미터. 개폭 관련 값은 위에서 이미 읽은 실행 기준을 그대로 넘긴다 —
         # 검사 기준과 실행 기준이 갈라지면 "통과시켜 놓고 다르게 동작하는" 후보가 생긴다.
         self._selection = self._selection_params(params)
+        # STEP 1 실물 비교에서 legacy/enhanced가 같은 후보를 골랐고 contact_support 전달도
+        # 확인했다(2026-09-10). production은 enhanced 하나만 사용한다. 비교용 runtime
+        # 분기는 STEP 3에서 제거했다.
+        # --- 모션 실행 가능성 (STEP 2) ---
+        spec = params.get("grasp_selection") or {}
+        # **기본 켜짐.** 켜면 후보마다 (자세 표현 × solution space) 조합과 구간 경로까지
+        # 확인해 "현재 관절 자세로는 못 가는" 후보를 살려낸다 — robot-aware selection의
+        # 본체다. skill_params.yaml도 true로 두고 있으므로 기본값을 그와 맞춘다.
+        #
+        # 2026-09-10에 이 값을 잠시 껐던 이유(pick 이동이 8초 → 17초)는 **후보 선택이
+        # 아니라 control 컨테이너 상태였고, 재시작으로 해소됐다.** 검사가 느리게 만든
+        # 것이 아니었으므로 기본-off로 둘 근거가 없다.
+        self._motion_feasibility_enabled = bool(
+            spec.get("motion_feasibility_enabled", True))
+        # 경로 중간에서 관절이 이보다 튀면 그 구간에서 configuration이 갈린 것으로 본다.
+        self._max_joint_jump_deg = float(spec.get(
+            "max_joint_jump_deg", motion_feasibility.DEFAULT_MAX_JOINT_JUMP_DEG))
+        # 다른 solution space로 바꾸려면 관절 이동(movej)이 필요한데, 그건 직선 경로가
+        # 아니라 팔이 크게 휘돈다. **이 값 자체는 더 이상 후보를 버리지 않는다** — 판정은
+        # motion_feasibility.config_switch_feasible이 전환 구간의 FK를 실제로 찍어 명백한
+        # 충돌만 보고, 이 값을 넘으면 참고 경고만 남긴다. place가 STEP 3에서 먼저 겪은
+        # 것과 같은 이유다: 각도 크기만으로 거르면 solution space를 바꾸는 데 정상적으로
+        # 필요한 폭(실물 168~257도)까지 막혀 멀쩡한 후보가 전부 사라진다.
+        self._max_config_switch_jump_deg = float(
+            spec.get("max_config_switch_jump_deg", 90.0))
+        # "현재 → 접근" 구간이 직선으로 막혔을 때 **우회**에 쓸 여유 높이. 두 끝점 중 높은
+        # 쪽에서 이만큼 더 올라갔다가 건너간다. 직선이 되면 쓰이지 않는다 — 우회는 후보를
+        # 버리는 대신 돌아가는 수단이지, 매번 높이 올라가라는 뜻이 아니다.
+        self._transit_clearance_mm = float(spec.get("transit_clearance_mm", 50.0))
+        # configuration을 바꿔야 할 때 쓰는 관절 이동 속도. home과 같은 값을 기본으로 쓴다 —
+        # 이 이동은 직선이 아니라 팔이 휘도는 이동이라 빠르게 할 이유가 없다.
+        home = params.get("home") or {}
+        self._joint_vel_deg_s = float(spec.get("config_switch_vel_deg_s",
+                                               home.get("vel_deg_s", 20.0)))
+        self._joint_acc_deg_s2 = float(spec.get("config_switch_acc_deg_s2",
+                                                home.get("acc_deg_s2", 20.0)))
+        # `_select_candidate`가 채운다(검사 때 찾은 IK 해 / 그때의 로봇 상태 / 실행 계획).
+        # `_ik_group`은 후보 기하(접근+파지)를 같은 solution space에서 함께 푼 결과다.
+        self._ik_choice: dict = {}
+        self._ik_group: dict = {}
+        self._current_sol_space: int | None = None
+        self._current_posj: list | None = None
+        self._motion_plan: dict | None = None
         # 관절 한계는 SelectionParams가 아니라 IK 질의(dsr_motion.verify_ik)가 쓴다.
         # 설정에 없으면 URDF에서 읽은 M0609 값을 그대로 쓴다.
         limits = (params.get("grasp_selection") or {}).get("joint_limits_deg")
@@ -153,6 +202,10 @@ class PickServer(Node):
                                   if isinstance(limits, (list, tuple)) and len(limits) == 6
                                   else dsr_motion.JOINT_LIMITS_DEG)
         self._movel_client = ActionClient(self, MovelH2r, dsr_motion.MOVEL_ACTION,
+                                          callback_group=callbacks)
+        # 다른 solution space에서만 풀리는 후보를 실행할 때만 쓴다(STEP 2) — movel은
+        # configuration을 바꾸지 못하므로 그 자세의 관절해로 직접 이동해야 한다.
+        self._movej_client = ActionClient(self, MovejH2r, dsr_motion.MOVEJ_ACTION,
                                           callback_group=callbacks)
         # 컨트롤러가 "이 목표는 못 간다"고 내는 알람을 지켜본다 — 없으면 movel이
         # goal을 accept한 채 아무것도 안 하는 경우가 60초 타임아웃을 다 채운다
@@ -530,6 +583,9 @@ class PickServer(Node):
                 spec.get("approach_travel_ref_mm", defaults.approach_travel_ref_mm)),
             approach_rotation_ref_deg=float(
                 spec.get("approach_rotation_ref_deg", defaults.approach_rotation_ref_deg)),
+            comfort_joint_delta_ref_deg=float(
+                spec.get("comfort_joint_delta_ref_deg",
+                         defaults.comfort_joint_delta_ref_deg)),
             weights=weights,
         )
 
@@ -573,7 +629,11 @@ class PickServer(Node):
             candidate_id=candidate.candidate_id, rank=rank, pose=candidate.pose,
             score=float(candidate.score),
             gripper_width_mm=float(candidate.gripper_width_mm),
-            strategy=candidate.strategy)
+            strategy=candidate.strategy,
+            # -1(미상)과 0.0(지지 없음)은 뜻이 다르다. 구 planner/도구가 보낸 goal에는
+            # 필드 자체가 없을 수 있어 getattr 기본값도 -1이다.
+            contact_support_score=float(
+                getattr(candidate, "contact_support_score", -1.0)))
             for rank, candidate in enumerate(kept)]
 
     @staticmethod
@@ -594,6 +654,33 @@ class PickServer(Node):
             height_mm=float(getattr(goal, "object_height_mm", 0.0) or 0.0),
             depth_valid_ratio=float(getattr(goal, "depth_valid_ratio", 0.0) or 0.0),
         )
+
+    def _pad_floor_obstacle(self, obj):
+        """경로가 **지지면(작업대) 아래로 손끝을 끌고 가는지** 보는 가벼운 충돌 검사기.
+
+        보는 것은 TCP가 아니라 **손끝 예상 높이**다 — TCP는 패드보다 위에 있어서 TCP만
+        보면 이미 작업대를 쓸고 있는 경로도 통과한다. 기준과 허용치는 끝점 검사
+        (grasp_selection.check_min_safety)와 **같은 값**을 쓴다: 끝점에서 통과한 자세가
+        경로 검사에서 다른 이유로 떨어지면 안 되기 때문이다.
+
+        지지면을 모르면(관측에 물체 높이가 없으면) 검사기를 아예 만들지 않는다 — 모르는
+        것을 위험하다고 바꾸지 않는다(motion_feasibility 모듈 docstring).
+        """
+        support_z = obj.support_z_mm
+        if support_z is None:
+            return None
+        floor = float(support_z) - float(self._selection.support_tolerance_mm)
+
+        def obstacle(posx) -> str:
+            pad_z = dsr_motion.grasp_center_from_posx(
+                list(posx), self._grasp_center_offset_mm)[2]
+            if float(pad_z) < floor:
+                return (f"경로 지점의 손끝 예상 z {float(pad_z):.1f}mm가 지지면 "
+                        f"{float(support_z):.1f}mm 아래(허용 "
+                        f"{self._selection.support_tolerance_mm:.1f}mm)")
+            return ""
+
+        return obstacle
 
     def _select_candidate(self, goal, goal_handle):
         """실행할 후보 하나를 고른다. **로봇은 전혀 움직이지 않는다.**
@@ -617,14 +704,59 @@ class PickServer(Node):
             target_posx, approach_posx, axis = dsr_motion.plan_pick_posx(
                 pose, self._grasp_center_offset_mm, self._approach_height_mm,
                 self._pick_depth_extra_mm, current_zyz_deg=current_zyz)
-            return grasp_selection.PickGeometry(
+            geometry = grasp_selection.PickGeometry(
                 target_posx=target_posx, approach_posx=approach_posx, approach_axis=axis,
                 pad_reference_mm=dsr_motion.grasp_center_from_posx(
                     target_posx, self._grasp_center_offset_mm))
+            if self._motion_feasibility_enabled:
+                self._resolve_ik_group(geometry, ik_query, spaces)
+            return geometry
+
+        # (자세 표현 × solution space) 조합을 순서대로 물어 **첫 성공**을 쓴다 (STEP 2).
+        # 예전에는 현재 space에서 한 번 물어보고 실패하면 그 후보를 버렸는데, 그 실패의
+        # 뜻은 대개 "이 파지가 불가능하다"가 아니라 "이 관절 자세로는 못 간다"였다.
+        # 찾은 해는 기하(posx)별로 기억해 뒀다가 실행이 같은 것을 쓴다 — 검사와 실행이
+        # 갈라지면 IK를 통과시킨 근거가 사라진다.
+        spaces = motion_feasibility.solution_space_order(sol_space)
+        self._ik_choice = {}
+        self._ik_group = {}
+        self._current_sol_space = sol_space
+        # 지금 관절값 — 현재 자세를 현재 space로 ikin한 해다. configuration을 바꿔야 할 때
+        # "얼마나 움직여야 하나"를 재는 기준이고, 이걸 위해 새 서비스를 만들지 않는다.
+        self._current_posj = None
+        if wrist_pose is not None and self._motion_feasibility_enabled:
+            current_verdict = dsr_motion.verify_ik(
+                self._ikin_client, self._fkin_client, wrist_pose,
+                sol_space=sol_space, limits=self._joint_limits_deg)
+            if getattr(current_verdict, "known", False):
+                self._current_posj = getattr(current_verdict, "posj", None)
+
+        # 한 번의 후보 선택 안에서 같은 (posx, space)를 여러 번 묻게 된다(짝 탐색 →
+        # 구간 검사 → 우회 경로). 로봇이 그동안 안 움직이므로 답은 같다 — 캐시로 묶어
+        # ikin 왕복(실측 약 31ms)을 줄인다.
+        ik_query = motion_feasibility.ik_cache(
+            lambda posx, space: dsr_motion.verify_ik(
+                self._ikin_client, self._fkin_client, posx,
+                sol_space=space, limits=self._joint_limits_deg))
 
         def ik_verdict_of(posx):
-            return dsr_motion.verify_ik(self._ikin_client, self._fkin_client, posx,
-                                        sol_space=sol_space, limits=self._joint_limits_deg)
+            if not self._motion_feasibility_enabled:
+                # STEP 2 이전과 동일 — 현재 solution space에서 한 번만 묻는다.
+                return ik_query(posx, sol_space)
+            key = _posx_key(posx)
+            found = self._ik_choice.get(key)
+            if found is not None:
+                # `geometry_of`가 접근+파지를 **한 space에서 함께** 푼 결과다. 여기서
+                # 지점별로 다시 찾으면 둘이 서로 다른 space로 갈라져 실행할 수 없게 된다.
+                return found.verdict
+            found = motion_feasibility.find_ik(
+                self._wrist_representations(posx, current_zyz), ik_query, spaces)
+            if found is not None:
+                self._ik_choice[key] = found
+                return found.verdict
+            # 아무 조합도 안 됐다 — 현재 space·원래 표현의 판정을 그대로 돌려준다.
+            # (무응답이면 known=False라 grasp_selection이 "확인 못 함"으로 다룬다.)
+            return ik_query(posx, spaces[0])
 
         evaluations = grasp_selection.evaluate_candidates(
             candidates, obj, self._selection, geometry_of, ik_verdict_of,
@@ -635,7 +767,26 @@ class PickServer(Node):
             # ZYZ는 ry가 180도 근처면 같은 방향이 다른 (rx,rz)로 나온다 — 성분 차로
             # 재면 안 되므로 회전행렬 각도차를 쓰는 함수를 넘긴다(dsr_motion 참조).
             rotation_diff=dsr_motion.rotation_diff_deg)
-        selected = grasp_selection.select(evaluations)
+        selected, _, _ = grasp_selection.select(evaluations, mode="enhanced")
+        # **여기서 끝내지 않는다 (STEP 2).** 고른 후보가 끝점 IK는 통과했어도 실제 구간이
+        # 이어지지 않을 수 있다 — 그러면 그 후보를 건너뛰고 다음 순위 후보를 본다.
+        # 다만 그 검사로 **후보가 사라지지는 않는다**: 전부 걸리면 랭킹 1위를 그대로
+        # 실행한다(_first_feasible ③).
+        motion_plan = None
+        if selected is not None and self._motion_feasibility_enabled:
+            selected, motion_plan = self._first_feasible(
+                evaluations, selected, goal.object_id, wrist_pose, ik_query,
+                self._pad_floor_obstacle(obj))
+        self._motion_plan = motion_plan
+
+        # execution pool이 여기 상한보다 크면 뒤쪽 후보가 **조용히** 잘린다 — grasp가
+        # 다양성으로 고른 선택지가 사라지므로 드러내 알린다(STEP 1 §12).
+        if len(candidates) > self._selection.max_evaluated:
+            self.get_logger().warning(
+                f"[후보선택] object={goal.object_id} 받은 후보 {len(candidates)}개가 "
+                f"max_evaluated={self._selection.max_evaluated}보다 많다 — 뒤쪽 "
+                f"{len(candidates) - self._selection.max_evaluated}개는 평가하지 않는다 "
+                "(grasp_params.yaml execution_pool_size와 맞출 것)")
 
         # 후보별 판정은 **로그에만** 남긴다(웹에는 이 숫자들을 내보내지 않는다).
         for evaluation in evaluations:
@@ -654,14 +805,287 @@ class PickServer(Node):
             f"joint탈락={tally[grasp_selection.STATUS_JOINT_LIMIT]} "
             f"safety탈락={tally[grasp_selection.STATUS_SAFETY_INVALID]} "
             f"valid={tally[grasp_selection.STATUS_VALID] + tally[grasp_selection.STATUS_SELECTED]} "
-            + (f"selected={selected.candidate.candidate_id or '(단일 grasp_pose)'} "
-               f"total={selected.total_score:.3f}" if selected else "selected=없음"))
+            + (f"mode=enhanced "
+               f"selected={selected.candidate.candidate_id or '(단일 grasp_pose)'} "
+               f"legacy={selected.legacy_score:.3f} "
+               f"enhanced={selected.total_score:.3f}" if selected else "selected=없음"))
         if unknown_ik:
             self.get_logger().warning(
                 f"[후보선택] IK 확인 실패 {unknown_ik}건 — ikin/fkin 서비스가 응답하지 않아 "
                 "도달 가능성을 검증하지 못한 채 통과시켰다(로봇 드라이버 미기동?)")
         self._publish_selected(selected, goal.trace_id, goal.source_observation_id)
         return selected, evaluations, wrist_pose
+
+    def _first_feasible(self, evaluations, selected, object_id: str, wrist_pose,
+                        ik_query, obstacle):
+        """랭킹 순서대로 보면서 **모션까지 실제로 가능한 첫 후보**를 고른다 (STEP 2).
+
+        끝점 IK만 통과하고 구간이 안 이어지는 후보가 있다 — 예전에는 그걸 그대로 실행해
+        movel이 오류 없이 안 움직이거나 도중에 실패했다. 여기서 걸러 다음 후보로 넘어간다.
+        **후보가 하나 안 된다고 pick 전체를 실패시키지 않는다**(STEP 1 계약 그대로).
+
+        **검사는 후보를 버리는 수단이 아니라 고르는 수단이다 (2026-09-10 보완).** 세 단계로
+        누그러뜨린다 — ① 중간 보간 지점까지 깨끗한 후보, ② 끝점만 확실한 후보(place가 먼저
+        쓴 2패스와 같은 완화), ③ 그래도 없으면 **랭킹 1위를 그대로 실행한다.** ③이 있는
+        이유는 이 검사가 직선 보간과 강제 space라는 가정 위에 서 있어서, 그것 때문에 로봇이
+        아예 안 움직이는 쪽이 더 나쁜 결과이기 때문이다(motion_feasibility 모듈 docstring
+        "애매하면 막지 않는다").
+
+        반환: `(선택된 Evaluation, 실행 계획)`. 후보가 아예 없을 때만 `(None, None)`이다.
+        """
+        ranked = sorted(
+            [e for e in evaluations
+             if e.status in (grasp_selection.STATUS_VALID, grasp_selection.STATUS_SELECTED)],
+            key=lambda e: (-(e.total_score or 0.0), e.candidate.rank))
+        if not ranked:
+            return None, None
+
+        for strict in (True, False):
+            for evaluation in ranked:
+                plan, reason = self._motion_plan_for(
+                    evaluation, wrist_pose, ik_query, obstacle, strict)
+                if plan is not None:
+                    self._mark_selected(selected, evaluation)
+                    self._log_plan(object_id, evaluation, plan, reason, strict)
+                    return evaluation, plan
+                if strict:
+                    self.get_logger().info(
+                        f"[모션검사] object={object_id} "
+                        f"{evaluation.candidate.candidate_id or '(단일 grasp_pose)'} "
+                        f"깨끗한 경로 없음 — {reason}")
+
+        # ③ 마지막 안전장치. 여기 오는 후보들은 **끝점 IK를 이미 통과했다**(끝점이 안 되는
+        # 후보는 grasp_selection이 앞에서 탈락시킨다). 남은 것은 경로 판정의 의심뿐이라,
+        # 로봇을 세우는 대신 실행해 보고 실패하면 모션 단계가 보고하게 한다.
+        evaluation, plan = self._fallback_plan(ranked)
+        self._mark_selected(selected, evaluation)
+        self.get_logger().warning(
+            f"[모션검사] object={object_id} 모든 후보가 경로 검사에서 걸렸다 — 랭킹 1위 "
+            f"{evaluation.candidate.candidate_id or '(단일 grasp_pose)'}를 그대로 실행한다 "
+            "(검사는 고르는 수단이지 막는 수단이 아니다. 실패하면 모션 단계가 보고한다)")
+        return evaluation, plan
+
+    @staticmethod
+    def _mark_selected(selected, evaluation) -> None:
+        if selected is not None and evaluation is not selected:
+            selected.status = grasp_selection.STATUS_VALID
+            evaluation.status = grasp_selection.STATUS_SELECTED
+
+    def _log_plan(self, object_id: str, evaluation, plan: dict, reason: str,
+                  strict: bool) -> None:
+        if reason:
+            self.get_logger().info(f"[모션검사] object={object_id} {reason}")
+        if not strict:
+            self.get_logger().info(
+                f"[모션검사] object={object_id} "
+                f"{evaluation.candidate.candidate_id or '(단일 grasp_pose)'} 채택 — 끝점은 "
+                "확실하고 중간 보간 지점만 안 풀렸다(직선 보간 가정이라 실패로 치지 않는다)")
+        if plan.get("waypoints"):
+            self.get_logger().warning(
+                f"[모션검사] object={object_id} 접근까지 직선이 막혀 우회한다 "
+                f"(경로 '{plan['route']}', 경유 {len(plan['waypoints'])}곳)")
+        if plan.get("switch_posj") is not None:
+            self.get_logger().warning(
+                f"[모션검사] object={object_id} "
+                f"{evaluation.candidate.candidate_id}는 현재 관절 자세로는 못 가고 "
+                f"solution space {plan['sol_space']}에서만 풀린다 — 접근 자세로 "
+                "관절 이동한 뒤 내려간다")
+
+    def _fallback_plan(self, ranked):
+        """검사를 통과한 후보가 하나도 없을 때 **그래도 실행할** 후보와 계획.
+
+        접근과 파지가 같은 solution space에서 풀린 후보를 우선한다 — 그게 없으면 하강
+        도중에 configuration이 갈려 실행 자체가 성립하지 않기 때문이다. 그마저 없으면
+        랭킹 1위를 예전(STEP 2 이전) 경로 그대로 실행한다.
+        """
+        for evaluation in ranked:
+            group = self._ik_group.get(_posx_key(evaluation.geometry.target_posx))
+            if group is None:
+                continue
+            approach_option, grasp_option = group.options[0], group.options[1]
+            switch_posj = (list(approach_option.posj)
+                           if group.sol_space != self._current_sol_space
+                           and approach_option.posj else None)
+            return evaluation, {
+                "sol_space": group.sol_space, "switch_posj": switch_posj,
+                "approach_posx": list(approach_option.posx),
+                "target_posx": list(grasp_option.posx),
+                "representation": group.representation,
+                "route": "direct", "waypoints": []}
+        evaluation = ranked[0]
+        return evaluation, {
+            "sol_space": None, "switch_posj": None,
+            "approach_posx": list(evaluation.geometry.approach_posx),
+            "target_posx": list(evaluation.geometry.target_posx),
+            "representation": "original", "route": "direct", "waypoints": []}
+
+    @staticmethod
+    def _wrist_representations(posx, current_zyz):
+        """같은 물리적 파지를 나타내는 TCP 자세 표현들 — 선호 순서대로.
+
+        평행 그리퍼는 접근축 둘레 180도를 뒤집어도 같은 파지다(닫힘축만 부호가 반대).
+        원래 표현으로 IK가 안 풀려도 뒤집은 표현은 풀리는 경우가 있으므로 둘 다 후보로
+        둔다. 앞쪽이 선호 — `plan_pick_posx`가 이미 현재 손목에 가까운 쪽을 골라 두었으니
+        원래 표현이 앞이다(헛도는 180도 회전을 다시 만들지 않는다).
+        """
+        flipped = dsr_motion.flipped_wrist_posx(posx)
+        options = [(list(posx), "original")]
+        if flipped is not None:
+            options.append((list(flipped), "equivalent_wrist"))
+        return options
+
+    def _resolve_ik_group(self, geometry, ik_query, spaces):
+        """후보의 접근점과 파지점을 **같은 solution space에서 함께** 푼다 (2026-09-10).
+
+        지점마다 따로 풀면 접근이 space 3, 파지가 space 5에서 먼저 풀리는 일이 생기는데
+        movel은 한 이동 안에서 space를 못 바꾸므로 그 조합은 실행할 수 없다. 예전에는 그걸
+        나중에 발견해 **후보를 통째로 버렸다** — 정작 둘 다 되는 space가 있는데도 그랬다.
+        여기서 짝으로 찾아 두면 그 탈락이 사라진다.
+
+        찾은 해는 기하(posx)별로 기억해 뒀다가 랭킹·구간검사·실행이 같은 것을 쓴다.
+        """
+        approach, target = list(geometry.approach_posx), list(geometry.target_posx)
+        groups = [("original", [approach, target])]
+        flipped = [dsr_motion.flipped_wrist_posx(approach),
+                   dsr_motion.flipped_wrist_posx(target)]
+        if all(value is not None for value in flipped):
+            groups.append(("equivalent_wrist", flipped))
+        group = motion_feasibility.find_ik_group(groups, ik_query, spaces)
+        if group is None:
+            return None
+        # 실행이 쓰는 좌표는 group.options[*].posx다(뒤집은 표현이면 그 좌표). 조회는
+        # 원래 기하 좌표로 들어오므로 **양쪽 키 모두** 같은 해를 가리키게 해 둔다.
+        self._ik_group[_posx_key(target)] = group
+        self._ik_choice[_posx_key(approach)] = group.options[0]
+        self._ik_choice[_posx_key(target)] = group.options[1]
+        for option in group.options:
+            self._ik_choice.setdefault(_posx_key(option.posx), option)
+        return group
+
+    def _motion_plan_for(self, evaluation, wrist_pose, ik_query, obstacle,
+                         strict: bool = True):
+        """고른 후보를 실제로 실행할 수 있는지 — 끝점이 아니라 **구간**으로 확인한다.
+
+        검사 구간: 현재 → 접근, 접근 → 파지, 파지 → 후퇴(= 접근으로 되돌아감).
+        각 구간을 몇 지점으로 나눠 IK·관절 연속성·명백한 충돌을 본다(path_feasible).
+
+        **현재 → 접근이 직선으로 막히면 우회 경유점을 넣어 본다** (2026-09-10 보완).
+        그 구간이 막혔다는 것은 대개 "이 파지가 불가능하다"가 아니라 "지금 자리에서 곧장
+        가면 걸린다"는 뜻이라, place가 이미 쓰고 있는 경로 생성기(motion_feasibility.routes)
+        를 같은 방식으로 쓴다. 접근 → 파지 하강은 우회하지 않는다 — 그 구간은 접근축을 따라
+        곧게 내려가야 파지가 성립한다.
+
+        반환: `(계획 dict 또는 None, 사유)`.
+        """
+        geometry = evaluation.geometry
+        approach_option = self._ik_choice.get(_posx_key(geometry.approach_posx))
+        grasp_option = self._ik_choice.get(_posx_key(geometry.target_posx))
+        if approach_option is None or grasp_option is None:
+            # IK를 못 물어본 경우(ikin 무응답)다 — 여기서 막지 않는다. 예전과 같은 경로로
+            # 그대로 실행하고, 실패하면 모션 단계가 보고한다.
+            return {"sol_space": None, "switch_posj": None,
+                    "approach_posx": list(geometry.approach_posx),
+                    "target_posx": list(geometry.target_posx),
+                    "route": "direct", "waypoints": []}, "IK 확인 못 함 — 기존 경로로 진행"
+
+        space = approach_option.sol_space
+        if grasp_option.sol_space != space:
+            # 짝 탐색(`_resolve_ik_group`)이 8개 space를 전부 보고도 둘을 같은 space에서
+            # 풀지 못했다는 뜻이다. 이건 검사의 보수성이 아니라 실제 제약이다 — 하강
+            # 도중 configuration이 갈리면 그 movel은 성립하지 않는다.
+            return None, (f"접근(space {space})과 파지(space {grasp_option.sol_space})를 "
+                          "동시에 푸는 solution space가 8개 중 없다")
+
+        for name, start, end in (("접근→파지", approach_option.posx, grasp_option.posx),
+                                 ("파지→후퇴", grasp_option.posx, approach_option.posx)):
+            check = motion_feasibility.path_feasible(
+                start, end, ik_query, space, obstacle=obstacle,
+                max_joint_jump_deg=self._max_joint_jump_deg, strict=strict)
+            if not check.feasible:
+                return None, f"{name} 구간 실행 불가 — {check.reason}"
+
+        switch_posj = None
+        if space != self._current_sol_space:
+            # 다른 configuration에서만 되는 후보다. movel은 space를 못 바꾸므로 접근
+            # 자세의 관절해로 **관절 이동**해서 그 configuration으로 들어간 뒤 내려간다.
+            reason = self._config_switch_reason(approach_option, obstacle)
+            if reason:
+                return None, reason
+            switch_posj = list(approach_option.posj)
+
+        route, waypoints, reason = self._approach_route(
+            wrist_pose, approach_option, space, ik_query, obstacle, strict,
+            switching=switch_posj is not None)
+        if route is None:
+            return None, reason
+        return {"sol_space": space, "switch_posj": switch_posj,
+                "approach_posx": list(approach_option.posx),
+                "target_posx": list(grasp_option.posx),
+                "representation": approach_option.representation,
+                "route": route, "waypoints": waypoints}, ""
+
+    def _config_switch_reason(self, approach_option, obstacle) -> str:
+        """configuration 전환(movej)을 막아야 할 이유. 없으면 빈 문자열.
+
+        **관절 이동량으로 막지 않는다** (2026-09-10, place가 STEP 3에서 먼저 겪은 것).
+        각도 크기는 그 전환이 위험하다는 근거가 아니다 — solution space를 바꾸려면 팔·팔꿈치·
+        손목 중 하나가 크게 도는 것이 정상이고, 각도로 거르면 그 정상적인 전환까지 전부
+        막혀 후보가 사라진다. 실제로 지나는 지점의 FK를 찍어 **명백한 충돌만** 본다.
+        """
+        if not approach_option.posj:
+            # 현재 관절값이나 목표 관절값을 모른다 — 모르는 것을 위험하다고 하지 않는다.
+            return ""
+        if self._current_posj is None:
+            self.get_logger().info(
+                "현재 관절값을 몰라 configuration 전환 폭을 재지 못한다 — 막지 않고 진행한다")
+            return ""
+        check = motion_feasibility.config_switch_feasible(
+            self._current_posj, approach_option.posj,
+            lambda joint: dsr_motion.posx_via_fkin(self._fkin_client, joint),
+            obstacle=obstacle)
+        if not check.feasible:
+            return f"configuration 전환 경로가 명백한 충돌 — {check.reason}"
+        jump = motion_feasibility.joint_jump_deg(self._current_posj, approach_option.posj)
+        if jump is not None and jump > self._max_config_switch_jump_deg:
+            self.get_logger().info(
+                f"configuration 전환에 관절이 {jump:.0f}도 움직인다 "
+                f"(참고 한계 {self._max_config_switch_jump_deg:.0f}도) — 전환 경로에 "
+                "명백한 충돌은 없어 그대로 진행한다")
+        return ""
+
+    def _approach_route(self, wrist_pose, approach_option, space, ik_query, obstacle,
+                        strict: bool, switching: bool):
+        """"현재 → 접근" 구간의 경로. 직선이 되면 직선, 막히면 우회 경유점을 찾는다.
+
+        반환: `(경로 이름 또는 None, 경유점 목록, 사유)`. 경유점 목록은 접근점 자체를
+        포함하지 않는다 — 실행은 경유점을 지난 뒤 원래대로 접근점으로 이동한다.
+        """
+        if wrist_pose is None or switching:
+            # 손목 자세를 모르거나(fake) configuration을 바꿔 들어가는 경우다. 후자는
+            # 관절 이동이 시작점을 통째로 바꾸므로 여기서 직선 여부를 따질 의미가 없다.
+            return "direct", [], ""
+        transit_z = max(float(wrist_pose[2]),
+                        float(approach_option.posx[2])) + self._transit_clearance_mm
+        first_reason = ""
+        for name, waypoints in motion_feasibility.routes(
+                list(wrist_pose), list(approach_option.posx), transit_z):
+            start = list(wrist_pose)
+            blocked = ""
+            for waypoint in waypoints:
+                check = motion_feasibility.path_feasible(
+                    start, waypoint, ik_query, space, obstacle=obstacle,
+                    max_joint_jump_deg=self._max_joint_jump_deg, strict=strict)
+                if not check.feasible:
+                    blocked = check.reason
+                    if check.endpoint_failure and name == "direct":
+                        # 접근점 자체에 해가 없다는 뜻이면 우회로도 못 푼다.
+                        return None, [], f"현재→접근 구간 실행 불가 — {check.reason}"
+                    break
+                start = list(waypoint)
+            if not blocked:
+                return name, [list(w) for w in waypoints[:-1]], ""
+            first_reason = first_reason or blocked
+        return None, [], f"현재→접근 구간이 직선·우회 모두 불가 — {first_reason}"
 
     def _publish_selected(self, selected, trace_id: str, observation_id: str) -> None:
         """고른 후보를 발행한다. 못 골랐으면 빈 candidate_id로 발행해 이전 선택을 지운다 —
@@ -734,6 +1158,13 @@ class PickServer(Node):
         approach_axis = list(geometry.approach_axis)
         target_xyz = target_posx[:3]
         approach_posx = list(geometry.approach_posx)
+        # 모션 검사(STEP 2)가 다른 자세 표현으로만 IK가 풀린다고 판단했으면 **그 표현을
+        # 그대로 실행한다** — 검사한 것과 다른 좌표를 명령하면 IK를 통과시킨 근거가 사라진다.
+        plan = getattr(self, "_motion_plan", None) or {}
+        if plan.get("approach_posx"):
+            approach_posx = list(plan["approach_posx"])
+            target_posx = list(plan["target_posx"])
+            target_xyz = target_posx[:3]
         approach_xyz = approach_posx[:3]
 
         tilt_deg = math.degrees(math.acos(min(1.0, abs(approach_axis[2]))))
@@ -853,6 +1284,46 @@ class PickServer(Node):
         torque_trace = compliance.TorqueTrace()
 
         self._publish_phase(goal_handle, Pick.Feedback.PHASE_APPROACHING)
+        # 다른 solution space에서만 풀리는 후보다 — movel은 configuration을 못 바꾸므로
+        # 접근 자세의 관절해로 **관절 이동**해 그 configuration으로 들어간다(STEP 2).
+        # 이동량은 검사에서 이미 상한(max_config_switch_jump_deg) 안임을 확인했다.
+        if plan.get("switch_posj"):
+            self.get_logger().warning(
+                f"관절 이동으로 solution space {plan['sol_space']} 진입 "
+                f"(목표 관절 {[round(v, 1) for v in plan['switch_posj']]})")
+            if not dsr_motion.move_joint(self._movej_client, plan["switch_posj"],
+                                         goal_handle, self._joint_vel_deg_s,
+                                         self._joint_acc_deg_s2,
+                                         logger=self.get_logger()):
+                if goal_handle.is_cancel_requested:
+                    return None
+                raise RuntimeError("다른 solution space로 관절 이동 실패")
+        # 직선으로 가면 걸리는 것이 확인돼 우회 경유점이 잡힌 경우다 (2026-09-10).
+        # **후보를 버리는 대신 돌아간다** — 경유점은 검사에서 이미 IK·연속성·지지면을
+        # 통과한 지점들이고, 직선이 되는 평소에는 이 목록이 비어 있어 예전과 같다.
+        waypoint_pose = None
+        for index, waypoint in enumerate(plan.get("waypoints") or []):
+            previous = (list(plan["waypoints"][index - 1]) if index
+                        else (list(wrist_pose) if wrist_pose else None))
+            target = list(waypoint)
+            if (waypoint_pose is not None and previous is not None
+                    and list(waypoint)[3:6] == previous[3:6]):
+                # 회전이 그대로인 구간은 **실제로 도달한 회전값**을 쓴다 — 계산값을 이어
+                # 쓰면 ZYZ 표현 차이로 제자리 대신 대각선으로 보간된다(dsr_motion docstring).
+                target = next_target(list(waypoint)[:3], waypoint_pose)
+                if target is None:
+                    if goal_handle.is_cancel_requested:
+                        return None
+                    raise RuntimeError("현재 자세를 읽지 못했다")
+            self.get_logger().info(
+                f"접근 우회 경유점 {index + 1}/{len(plan['waypoints'])} "
+                f"({plan.get('route')}): ({target[0]:.1f}, {target[1]:.1f}, {target[2]:.1f})")
+            waypoint_ok, waypoint_pose = move(target)
+            if not waypoint_ok:
+                if goal_handle.is_cancel_requested:
+                    return None
+                raise RuntimeError("접근 우회 경유점으로 이동 실패")
+
         approach_ok, approach_pose = move(approach_posx)
         if not approach_ok:
             if goal_handle.is_cancel_requested:
