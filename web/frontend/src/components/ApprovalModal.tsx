@@ -29,6 +29,9 @@ export default function ApprovalModal({
   const [editingBinId, setEditingBinId] = useState<string | null>(null)
   const [draftBinId, setDraftBinId] = useState('')
   const [binOptions, setBinOptions] = useState<BinOption[]>([])
+  // 분류 자체가 틀려 아예 빼려는 물체 — 되돌릴 수 없는 동작이라(이 시퀀스에서는 다시
+  // 안 나온다) "제외" 클릭 한 번으로 바로 실행하지 않고 확인 한 단계를 더 둔다.
+  const [excludingId, setExcludingId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -64,6 +67,11 @@ export default function ApprovalModal({
     act(
       { action: 'correct_bin', object_id: editingBinId!, bin_id: draftBinId },
       () => setEditingBinId(null),
+    )
+  const excludeObject = (objectId: string) =>
+    act(
+      { action: 'exclude_object', object_id: objectId },
+      () => setExcludingId(null),
     )
 
   const act = async (body: Parameters<typeof submitApproval>[1], after: () => void) => {
@@ -122,10 +130,28 @@ export default function ApprovalModal({
                     <button disabled={busy} onClick={correctLabel}>수정 후 재계획</button>
                     <button disabled={busy} onClick={() => setEditingId(null)}>취소</button>
                   </div>
+                ) : excludingId === step.object_id ? (
+                  <div className="field">
+                    <span className="command-hint hint-error">
+                      이 물체를 시퀀스에서 뺄까요? (pick·place 둘 다 제외됩니다)
+                    </span>
+                    <button disabled={busy} onClick={() => excludeObject(step.object_id)}>
+                      제외 확인
+                    </button>
+                    <button disabled={busy} onClick={() => setExcludingId(null)}>취소</button>
+                  </div>
                 ) : (
-                  <button disabled={busy} onClick={() => startEdit(step.object_id)}>
-                    라벨 수정
-                  </button>
+                  <>
+                    <button disabled={busy} onClick={() => startEdit(step.object_id)}>
+                      라벨 수정
+                    </button>
+                    {/* 분류 자체가 틀렸을 때 — 라벨만 고치는 게 아니라 아예 안 건드리게 뺀다.
+                        pick·place_into 스텝이 각각 있어도 여기서 한 번 누르면 둘 다 빠진다
+                        (object_id로 묶어서 지운다 — _apply_exclusion 참조). */}
+                    <button disabled={busy} onClick={() => setExcludingId(step.object_id)}>
+                      제외
+                    </button>
+                  </>
                 )}
 
                 {/* 목적지 수정은 place_into 스텝에만 있다 — pick 스텝은 bin_id가 없다. */}

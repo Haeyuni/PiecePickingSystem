@@ -652,6 +652,28 @@ def _apply_bin_correction(trace: dict, message: dict) -> str:
     return ""
 
 
+def _apply_exclusion(trace: dict, message: dict) -> str:
+    """분류 자체가 틀린 물체를 시퀀스에서 아예 뺀다. 성공하면 빈 문자열, 실패하면 사유.
+
+    **라벨 수정과 다르다** — 라벨 수정은 "이름은 틀렸지만 이 물체를 다루는 건 맞다"고
+    볼 때 쓰고, 이건 "이 물체는 아예 건드리면 안 된다"고 볼 때 쓴다. 그래서 재계획하지
+    않고 시퀀스에서 그 object_id의 스텝을 전부 지운다 — pick만 지우면 place_into가
+    남아 놓을 물체가 없는 상태로 실행되므로, **pick과 place_into를 항상 같이 뺀다.**
+
+    다 빼서 스텝이 하나도 안 남아도 에러로 보지 않는다 — `_execute_steps`는 빈 목록을
+    "할 일 없음 = 성공"으로 다룬다(그 함수 docstring). 사람이 승인을 누르면 그대로
+    아무 것도 안 하고 끝난다.
+    """
+    object_id = message.get("object_id")
+    if not object_id:
+        return "object_id가 없습니다"
+    before = len(trace["steps"])
+    trace["steps"] = [s for s in trace["steps"] if s.get("object_id") != object_id]
+    if len(trace["steps"]) == before:
+        return f"object_id='{object_id}'의 스텝을 찾지 못했습니다"
+    return ""
+
+
 def _apply_label_correction(world_state: dict, message: dict) -> None:
     """라벨 수정 요청을 world_state에 그대로 반영한다. 이 world_state가 재계획의 입력이 된다."""
     object_id = message.get("object_id")
@@ -696,6 +718,16 @@ async def _await_approval(trace: dict, world_state: dict, command_text: str,
                 error = _apply_bin_correction(trace, message)
                 if error:
                     logger.warning("목적지 수정 실패 (trace=%s): %s", trace_id, error)
+                continue
+            if action == "exclude_object":
+                # 분류 자체가 틀린 물체를 시퀀스에서 뺀다 — 재계획도, allowed_classes
+                # 조정도 필요 없다(빼는 것이라 새 클래스가 들어올 일이 없다).
+                error = _apply_exclusion(trace, message)
+                if error:
+                    logger.warning("시퀀스 제외 실패 (trace=%s): %s", trace_id, error)
+                else:
+                    logger.info("시퀀스에서 제외 (trace=%s): object_id=%s",
+                               trace_id, message.get("object_id"))
                 continue
             if action != "correct_label":
                 logger.warning("알 수 없는 승인 액션 %r — 무시 (trace=%s)", action, trace_id)
