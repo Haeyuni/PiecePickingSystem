@@ -413,7 +413,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor, domain: 
                 return
 
         decision = await _await_approval(trace, world_state, command_text,
-                                         previous_failure, executor, domain)
+                                         previous_failure, executor, allowed_classes, domain)
         if decision is None:
             if trace["validation_status"] == "rejected":
                 # correct_label로 재계획했는데 이번엔 검증을 못 지났다 — 사용자 거부가
@@ -667,7 +667,8 @@ def _apply_label_correction(world_state: dict, message: dict) -> None:
 
 
 async def _await_approval(trace: dict, world_state: dict, command_text: str,
-                          previous_failure, executor, domain: str = "general") -> tuple[dict, list[dict]] | None:
+                          previous_failure, executor, allowed_classes: set,
+                          domain: str = "general") -> tuple[dict, list[dict]] | None:
     """계획된 시퀀스를 실행하기 전에 브라우저의 승인을 기다린다(명령 1건당 1회 원칙).
 
     라벨 수정(`correct_label`)이 오면 world_state를 고쳐 재계획하고, 그 결과를 다시
@@ -720,6 +721,15 @@ async def _await_approval(trace: dict, world_state: dict, command_text: str,
                 return None
             trace["steps"] = _build_steps(result.get("steps", []), world_state)
             trace["objects"] = world_state.get("objects", [])
+            # **allowed_classes도 같이 넓힌다 (2026-09-11 실물 발견).** 이걸 안 하면
+            # 사용자가 방금 고친 라벨이 최초 계획의 클래스 집합에 없다는 이유로
+            # `_run_command_body`가 승인 *직후* "재계획이 명령에 없던 물체를 대상으로
+            # 삼았다"로 오판해 멈춘다 — 사용자가 방금 그 라벨을 직접 확정했는데도다.
+            # object_id가 그대로이므로 클래스가 바뀐 게 아니라 **틀린 라벨이 맞게 바뀐
+            # 것**이다.
+            corrected = class_of(world_state, message.get("object_id"))
+            if corrected:
+                allowed_classes.add(corrected)
     finally:
         _pending_approvals.pop(trace_id, None)
 
