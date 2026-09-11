@@ -166,6 +166,16 @@ export type ApprovalAction =
   | { action: 'approve' }
   | { action: 'reject' }
   | { action: 'correct_label'; object_id: string; class_name?: string; name_ko?: string }
+  | { action: 'correct_bin'; object_id: string; bin_id: string }
+  // 분류 자체가 틀렸을 때 그 물체를 시퀀스에서 통째로 뺀다(pick+place_into 둘 다) —
+  // 라벨만 고치는 correct_label과 다르다: "이름이 틀렸다"가 아니라 "건드리면 안 된다".
+  | { action: 'exclude_object'; object_id: string }
+
+/** GET /api/bins 응답 하나 — 승인 화면의 목적지 수정 드롭다운이 쓴다. */
+export interface BinOption {
+  bin_id: string
+  name_ko: string
+}
 
 /** /ws/live 이벤트 (4절). 단일 채널이라 type으로 구분한다. */
 export type LiveEvent =

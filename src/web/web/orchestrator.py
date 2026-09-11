@@ -413,7 +413,7 @@ async def _run_command_body(trace_id: str, command_text: str, executor, domain: 
                 return
 
         decision = await _await_approval(trace, world_state, command_text,
-                                         previous_failure, executor, domain)
+                                         previous_failure, executor, allowed_classes, domain)
         if decision is None:
             if trace["validation_status"] == "rejected":
                 # correct_label로 재계획했는데 이번엔 검증을 못 지났다 — 사용자 거부가
@@ -631,6 +631,49 @@ async def _broadcast_approval_needed(trace: dict) -> None:
     })
 
 
+def _apply_bin_correction(trace: dict, message: dict) -> str:
+    """스텝의 목적지 bin을 바꾼다. 성공하면 빈 문자열, 실패하면 사유를 돌려준다.
+
+    **라벨 수정과 달리 재계획이 필요 없다.** bin_id는 world_state(관측)에 없는, 계획이
+    만든 값이라 planner를 다시 부를 이유가 없다 — 승인 화면에 보여줄 스텝을 그 자리에서
+    바로 고친다. `object_bottom_offset_mm`처럼 pick 스텝에서 넘어오는 값은 목적지와
+    무관하므로 같이 바꿀 것이 없다.
+    """
+    object_id = message.get("object_id")
+    bin_id = message.get("bin_id")
+    if not bins.is_valid(bin_id):
+        return f"'{bin_id}'는 설정된 목적지가 아닙니다"
+    step = next((s for s in trace["steps"]
+                if s.get("object_id") == object_id and s.get("skill") == "place_into"), None)
+    if step is None:
+        return f"object_id='{object_id}'의 place_into 스텝을 찾지 못했습니다"
+    step["bin_id"] = bin_id
+    step["bin_name_ko"] = bins.name_ko(bin_id)
+    return ""
+
+
+def _apply_exclusion(trace: dict, message: dict) -> str:
+    """분류 자체가 틀린 물체를 시퀀스에서 아예 뺀다. 성공하면 빈 문자열, 실패하면 사유.
+
+    **라벨 수정과 다르다** — 라벨 수정은 "이름은 틀렸지만 이 물체를 다루는 건 맞다"고
+    볼 때 쓰고, 이건 "이 물체는 아예 건드리면 안 된다"고 볼 때 쓴다. 그래서 재계획하지
+    않고 시퀀스에서 그 object_id의 스텝을 전부 지운다 — pick만 지우면 place_into가
+    남아 놓을 물체가 없는 상태로 실행되므로, **pick과 place_into를 항상 같이 뺀다.**
+
+    다 빼서 스텝이 하나도 안 남아도 에러로 보지 않는다 — `_execute_steps`는 빈 목록을
+    "할 일 없음 = 성공"으로 다룬다(그 함수 docstring). 사람이 승인을 누르면 그대로
+    아무 것도 안 하고 끝난다.
+    """
+    object_id = message.get("object_id")
+    if not object_id:
+        return "object_id가 없습니다"
+    before = len(trace["steps"])
+    trace["steps"] = [s for s in trace["steps"] if s.get("object_id") != object_id]
+    if len(trace["steps"]) == before:
+        return f"object_id='{object_id}'의 스텝을 찾지 못했습니다"
+    return ""
+
+
 def _apply_label_correction(world_state: dict, message: dict) -> None:
     """라벨 수정 요청을 world_state에 그대로 반영한다. 이 world_state가 재계획의 입력이 된다."""
     object_id = message.get("object_id")
@@ -646,7 +689,8 @@ def _apply_label_correction(world_state: dict, message: dict) -> None:
 
 
 async def _await_approval(trace: dict, world_state: dict, command_text: str,
-                          previous_failure, executor, domain: str = "general") -> tuple[dict, list[dict]] | None:
+                          previous_failure, executor, allowed_classes: set,
+                          domain: str = "general") -> tuple[dict, list[dict]] | None:
     """계획된 시퀀스를 실행하기 전에 브라우저의 승인을 기다린다(명령 1건당 1회 원칙).
 
     라벨 수정(`correct_label`)이 오면 world_state를 고쳐 재계획하고, 그 결과를 다시
@@ -668,12 +712,35 @@ async def _await_approval(trace: dict, world_state: dict, command_text: str,
                 return world_state, trace["steps"]
             if action == "reject":
                 return None
+            if action == "correct_bin":
+                # 목적지만 바꾸는 건 재계획이 필요 없다 — 그 자리에서 고치고 승인 화면을
+                # 다시 내보낸다(루프 맨 위 _broadcast_approval_needed).
+                error = _apply_bin_correction(trace, message)
+                if error:
+                    logger.warning("목적지 수정 실패 (trace=%s): %s", trace_id, error)
+                continue
+            if action == "exclude_object":
+                # 분류 자체가 틀린 물체를 시퀀스에서 뺀다 — 재계획도, allowed_classes
+                # 조정도 필요 없다(빼는 것이라 새 클래스가 들어올 일이 없다).
+                error = _apply_exclusion(trace, message)
+                if error:
+                    logger.warning("시퀀스 제외 실패 (trace=%s): %s", trace_id, error)
+                else:
+                    logger.info("시퀀스에서 제외 (trace=%s): object_id=%s",
+                               trace_id, message.get("object_id"))
+                continue
             if action != "correct_label":
                 logger.warning("알 수 없는 승인 액션 %r — 무시 (trace=%s)", action, trace_id)
                 continue
 
             _apply_label_correction(world_state, message)
-            result = await _plan_with_grasp_retry(
+            # **`_plan_with_grasp_retry`는 (result, world_state) 튜플을 돌려준다** (재시도가
+            # 새 관측으로 world_state를 바꿔 들고 나올 수 있어서다 — 그 함수 docstring 참조).
+            # 여기서 변수 하나로만 받으면 `result`가 튜플이 되어 바로 다음 줄의 `.get()`이
+            # AttributeError로 죽는다. run_command는 CancelledError만 잡으므로(모듈 상단
+            # docstring) 이 예외는 그대로 태스크를 죽이고 브라우저에는 아무 것도 안 간다 —
+            # "라벨 수정을 눌러도 반응이 없다"로 보이는 원인이었다(2026-09-11 발견).
+            result, world_state = await _plan_with_grasp_retry(
                 trace_id, command_text, world_state, previous_failure, executor,
                 domain=domain)
             trace["sequence_id"] = result.get("sequence_id")
@@ -686,6 +753,15 @@ async def _await_approval(trace: dict, world_state: dict, command_text: str,
                 return None
             trace["steps"] = _build_steps(result.get("steps", []), world_state)
             trace["objects"] = world_state.get("objects", [])
+            # **allowed_classes도 같이 넓힌다 (2026-09-11 실물 발견).** 이걸 안 하면
+            # 사용자가 방금 고친 라벨이 최초 계획의 클래스 집합에 없다는 이유로
+            # `_run_command_body`가 승인 *직후* "재계획이 명령에 없던 물체를 대상으로
+            # 삼았다"로 오판해 멈춘다 — 사용자가 방금 그 라벨을 직접 확정했는데도다.
+            # object_id가 그대로이므로 클래스가 바뀐 게 아니라 **틀린 라벨이 맞게 바뀐
+            # 것**이다.
+            corrected = class_of(world_state, message.get("object_id"))
+            if corrected:
+                allowed_classes.add(corrected)
     finally:
         _pending_approvals.pop(trace_id, None)
 

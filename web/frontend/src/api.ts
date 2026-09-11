@@ -1,7 +1,7 @@
 /** web 백엔드 호출 (웹_인터페이스_정의서.md 2절). */
 import type {
-  AnnotationPolygon, ApprovalAction, DatasetImage, Domain, ExecutionLog, GraspAttempt, Trace,
-  WorldState,
+  AnnotationPolygon, ApprovalAction, BinOption, DatasetImage, Domain, ExecutionLog, GraspAttempt,
+  Trace, WorldState,
 } from './types'
 
 export interface ApiError {
@@ -81,6 +81,10 @@ export function getHealth() {
 
 export function getWorldState() {
   return request<WorldState>('/api/world-state')
+}
+
+export function getBins() {
+  return request<{ bins: BinOption[] }>('/api/bins')
 }
 
 export function submitApproval(traceId: string, body: ApprovalAction) {

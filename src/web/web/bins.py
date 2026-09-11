@@ -36,3 +36,14 @@ def name_ko(bin_id: str | None) -> str | None:
     if not bin_id:
         return None
     return _bin_names().get(bin_id)
+
+
+def all_bins() -> list[dict]:
+    """설정에 있는 모든 bin을 `[{bin_id, name_ko}]`로. 승인 화면의 목적지 수정 드롭다운이 쓴다."""
+    return [{"bin_id": bin_id, "name_ko": name}
+            for bin_id, name in _bin_names().items()]
+
+
+def is_valid(bin_id: str | None) -> bool:
+    """`bin_id`가 설정에 실제로 있는 값인가. 승인 화면에서 임의 문자열로 바꾸는 것을 막는다."""
+    return bool(bin_id) and bin_id in _bin_names()

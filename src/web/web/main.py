@@ -14,8 +14,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import executor as executor_mod
 from .events import hub
-from .routers import (approvals, camera, commands, datasets, executions, grasp_attempts, live,
-                     robot, stt, traces, voice, world)
+from .routers import (approvals, bins as bins_router, camera, commands, datasets, executions,
+                     grasp_attempts, live, robot, stt, traces, voice, world)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -45,6 +45,7 @@ app = FastAPI(title="piece-picking-system web", lifespan=lifespan)
 
 app.include_router(commands.router)
 app.include_router(approvals.router)
+app.include_router(bins_router.router)
 app.include_router(stt.router)
 app.include_router(datasets.router)
 app.include_router(grasp_attempts.router)

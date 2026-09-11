@@ -5,10 +5,10 @@
  * 닫히지 않고 다음 execution_approval_needed 이벤트로 내용만 갱신된다(ControlPage가
  * 이벤트를 그대로 다시 넘겨준다).
  */
-import { useState } from 'react'
-import { submitApproval } from '../api'
+import { useEffect, useState } from 'react'
+import { getBins, submitApproval } from '../api'
 import type { ApiError } from '../api'
-import type { ApprovalNeededEvent, GripLevel } from '../types'
+import type { ApprovalNeededEvent, BinOption, GripLevel } from '../types'
 
 const SKILL_LABEL: Record<string, string> = { pick: 'Pick', place_into: 'Place into' }
 const GRIP_LEVEL_LABEL: Record<GripLevel, string> = {
@@ -24,10 +24,25 @@ export default function ApprovalModal({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [draftClassName, setDraftClassName] = useState('')
   const [draftNameKo, setDraftNameKo] = useState('')
+  // 목적지(bin) 수정 — 라벨 수정과 별개 편집 상태다. 둘을 동시에 열 이유가 없어
+  // editingBinId만 따로 둔다(라벨 편집은 재계획을 부르고, 이건 그 자리에서 바로 바뀐다).
+  const [editingBinId, setEditingBinId] = useState<string | null>(null)
+  const [draftBinId, setDraftBinId] = useState('')
+  const [binOptions, setBinOptions] = useState<BinOption[]>([])
+  // 분류 자체가 틀려 아예 빼려는 물체 — 되돌릴 수 없는 동작이라(이 시퀀스에서는 다시
+  // 안 나온다) "제외" 클릭 한 번으로 바로 실행하지 않고 확인 한 단계를 더 둔다.
+  const [excludingId, setExcludingId] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const objectsById = new Map(event.objects.map((o) => [o.object_id, o]))
+
+  useEffect(() => {
+    // 목적지 목록은 명령마다 바뀌지 않으므로(bins.yaml, 캘리브레이션 때만 바뀐다) 모달이
+    // 뜰 때 한 번만 받는다. 못 받아도 조용히 빈 목록으로 둔다 — "라벨 수정"은 그대로 동작
+    // 해야 하고, 목적지 수정 버튼만 못 쓰게 하면 된다.
+    getBins().then((res) => setBinOptions(res.bins)).catch(() => setBinOptions([]))
+  }, [])
 
   const startEdit = (objectId: string) => {
     const obj = objectsById.get(objectId)
@@ -36,12 +51,27 @@ export default function ApprovalModal({
     setDraftNameKo(obj?.name_ko ?? '')
   }
 
+  const startEditBin = (objectId: string, currentBinId: string) => {
+    setEditingBinId(objectId)
+    setDraftBinId(currentBinId)
+  }
+
   const approve = () => act({ action: 'approve' }, onResolved)
   const reject = () => act({ action: 'reject' }, onResolved)
   const correctLabel = () =>
     act(
       { action: 'correct_label', object_id: editingId!, class_name: draftClassName, name_ko: draftNameKo },
       () => setEditingId(null),
+    )
+  const correctBin = () =>
+    act(
+      { action: 'correct_bin', object_id: editingBinId!, bin_id: draftBinId },
+      () => setEditingBinId(null),
+    )
+  const excludeObject = (objectId: string) =>
+    act(
+      { action: 'exclude_object', object_id: objectId },
+      () => setExcludingId(null),
     )
 
   const act = async (body: Parameters<typeof submitApproval>[1], after: () => void) => {
@@ -81,7 +111,7 @@ export default function ApprovalModal({
                 <div>
                   <strong>{SKILL_LABEL[step.skill] ?? step.skill}</strong>{' '}
                   {obj?.name_ko || step.object_id}
-                  {step.bin_id && ` → ${step.bin_id}`}
+                  {step.bin_id && ` → ${step.bin_name_ko ?? step.bin_id}`}
                   {obj && (
                     <span className={`badge badge-g${obj.grip_level}`} style={{ marginLeft: 6 }}>
                       {GRIP_LEVEL_LABEL[obj.grip_level] ?? `g${obj.grip_level}`}
@@ -100,10 +130,56 @@ export default function ApprovalModal({
                     <button disabled={busy} onClick={correctLabel}>수정 후 재계획</button>
                     <button disabled={busy} onClick={() => setEditingId(null)}>취소</button>
                   </div>
+                ) : excludingId === step.object_id ? (
+                  <div className="field">
+                    <span className="command-hint hint-error">
+                      이 물체를 시퀀스에서 뺄까요? (pick·place 둘 다 제외됩니다)
+                    </span>
+                    <button disabled={busy} onClick={() => excludeObject(step.object_id)}>
+                      제외 확인
+                    </button>
+                    <button disabled={busy} onClick={() => setExcludingId(null)}>취소</button>
+                  </div>
                 ) : (
-                  <button disabled={busy} onClick={() => startEdit(step.object_id)}>
-                    라벨 수정
-                  </button>
+                  <>
+                    <button disabled={busy} onClick={() => startEdit(step.object_id)}>
+                      라벨 수정
+                    </button>
+                    {/* 분류 자체가 틀렸을 때 — 라벨만 고치는 게 아니라 아예 안 건드리게 뺀다.
+                        pick·place_into 스텝이 각각 있어도 여기서 한 번 누르면 둘 다 빠진다
+                        (object_id로 묶어서 지운다 — _apply_exclusion 참조). */}
+                    <button disabled={busy} onClick={() => setExcludingId(step.object_id)}>
+                      제외
+                    </button>
+                  </>
+                )}
+
+                {/* 목적지 수정은 place_into 스텝에만 있다 — pick 스텝은 bin_id가 없다. */}
+                {step.skill === 'place_into' && (
+                  editingBinId === step.object_id ? (
+                    <div className="field">
+                      <select value={draftBinId} disabled={busy}
+                              onChange={(e) => setDraftBinId(e.target.value)}>
+                        {binOptions.length === 0 && step.bin_id && (
+                          <option value={step.bin_id}>{step.bin_id}</option>
+                        )}
+                        {binOptions.map((b) => (
+                          <option key={b.bin_id} value={b.bin_id}>
+                            {b.name_ko || b.bin_id}
+                          </option>
+                        ))}
+                      </select>
+                      <button disabled={busy || !draftBinId} onClick={correctBin}>
+                        목적지 변경
+                      </button>
+                      <button disabled={busy} onClick={() => setEditingBinId(null)}>취소</button>
+                    </div>
+                  ) : (
+                    <button disabled={busy || binOptions.length === 0}
+                            onClick={() => startEditBin(step.object_id, step.bin_id ?? '')}>
+                      목적지 수정
+                    </button>
+                  )
                 )}
               </div>
             )

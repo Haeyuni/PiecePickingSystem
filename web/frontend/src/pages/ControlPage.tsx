@@ -108,6 +108,14 @@ export default function ControlPage() {
 
       case 'execution_result':
         void refreshTrace(event.trace_id)
+        // **명령이 이 결과로 끝났다는 뜻이다 — 승인 모달이 열려 있으면 반드시 닫는다**
+        // (2026-09-11 실물 발견). 라벨 수정 뒤 승인을 누른 순간 서버가 다른 이유로
+        // (예: 재계획이 범위를 벗어났다는 뒤늦은 판정) 실행을 그대로 끝내버리면, 그
+        // trace는 이제 승인 대기가 아닌데 모달은 이 이벤트를 안 봤으니 계속 떠 있었다 —
+        // 그 뒤 "승인"을 다시 눌러도 서버는 "대기 상태가 아닙니다"만 돌려준다. 모달이
+        // 다루는 trace가 방금 끝난 그 trace일 때만 닫는다(다른 trace의 결과로 엉뚱하게
+        // 닫히지 않게).
+        setApproval((prev) => (prev && prev.trace_id === event.trace_id ? null : prev))
         break
 
       case 'execution_approval_needed':
