@@ -166,6 +166,13 @@ export type ApprovalAction =
   | { action: 'approve' }
   | { action: 'reject' }
   | { action: 'correct_label'; object_id: string; class_name?: string; name_ko?: string }
+  | { action: 'correct_bin'; object_id: string; bin_id: string }
+
+/** GET /api/bins 응답 하나 — 승인 화면의 목적지 수정 드롭다운이 쓴다. */
+export interface BinOption {
+  bin_id: string
+  name_ko: string
+}
 
 /** /ws/live 이벤트 (4절). 단일 채널이라 type으로 구분한다. */
 export type LiveEvent =

@@ -631,6 +631,27 @@ async def _broadcast_approval_needed(trace: dict) -> None:
     })
 
 
+def _apply_bin_correction(trace: dict, message: dict) -> str:
+    """스텝의 목적지 bin을 바꾼다. 성공하면 빈 문자열, 실패하면 사유를 돌려준다.
+
+    **라벨 수정과 달리 재계획이 필요 없다.** bin_id는 world_state(관측)에 없는, 계획이
+    만든 값이라 planner를 다시 부를 이유가 없다 — 승인 화면에 보여줄 스텝을 그 자리에서
+    바로 고친다. `object_bottom_offset_mm`처럼 pick 스텝에서 넘어오는 값은 목적지와
+    무관하므로 같이 바꿀 것이 없다.
+    """
+    object_id = message.get("object_id")
+    bin_id = message.get("bin_id")
+    if not bins.is_valid(bin_id):
+        return f"'{bin_id}'는 설정된 목적지가 아닙니다"
+    step = next((s for s in trace["steps"]
+                if s.get("object_id") == object_id and s.get("skill") == "place_into"), None)
+    if step is None:
+        return f"object_id='{object_id}'의 place_into 스텝을 찾지 못했습니다"
+    step["bin_id"] = bin_id
+    step["bin_name_ko"] = bins.name_ko(bin_id)
+    return ""
+
+
 def _apply_label_correction(world_state: dict, message: dict) -> None:
     """라벨 수정 요청을 world_state에 그대로 반영한다. 이 world_state가 재계획의 입력이 된다."""
     object_id = message.get("object_id")
@@ -668,12 +689,25 @@ async def _await_approval(trace: dict, world_state: dict, command_text: str,
                 return world_state, trace["steps"]
             if action == "reject":
                 return None
+            if action == "correct_bin":
+                # 목적지만 바꾸는 건 재계획이 필요 없다 — 그 자리에서 고치고 승인 화면을
+                # 다시 내보낸다(루프 맨 위 _broadcast_approval_needed).
+                error = _apply_bin_correction(trace, message)
+                if error:
+                    logger.warning("목적지 수정 실패 (trace=%s): %s", trace_id, error)
+                continue
             if action != "correct_label":
                 logger.warning("알 수 없는 승인 액션 %r — 무시 (trace=%s)", action, trace_id)
                 continue
 
             _apply_label_correction(world_state, message)
-            result = await _plan_with_grasp_retry(
+            # **`_plan_with_grasp_retry`는 (result, world_state) 튜플을 돌려준다** (재시도가
+            # 새 관측으로 world_state를 바꿔 들고 나올 수 있어서다 — 그 함수 docstring 참조).
+            # 여기서 변수 하나로만 받으면 `result`가 튜플이 되어 바로 다음 줄의 `.get()`이
+            # AttributeError로 죽는다. run_command는 CancelledError만 잡으므로(모듈 상단
+            # docstring) 이 예외는 그대로 태스크를 죽이고 브라우저에는 아무 것도 안 간다 —
+            # "라벨 수정을 눌러도 반응이 없다"로 보이는 원인이었다(2026-09-11 발견).
+            result, world_state = await _plan_with_grasp_retry(
                 trace_id, command_text, world_state, previous_failure, executor,
                 domain=domain)
             trace["sequence_id"] = result.get("sequence_id")

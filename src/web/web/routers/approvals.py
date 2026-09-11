@@ -15,15 +15,16 @@ router = APIRouter()
 
 class ApprovalRequest(BaseModel):
     schema_version: str = "1.0.0"
-    action: str          # "approve" | "reject" | "correct_label"
+    action: str          # "approve" | "reject" | "correct_label" | "correct_bin"
     object_id: str | None = None
     class_name: str | None = None
     name_ko: str | None = None
+    bin_id: str | None = None   # correct_bin일 때만
 
 
 @router.post("/api/executions/{trace_id}/approval")
 def submit_approval(trace_id: str, body: ApprovalRequest):
-    if body.action not in ("approve", "reject", "correct_label"):
+    if body.action not in ("approve", "reject", "correct_label", "correct_bin"):
         return JSONResponse(
             status_code=400,
             content={"schema_version": "1.0.0",
@@ -36,6 +37,13 @@ def submit_approval(trace_id: str, body: ApprovalRequest):
             content={"schema_version": "1.0.0",
                      "error": {"code": "MISSING_OBJECT_ID",
                                "message": "correct_label은 object_id가 필요합니다"}},
+        )
+    if body.action == "correct_bin" and not (body.object_id and body.bin_id):
+        return JSONResponse(
+            status_code=400,
+            content={"schema_version": "1.0.0",
+                     "error": {"code": "MISSING_BIN_ID",
+                               "message": "correct_bin은 object_id와 bin_id가 필요합니다"}},
         )
 
     ok = orchestrator.resolve_approval(trace_id, body.model_dump())
