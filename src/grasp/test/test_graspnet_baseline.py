@@ -381,3 +381,81 @@ def test_rejected_candidates_are_backfilled_from_the_next_ones():
     assert len(picked) == 5
     assert diagnostics['refine_valid'] == 5
     assert diagnostics['examined_count'] >= 5
+
+
+def test_locally_underestimated_width_is_still_rejected_by_full_extent():
+    """손가락 창(국소)이 실제보다 좁게 잰 개폭도 **물체 전체 폭**으로 다시 걸린다.
+
+    2026-09-11 실물(얇은 약상자) — depth가 성기거나 반사되는 얇은 물체는 손가락 창
+    (그리퍼 중심선 근처, ±_PAD_HALF_MM 띠) 바로 그 자리의 가장자리 점이 비어 있을 수
+    있다. 그러면 창 안 백분위수로 잰 개폭(chosen_width_mm)이 실제보다 좁게 나와
+    그리퍼 한계 안으로 들어온 것처럼 보이지만, 물체는 실제로 그보다 넓다 — 실물에서
+    손을 못 닫는다. 창을 벗어난 자리(먼 모서리)에는 점이 남아 있어 전체 클라우드
+    기준 closing_extent_mm은 이 사실을 놓치지 않는다.
+    """
+    # 190 x 92mm 판. closing축(X) 중심선 근처(|y|<12, 손가락 창)에서만 x>40 쪽 점을
+    # 지워 "창 바로 그 자리의 가장자리가 비어 있다"를 흉내낸다 — 창 밖(|y|>=12)의 먼
+    # 모서리는 그대로 남아 있어 전체 폭은 190mm 그대로다.
+    points = _pack_cloud()
+    # 이 T_graspnet_tcp x rotation 조합에서 closing축은 global X(190mm), other축은
+    # global Y(92mm)다 — test_all_geometry_rejected_falls_back_to_pca와 같은 매핑.
+    strip = (np.abs(points[:, 1]) < 12.0) & (np.abs(points[:, 0]) > 40.0)
+    points = points[~strip]
+
+    T_graspnet_tcp = np.array([[0.0, 0.0, 1.0, 0.0],
+                               [1.0, 0.0, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, 0.0],
+                               [0.0, 0.0, 0.0, 1.0]])
+    rotation = np.column_stack([(0.0, 0.0, -1.0), (1.0, 0.0, 0.0), (0.0, -1.0, 0.0)])
+    picked, diagnostics = graspnet_baseline._select_candidates(
+        [_raw(rotation, [0.0, 0.0, 0.040])], np.eye(4), T_graspnet_tcp, 75.0,
+        points_base=points, max_opening_mm=110.0)
+
+    assert picked == [], (
+        "창 안 국소 측정만으로는 통과했겠지만, 물체 전체 폭(190mm)이 그리퍼 한계를 "
+        "넘으므로 걸러야 한다")
+    assert diagnostics['geometry_rejects'].get('width_invalid') == 1
+
+
+def test_all_geometry_rejected_falls_back_to_pca(monkeypatch):
+    """GraspNet 후보가 전부 기하 검사에서 걸리면(얇고 넓은 물체) heuristic_pca로 떨어진다.
+
+    2026-09-11 실물(약상자) — 긴 축을 가로지르는 후보는 GEOMETRY_WIDTH_INVALID로,
+    짧은 축/옆면 후보는 재료 부족(GEOMETRY_NO_MATERIAL)으로 둘 다 걸리면 GraspNet
+    쪽에서는 후보가 하나도 안 남는다. 이 안전망이 없으면 no_feasible_grasp로 끝나
+    로봇이 아예 움직이지 않는다. **후보가 있을 때는 여전히 쓰지 않는다**
+    (test_missing_endpoint_is_not_replaced_by_pca와 대비).
+    """
+    points = _pack_cloud(half_x=95.0, half_y=46.0, thickness=15.0)
+    # closing=+X(폭 190mm, 그리퍼 한계 110mm 초과) 하나만 GraspNet이 낸다 — 기울기는
+    # 통과하되(접근 -Z) 되잡기의 GEOMETRY_WIDTH_INVALID로 반드시 떨어지는 자세다.
+    rotation = np.column_stack([(1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, -1.0)])
+    raw = [{'score': 0.8, 'width_m': 0.04, 'depth_m': 0.0,
+           'rotation_matrix': rotation.tolist(), 'translation_m': [0.0, 0.0, 0.04]}]
+
+    monkeypatch.setattr(graspnet_baseline, '_infer_via_endpoint', lambda *a, **k: raw)
+    candidates = graspnet_baseline.plan(
+        points,
+        {'endpoint': 'http://localhost:8200',
+         'T_graspnet_tcp_mm': np.eye(4).tolist(),
+         'max_opening_mm': 110.0, 'min_points': 30},
+        context={'points_cam_mm': np.ones((80, 3)), 'T_base_camera_mm': np.eye(4)})
+
+    assert candidates, "안전망이 없으면 no_feasible_grasp로 끝난다"
+    assert all(c['strategy'] == 'heuristic_pca' for c in candidates)
+    # PCA가 짧은 축(92mm)을 가로지르는 후보를 1순위로 냈어야 한다 — 그리퍼 한계 안이다.
+    assert candidates[0]['width_mm'] < 110.0
+
+
+def test_pca_fallback_never_used_when_graspnet_has_a_valid_candidate():
+    """GraspNet 후보가 하나라도 살아 있으면 PCA로 떨어지지 않는다."""
+    points = _pack_cloud()
+    T_graspnet_tcp = np.array([[0.0, 0.0, 1.0, 0.0],
+                               [1.0, 0.0, 0.0, 0.0],
+                               [0.0, 1.0, 0.0, 0.0],
+                               [0.0, 0.0, 0.0, 1.0]])
+    rotation = np.column_stack([(0.0, 0.0, -1.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0)])
+    picked, _ = graspnet_baseline._select_candidates(
+        [_raw(rotation, [0.0, 0.0, 0.040])], np.eye(4), T_graspnet_tcp, 75.0,
+        points_base=points, max_opening_mm=100.0)
+    assert picked and picked[0]['strategy'] == 'graspnet_baseline'

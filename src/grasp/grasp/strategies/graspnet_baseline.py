@@ -20,6 +20,7 @@ import urllib.parse
 import urllib.request
 import numpy as np
 
+from . import heuristic_pca
 from .exceptions import InferenceBusy
 
 
@@ -491,6 +492,19 @@ def _select_candidates(raw_candidates: list, T_base_camera_mm: np.ndarray,
             T_best[:3, 3] = position
         # raw든 되잡은 값이든 최종 개폭이 그리퍼 한계를 벗어나면 버린다 — GEOMETRY_WIDTH_INVALID
         # 주석 참조. raw만 걸러진 채 되잡기가 다시 넘긴 경우가 실물에서 나왔다.
+        #
+        # **되잡은 개폭(chosen_width_mm)만으로는 부족하다 (2026-09-11 실물 — 얇은 약상자).**
+        # chosen_width_mm은 손가락 창(±_PAD_HALF_MM)으로 국소적으로 잰 값이라, 물체 가장자리의
+        # depth가 성기거나(얇고 반사되는 포장) 비어 있으면 실제보다 좁게 측정된다. 그러면 진짜
+        # 폭이 그리퍼보다 넓은 후보가 여기를 통과해 나갔다가 실물에서 손을 못 닫는다.
+        # closing_extent_mm은 창으로 자르지 않은 **전체 클라우드**의 같은 축 2~98 백분위수라
+        # (위 diag 계산, 진단으로만 남기던 값) 국소 측정보다 항상 넓거나 같다 — 그 값도
+        # 넘으면 확실히 못 닫는다는 뜻이므로 여기서도 하드 리젝트한다.
+        closing_extent_mm = refine_diag.get("closing_extent_mm")
+        if closing_extent_mm is not None and float(closing_extent_mm) > max_opening_mm:
+            geometry_rejects[GEOMETRY_WIDTH_INVALID] = (
+                geometry_rejects.get(GEOMETRY_WIDTH_INVALID, 0) + 1)
+            continue
         if not (min_width_mm <= chosen_width_mm <= max_opening_mm):
             geometry_rejects[GEOMETRY_WIDTH_INVALID] = (
                 geometry_rejects.get(GEOMETRY_WIDTH_INVALID, 0) + 1)
@@ -659,6 +673,27 @@ def plan(points_base: np.ndarray, params: dict, context: dict | None = None) -> 
         int(params.get("min_grip_material_points", _MIN_GRIP_POINTS)),
         float(params.get("min_width_mm", 5.0)),
         float(params.get("max_opening_mm", 110.0)))
+    if not candidates and points_base is not None and len(points_base) >= int(
+            params.get("min_points", 80)):
+        # **GraspNet이 하나도 못 낸 경우의 안전망** (2026-09-11, 얇고 긴 물체 — 약상자).
+        # 이 물체들은 GraspNet 후보가 둘로 갈린다: 긴 축을 가로지르는 것(폭이 그리퍼를
+        # 넘어 GEOMETRY_WIDTH_INVALID)과 짧은 축/옆면을 가로지르는 것(두께가 얇아 손가락
+        # 창에 재료가 모자라 GEOMETRY_NO_MATERIAL). 둘 다 걸리면 후보가 통째로 사라진다.
+        #
+        # heuristic_pca는 바로 그 짧은 축을 겨냥해서 만들어진 전략이다(그 모듈 docstring:
+        # "긴 축을 가로질러 잡으면 벌어지는 폭이 그리퍼 개폭을 넘기 쉽다") — 20점 안팎의
+        # 국소 창이 아니라 물체 전체의 PCA 주축을 보므로, 국소 depth가 성긴 얇은 물체에서도
+        # 후보를 낼 수 있다. **여기서는 판정을 새로 만들지 않고 그 전략을 그대로 호출해
+        # 재사용한다** — GraspNet의 학습된 접근각 대신 PCA의 기하 각도를 안전망으로 쓰는
+        # 것이지, GraspNet 후보가 있을 때 이걸로 대체하지는 않는다.
+        fallback = heuristic_pca.plan(points_base, params, context)
+        if fallback:
+            # plan()의 반환 계약은 리스트 하나다(튜플 아님) — node.py는 candidates[0]["debug"]
+            # 에서 진단을 꺼낸다(위 entry["debug"] = diagnostics와 같은 자리).
+            diagnostics["fallback_strategy"] = heuristic_pca.STRATEGY
+            diagnostics["fallback_count"] = len(fallback)
+            fallback[0] = {**fallback[0], "debug": diagnostics}
+            return fallback
     if not candidates:
         # 추론은 됐는데 hard 상한 안에 드는 후보가 없다. 빈 리스트로 돌려주면 node가
         # "후보 없음"으로 발행하고 planner는 파지 불가로 읽는데, **왜** 걸러졌는지가
