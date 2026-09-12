@@ -12,6 +12,8 @@
 - **주요 기술 스택**: ROS 2, FastAPI + rclpy 브리지, React (Vite/TypeScript), PostgreSQL 16, OpenAI API (LLM/VLM), YOLO11-seg · SAM2, GraspNet-baseline
 - **기간**: 2026.09.01 ~ 2026.09.11
 
+https://github.com/user-attachments/assets/37fb3730-0598-4a35-b7a1-f8b405f3088d
+
 ## 1. 시스템 설계
 
 ![시스템 아키텍처](https://raw.githubusercontent.com/Haeyuni/PiecePickingSystem/main/docs/diagrams/system_architecture.png?v=5)
